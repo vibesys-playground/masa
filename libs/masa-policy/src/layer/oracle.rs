@@ -1,40 +1,29 @@
 // Oracle layer — perfect-information child priority assignment.
 //
-// Active only with `sched_oracle`. The layer consumes synthetic-provided
+// Included in the default stack only with `sched_oracle`. The layer consumes synthetic-provided
 // metadata describing the child RPC's wall-clock work and the remaining
 // wall-clock work after that child returns. It then converts that information
 // into a child completion deadline and priority hint.
 
-use masa_core::Context;
-#[cfg(feature = "sched_oracle")]
-use masa_core::{PriorityHint, ORACLE_CHILD_WORK_US_HEADER, ORACLE_REMAINING_AFTER_US_HEADER};
-use tonic::CowGrpcMethod;
-#[cfg(feature = "sched_oracle")]
-use tonic::{Request, Status};
+use masa_core::{
+    Context, PriorityHint, ORACLE_CHILD_WORK_US_HEADER, ORACLE_REMAINING_AFTER_US_HEADER,
+};
+use tonic::{CowGrpcMethod, Request, Status};
 
-#[cfg(feature = "sched_oracle")]
-use super::ChildRpcContext;
-use super::{Layer, LayerChild, LayerServer};
+use super::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit};
 
-#[cfg(feature = "sched_oracle")]
 #[derive(Debug)]
-pub(crate) struct OracleServer;
+pub struct OracleServer;
 
-#[cfg(feature = "sched_oracle")]
-impl OracleServer {
-    pub(crate) fn new() -> Self {
+impl LayerServer for OracleServer {
+    fn new(_init: &mut ServerInit) -> Self {
         Self
     }
 }
 
-#[cfg(feature = "sched_oracle")]
-impl LayerServer for OracleServer {}
-
-#[cfg(feature = "sched_oracle")]
 #[derive(Debug)]
-pub(crate) struct OracleLayer;
+pub struct OracleLayer;
 
-#[cfg(feature = "sched_oracle")]
 impl Layer for OracleLayer {
     type Server = OracleServer;
     type Child = OracleChild;
@@ -62,25 +51,21 @@ impl Layer for OracleLayer {
     }
 }
 
-#[cfg(feature = "sched_oracle")]
 #[derive(Debug, Clone)]
-pub(crate) struct OracleChild;
+pub struct OracleChild;
 
-#[cfg(feature = "sched_oracle")]
 impl LayerChild for OracleChild {
     fn new() -> Self {
         Self
     }
 }
 
-#[cfg(feature = "sched_oracle")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OracleHint {
     child_work_us: u64,
     remaining_after_us: u64,
 }
 
-#[cfg(feature = "sched_oracle")]
 impl OracleHint {
     fn from_request<T>(request: &Request<T>, child_method: &CowGrpcMethod) -> Result<Self, Status> {
         let metadata = request.metadata();
@@ -95,7 +80,6 @@ impl OracleHint {
     }
 }
 
-#[cfg(feature = "sched_oracle")]
 fn read_u64_header(
     metadata: &tonic::metadata::MetadataMap,
     key: &'static str,
@@ -130,43 +114,4 @@ fn read_u64_header(
             e
         ))
     })
-}
-
-#[cfg(not(feature = "sched_oracle"))]
-#[derive(Debug)]
-pub(crate) struct OracleServer;
-
-#[cfg(not(feature = "sched_oracle"))]
-impl OracleServer {
-    pub(crate) fn new() -> Self {
-        Self
-    }
-}
-
-#[cfg(not(feature = "sched_oracle"))]
-impl LayerServer for OracleServer {}
-
-#[cfg(not(feature = "sched_oracle"))]
-#[derive(Debug)]
-pub(crate) struct OracleLayer;
-
-#[cfg(not(feature = "sched_oracle"))]
-impl Layer for OracleLayer {
-    type Server = OracleServer;
-    type Child = OracleChild;
-
-    fn new(_method: &CowGrpcMethod, _server: &OracleServer, _ctx: &mut Context) -> Self {
-        Self
-    }
-}
-
-#[cfg(not(feature = "sched_oracle"))]
-#[derive(Debug, Clone)]
-pub(crate) struct OracleChild;
-
-#[cfg(not(feature = "sched_oracle"))]
-impl LayerChild for OracleChild {
-    fn new() -> Self {
-        Self
-    }
 }

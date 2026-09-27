@@ -103,12 +103,15 @@ Key policy flags:
 Application-facing Masa API and core types:
 - `libs/masa-core`: `Context`/`ContextBuilder`, `PriorityHint`, `Prioritize`, and latency distribution utilities
 - `libs/masa`: `DefaultHooks` selection by feature flag, context creation helpers, load-balanced transport, and policy-facing reexports from `masa-policy`
-- `DefaultHooks`: `tonic::masa::noop::NoopHooks` with no scheduling features; `masa_policy::PolicyHooks` when scheduling features are enabled
+- `DefaultHooks`: `tonic::masa::noop::NoopHooks` with no scheduling features; `masa_policy::PolicyHooks` (= `PolicyHooks<MasaStack>`) when scheduling features are enabled
 
 ### libs/masa-policy/
 Concrete policy hook implementation and metadata helpers:
-- `hooks.rs`: `PolicyHooks` — unified hook implementation that dispatches the active layer stack in field order
-- `layer/`: Composable layer system — `e2e_deadline_guard.rs`, `queue_latency.rs`, `est/` (estimation), `admission/` (predictive + rajomon)
+- `hooks.rs`: `PolicyHooks<S>` — unified hook implementation; owns context plumbing and dispatches every hook through the module stack `S`
+- `layer/mod.rs`: Public policy module API — `Layer`, `LayerServer`, `LayerChild`, `ChildRpcContext`, `ServerInit`, `Stack`, `policy_stack!`
+- `masa_stack.rs`: `MasaStack`, the only place where features choose modules (disabled slots are `()`)
+- `layer/`: Built-in modules — `e2e_deadline_guard.rs`, `oracle.rs`, `queue_latency.rs`, `est/` (estimation), `admission/` (predictive + rajomon)
+- To add a policy, write a new module implementing `Layer` and compose a stack; do not add branches to `hooks.rs`. See `docs/POLICY_MODULES.md`
 - `context_ext.rs`: Context serialization helpers and `MasaRequestExt`/`MasaResponseExt`/`MasaStatusExt`
 - Depends on `tonic` for hook traits and gRPC boundary types; vendored tonic does not depend on `masa-policy`
 

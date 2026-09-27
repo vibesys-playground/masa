@@ -9,6 +9,7 @@
 pub mod context_ext;
 mod hooks;
 pub(crate) mod layer;
+mod masa_stack;
 /// Runtime-configurable policy parameters loaded from policy_param.json.
 pub mod policy_params;
 /// Method registry for mapping service/method strings to IDs.
@@ -23,6 +24,25 @@ pub use context_ext::{
     MASA_CONTEXT_HEADER,
 };
 pub use hooks::{ChildContext, ParentContext, PolicyHooks, ServerContext};
+pub use layer::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit, Stack};
+pub use masa_stack::MasaStack;
+
+/// Masa's built-in policy modules, for reuse in custom stacks. Each is
+/// available only when its feature is enabled.
+pub mod modules {
+    #[cfg(feature = "abort_slo")]
+    pub use crate::layer::E2eDeadlineGuardLayer;
+    #[cfg(feature = "estimator")]
+    pub use crate::layer::EstimationLayer;
+    #[cfg(feature = "sched_oracle")]
+    pub use crate::layer::OracleLayer;
+    #[cfg(feature = "ac_pred")]
+    pub use crate::layer::PredAdmissionLayer;
+    #[cfg(feature = "trace_queue_latency")]
+    pub use crate::layer::QueueLatencyLayer;
+    #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
+    pub use crate::layer::RajomonLayer;
+}
 pub use registry::{MethodId, MethodRegistry};
 
 pub use policy_params::PolicyParams;

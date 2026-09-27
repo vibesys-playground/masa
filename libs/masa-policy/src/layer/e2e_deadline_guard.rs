@@ -6,10 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::task::Poll;
 
-use masa_core::{time_now, Context, ABORT_SLO};
+use masa_core::{time_now, Context};
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
-use super::{ChildRpcContext, Layer, LayerChild, LayerServer};
+use super::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit};
 
 // ── Core Handler ──────────────────────────────────────────────────────
 
@@ -46,10 +46,6 @@ impl SloAbortHandler {
     }
 
     fn check(&self, ctx: &Context) -> bool {
-        if !ABORT_SLO {
-            return false;
-        }
-
         // e2e_deadline=0 means no SLO was set (e.g. health-check pings); never early-return.
         // Use e2e_deadline (gateway_entry + slo) rather than ctx.deadline() so that policies
         // like pred_sched that tighten the per-hop deadline for scheduling purposes do not
@@ -113,20 +109,18 @@ impl SloAbortHandler {
 // ── Server ──────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
-pub(crate) struct E2eDeadlineGuardServer;
+pub struct E2eDeadlineGuardServer;
 
-impl E2eDeadlineGuardServer {
-    pub(crate) fn new() -> Self {
+impl LayerServer for E2eDeadlineGuardServer {
+    fn new(_init: &mut ServerInit) -> Self {
         Self
     }
 }
 
-impl LayerServer for E2eDeadlineGuardServer {}
-
 // ── Per-Request ─────────────────────────────────────────────────────────
 
 #[derive(Debug)]
-pub(crate) struct E2eDeadlineGuardLayer {
+pub struct E2eDeadlineGuardLayer {
     handler: SloAbortHandler,
 }
 
@@ -193,7 +187,7 @@ impl Layer for E2eDeadlineGuardLayer {
 // ── Per-Child-RPC ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-pub(crate) struct E2eDeadlineGuardChild;
+pub struct E2eDeadlineGuardChild;
 
 impl LayerChild for E2eDeadlineGuardChild {
     fn new() -> Self {

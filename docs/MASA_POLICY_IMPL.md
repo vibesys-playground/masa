@@ -57,13 +57,20 @@ The root `Cargo.toml` `[patch.crates-io]` section replaces the upstream Tokio fa
 
 The `masa::DefaultHooks` type alias (in `libs/masa/src/lib.rs`) is resolved by feature flag:
 
-- Any scheduling feature (`sched_fifo`, `sched_slo`, `sched_tailclipper`, `sched_oracle`) → `masa_policy::PolicyHooks`
+- Any scheduling feature (`sched_fifo`, `sched_slo`, `sched_tailclipper`, `sched_oracle`) → `masa_policy::PolicyHooks` (i.e., `PolicyHooks<MasaStack>`)
 - No scheduling features → `NoopHooks`
 
-`PolicyHooks` uses composable layers selected at compile time:
-- **E2E deadline guard**: `E2eDeadlineGuardLayer` (enabled by `abort_slo` feature)
-- **Admission control** (mutually exclusive): `PredAdmissionLayer` (`estimator`), `RajomonLayer` (`ac_rajomon`), or `NoopLayer`
-- **Queue latency**: `QueueLatencyLayer` (always active under a scheduling policy)
+`PolicyHooks<S>` runs the policy module stack `S`. The default, `MasaStack`, is
+defined in `libs/masa-policy/src/masa_stack.rs`, the only place where features
+choose modules. Each slot holds a built-in module or `()` (disabled):
+- **E2E deadline guard**: `E2eDeadlineGuardLayer` (`abort_slo`)
+- **Estimation**: `EstimationLayer` (`estimator`)
+- **Oracle**: `OracleLayer` (`sched_oracle`)
+- **Admission control** (mutually exclusive): `PredAdmissionLayer` (`ac_pred`) or `RajomonLayer` (`ac_rajomon`)
+- **Queue latency**: `QueueLatencyLayer` (`trace_queue_latency`)
+
+New policies are new modules composed into a new stack; see
+[`POLICY_MODULES.md`](POLICY_MODULES.md).
 
 Each scheduling flag also selects the corresponding tokio queue implementation (see Section 5).
 
@@ -167,12 +174,14 @@ For a complete request lifecycle:
 10. `finalize_after_serialization()` — after response is serialized (e.g., inject `x-queue-latency` header).
 
 ### Policy Implementation
-All scheduling policies are unified into `PolicyHooks` (`libs/masa-policy/src/hooks.rs`), which dispatches to composable layers:
+All scheduling policies are unified into `PolicyHooks<S>` (`libs/masa-policy/src/hooks.rs`), which owns context plumbing and dispatches every lifecycle hook through the module stack `S` in order (first `Err` short-circuits). Stacks are built with `policy_stack!` (`layer/mod.rs`); `MasaStack` (`masa_stack.rs`) is the feature-selected default:
 *   **`E2eDeadlineGuardLayer`** (`layer/e2e_deadline_guard.rs`): Checks deadline in `before_poll`/`after_poll`; aborts past-deadline requests. Enabled by `abort_slo` feature.
-*   **`PredAdmissionLayer`** (`layer/admission/predictive/mod.rs`): Computes local deadlines via latency estimates, tightens child deadlines, and performs predictive admission control. Enabled by `estimator` feature.
+*   **`EstimationLayer`** (`layer/est/layer.rs`): Latency tracking, deadline tightening, reprioritization, local deadline checks. Enabled by `estimator` feature. Publishes its estimators through `ServerInit` for later modules.
+*   **`OracleLayer`** (`layer/oracle.rs`): Perfect-information child deadline and priority. Enabled by `sched_oracle` feature.
+*   **`PredAdmissionLayer`** (`layer/admission/predictive/mod.rs`): Predictive admission control using the estimation module's estimators. Enabled by `ac_pred` feature.
 *   **`RajomonLayer`** (`layer/admission/rajomon/mod.rs`): Token-bucket admission control with server-side price signals. Enabled by `ac_rajomon` feature.
-*   **`QueueLatencyLayer`** (`layer/queue_latency.rs`): Tracks queue latency across the call graph via `x-queue-latency` headers.
-*   **`NoopLayer`** (`layer/admission/noop.rs`): Zero-cost no-op, used when no admission control layer is active.
+*   **`QueueLatencyLayer`** (`layer/queue_latency.rs`): Tracks queue latency across the call graph via `x-queue-latency` headers. Enabled by `trace_queue_latency` feature.
+*   **`()`**: The empty module, used for every disabled slot.
 *   **`NoopHooks`** (`libs/tonic/tonic/src/masa/noop.rs`): Selected when no scheduling feature is active.
 
 ### Client Code Generation
@@ -360,7 +369,7 @@ SLO abort is composable with any scheduling policy via the `abort_slo` feature f
 
 The `QueueLatencyLayer` (`libs/masa-policy/src/layer/queue_latency.rs`) accumulates queue latency — the time a task spent in the ready queue before being polled. It calls `tokio::task::obtain_task_queue_latency()` during `before_poll` to read the current task's queue wait time from its `TraceTimer` in the task header. This value is accumulated across all polls and child RPC responses (via the `x-queue-latency` response header), then injected into the outgoing response in `finalize`.
 
-Queue latency tracking is active under all scheduling policies via `PolicyHooks`.
+Queue latency tracking joins `MasaStack` when `trace_queue_latency` is enabled.
 
 ### Per-Layer Summary
 
@@ -370,7 +379,7 @@ Queue latency tracking is active under all scheduling policies via `PolicyHooks`
 | `PredAdmissionLayer` | — | — | Tighten deadline, admission check | Update estimates |
 | `RajomonLayer` | — | — | Token deduction | — |
 | `QueueLatencyLayer` | Accumulate queue latency | — | — | Inject `x-queue-latency` header |
-| `NoopLayer` | No-op | No-op | No-op | No-op |
+| `()` (disabled slot) | No-op | No-op | No-op | No-op |
 | `NoopHooks` | No-op | No-op | No-op | No-op |
 
 ## 7. Application Integration

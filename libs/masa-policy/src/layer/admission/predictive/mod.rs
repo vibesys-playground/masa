@@ -14,7 +14,7 @@ use std::time::Instant;
 use masa_core::Context;
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
-use super::super::{ChildRpcContext, Layer, LayerChild, LayerServer};
+use super::super::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit};
 use crate::layer::est::default_estimator::DefaultLatencyEstimator;
 use crate::layer::est::latency_map::{MethodKey, ParentToChildKey};
 use crate::layer::est::state::{is_early_return_response, LatencyEstimators};
@@ -39,32 +39,32 @@ const LAMBDA: f64 = 2.0;
 
 /// Server-level predictive admission state (shared across requests).
 #[derive(Debug)]
-pub(crate) struct PredAdmissionServer {
+pub struct PredAdmissionServer {
     pred_admission: Arc<PredictiveAdmission>,
     est: LatencyEstimators<DefaultLatencyEstimator>,
 }
 
-#[derive(Debug)]
-pub(crate) struct AdmissionDeps {
-    pub(crate) estimators: LatencyEstimators<DefaultLatencyEstimator>,
-}
-
-impl PredAdmissionServer {
-    pub(crate) fn new(deps: AdmissionDeps) -> Self {
+impl LayerServer for PredAdmissionServer {
+    fn new(init: &mut ServerInit) -> Self {
+        // Admission decisions must use the same estimates the estimation
+        // module maintains; a private copy would never be updated. A stack
+        // that omits the estimation module is a composition bug, and server
+        // construction has no error path, so fail loudly at startup.
+        let est = init
+            .get::<LatencyEstimators<DefaultLatencyEstimator>>()
+            .expect("PredAdmissionLayer requires EstimationLayer earlier in the policy stack");
         Self {
             pred_admission: Arc::new(PredictiveAdmission::new()),
-            est: deps.estimators,
+            est,
         }
     }
 }
-
-impl LayerServer for PredAdmissionServer {}
 
 // ── Per-Request ─────────────────────────────────────────────────────────
 
 /// Per-request predictive admission layer state.
 #[derive(Debug)]
-pub(crate) struct PredAdmissionLayer {
+pub struct PredAdmissionLayer {
     pred_admission: Arc<PredictiveAdmission>,
     est: LatencyEstimators<DefaultLatencyEstimator>,
     root_method_id: Option<MethodId>,
@@ -299,7 +299,7 @@ impl PredAdmissionLayer {
 // ── Per-Child-RPC ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-pub(crate) struct PredAdmissionChild;
+pub struct PredAdmissionChild;
 
 impl LayerChild for PredAdmissionChild {
     fn new() -> Self {

@@ -5,4 +5,4 @@ mod layer;
 pub(crate) mod signal_slack;
 pub(crate) mod state;
 
-pub(crate) use layer::EstimationLayer;
+pub use layer::EstimationLayer;
