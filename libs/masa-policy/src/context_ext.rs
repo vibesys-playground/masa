@@ -138,7 +138,7 @@ pub trait MasaRequestExt<T> {
     /// Set module `M`'s wire data. The MASA context must be attached first.
     fn set_wire<M: Layer>(&mut self, data: &M::Wire);
 
-    /// Get module `M`'s wire data (`M::Wire::default()` if absent).
+    /// Get module `M`'s wire data, if present.
     fn get_wire<M: Layer>(&self) -> Option<M::Wire>;
 }
 
@@ -208,8 +208,11 @@ pub trait MasaResponseExt<T> {
     /// Get the MASA context from this response.
     fn get_masa_context(&self) -> Option<Context>;
 
-    /// Get module `M`'s wire data (`M::Wire::default()` if absent).
+    /// Get module `M`'s wire data, if present.
     fn get_wire<M: Layer>(&self) -> Option<M::Wire>;
+
+    /// Set module `M`'s wire data. The MASA context must be attached first.
+    fn set_wire<M: Layer>(&mut self, data: &M::Wire);
 }
 
 impl<T> MasaResponseExt<T> for Response<T> {
@@ -229,6 +232,10 @@ impl<T> MasaResponseExt<T> for Response<T> {
     fn get_wire<M: Layer>(&self) -> Option<M::Wire> {
         get_wire_from_metadata::<M>(self.metadata())
     }
+
+    fn set_wire<M: Layer>(&mut self, data: &M::Wire) {
+        set_wire_in_metadata::<M>(self.metadata_mut(), data);
+    }
 }
 
 /// Extension trait for `Status` to manage MASA context.
@@ -242,8 +249,11 @@ pub trait MasaStatusExt {
     /// Get the MASA context from this status.
     fn get_masa_context(&self) -> Option<Context>;
 
-    /// Get module `M`'s wire data (`M::Wire::default()` if absent).
+    /// Get module `M`'s wire data, if present.
     fn get_wire<M: Layer>(&self) -> Option<M::Wire>;
+
+    /// Set module `M`'s wire data. The MASA context must be attached first.
+    fn set_wire<M: Layer>(&mut self, data: &M::Wire);
 }
 
 impl MasaStatusExt for Status {
@@ -262,6 +272,10 @@ impl MasaStatusExt for Status {
 
     fn get_wire<M: Layer>(&self) -> Option<M::Wire> {
         get_wire_from_metadata::<M>(self.metadata())
+    }
+
+    fn set_wire<M: Layer>(&mut self, data: &M::Wire) {
+        set_wire_in_metadata::<M>(self.metadata_mut(), data);
     }
 }
 

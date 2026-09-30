@@ -10,7 +10,9 @@ use std::task::Poll;
 use masa_core::{Context, PriorityHint, RootMethod, ABORT_SLACK};
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
-use super::super::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit};
+use super::super::{
+    ChildRpcContext, Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit,
+};
 use super::default_estimator::DefaultLatencyEstimator;
 use super::state::{
     is_early_return_response, ChildRPCTracker, EstimationTracker, LatencyEstimators,
@@ -29,10 +31,10 @@ pub struct EstimationServer {
 impl LayerServer for EstimationServer {
     /// Publishes the latency estimators so later modules (e.g., predictive
     /// admission control) share this service's estimates.
-    fn new(init: &mut ServerInit) -> Self {
+    fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
         let est = LatencyEstimators::<DefaultLatencyEstimator>::new();
         init.provide(est.clone());
-        Self { est }
+        Ok(Self { est })
     }
 }
 
@@ -62,6 +64,7 @@ impl Layer for EstimationLayer {
         server: &EstimationServer,
         ctx: &mut Context,
         _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
     ) -> Self {
         let resolved_method_id = MethodRegistry::global().get_or_register(method.clone());
         // Set root_method at ingress (hop_count == 0)
@@ -89,7 +92,11 @@ impl Layer for EstimationLayer {
     /// Reprioritize the current task and check the local deadline
     /// (ABORT_SLACK aborts; SIGNAL_SLACK marks the soft signal).
     #[inline]
-    fn before_poll<Ret>(&self, ctx: &Context) -> Result<(), Result<Response<Ret>, Status>> {
+    fn before_poll<Ret>(
+        &self,
+        ctx: &Context,
+        _ext: &mut Extensions,
+    ) -> Result<(), Result<Response<Ret>, Status>> {
         if ABORT_SLACK {
             let local_deadline = ctx.deadline();
             if local_deadline != 0 && masa_core::time_now() > local_deadline {
@@ -127,6 +134,7 @@ impl Layer for EstimationLayer {
         _request: &mut tonic::Request<T>,
         child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
         let child_tracker = self.estimation.begin_child(child_method_name);
         let time_left = ctx.e2e_deadline().saturating_sub(masa_core::time_now());
@@ -180,8 +188,10 @@ impl Layer for EstimationLayer {
         &self,
         _ctx: &Context,
         _child_method: &CowGrpcMethod,
-        response: &mut Result<Response<T>, Status>,
+        response: &Result<Response<T>, Status>,
+        _response_wire: &WireIn<'_>,
         child_ctx: &EstimationChild,
+        _ext: &Extensions,
     ) -> Result<(), Status> {
         if let Some(child_tracker) = child_ctx.child_tracker.as_ref() {
             self.estimation
@@ -207,6 +217,7 @@ impl Layer for EstimationLayer {
         &self,
         ctx: &Context,
         poll: &Poll<Result<Response<Ret>, Status>>,
+        _ext: &Extensions,
     ) -> Result<(), Result<Response<Ret>, Status>> {
         self.request_metadata.end_poll();
         if let Poll::Pending = poll {
@@ -246,6 +257,7 @@ impl Layer for EstimationLayer {
         ctx: &mut Context,
         result: &mut Result<Response<Ret>, Status>,
         _wire: &mut WireOut,
+        _ext: &Extensions,
     ) {
         if is_early_return_response(result) {
             self.request_metadata.mark_early_return();

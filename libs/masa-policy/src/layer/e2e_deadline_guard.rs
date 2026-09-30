@@ -10,7 +10,9 @@ use std::task::Poll;
 use masa_core::{time_now, Context};
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
-use super::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit};
+use super::{
+    ChildRpcContext, Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit,
+};
 
 // ── Core Handler ──────────────────────────────────────────────────────
 
@@ -113,8 +115,8 @@ impl SloAbortHandler {
 pub struct E2eDeadlineGuardServer;
 
 impl LayerServer for E2eDeadlineGuardServer {
-    fn new(_init: &mut ServerInit) -> Self {
-        Self
+    fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
+        Ok(Self)
     }
 }
 
@@ -136,6 +138,7 @@ impl Layer for E2eDeadlineGuardLayer {
         _server: &E2eDeadlineGuardServer,
         _ctx: &mut Context,
         _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
     ) -> Self {
         Self {
             handler: SloAbortHandler::new(method.clone()),
@@ -143,7 +146,11 @@ impl Layer for E2eDeadlineGuardLayer {
     }
 
     #[inline]
-    fn before_poll<Ret>(&self, ctx: &Context) -> Result<(), Result<Response<Ret>, Status>> {
+    fn before_poll<Ret>(
+        &self,
+        ctx: &Context,
+        _ext: &mut Extensions,
+    ) -> Result<(), Result<Response<Ret>, Status>> {
         if self.handler.check(ctx) {
             return Err(Err(self.handler.issue_error()));
         }
@@ -159,6 +166,7 @@ impl Layer for E2eDeadlineGuardLayer {
         _request: &mut tonic::Request<T>,
         _child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
         if self.handler.check(ctx) {
             return Err(self.handler.issue_error());
@@ -171,8 +179,10 @@ impl Layer for E2eDeadlineGuardLayer {
         &self,
         _ctx: &Context,
         child_method: &CowGrpcMethod,
-        _response: &mut Result<Response<T>, Status>,
+        _response: &Result<Response<T>, Status>,
+        _response_wire: &WireIn<'_>,
         _child_ctx: &E2eDeadlineGuardChild,
+        _ext: &Extensions,
     ) -> Result<(), Status> {
         self.handler.set_last_child(child_method.clone());
         Ok(())
@@ -183,6 +193,7 @@ impl Layer for E2eDeadlineGuardLayer {
         &self,
         ctx: &Context,
         poll: &Poll<Result<Response<Ret>, Status>>,
+        _ext: &Extensions,
     ) -> Result<(), Result<Response<Ret>, Status>> {
         if let Poll::Pending = poll {
             if self.handler.check(ctx) {

@@ -20,13 +20,19 @@ fn layer_with_tokens(method: &CowGrpcMethod, ctx: &mut Context, tokens: u64) -> 
     let mut headers = http::HeaderMap::new();
     headers.insert(
         masa_core::MASA_CONTEXT_HEADER,
-        crate::wire::header_value_with::<RajomonLayer>("Q1RY", &RajomonWire { tokens })
+        crate::wire::header_value_with::<RajomonLayer>("Q1RY", &RajomonWire::request(tokens))
             .unwrap()
             .parse()
             .unwrap(),
     );
     let wire = WireIn::from_headers(&headers).unwrap();
-    RajomonLayer::new(method, &RajomonServer, ctx, &wire)
+    RajomonLayer::new(
+        method,
+        &RajomonServer,
+        ctx,
+        &wire,
+        &mut crate::layer::Extensions::new(),
+    )
 }
 
 /// Mutex to serialize tests that modify the global RAJOMON_STATE.own_price,
@@ -372,15 +378,27 @@ fn test_layer_records_child_price_response_and_updates_parent_max() {
 
     let mut ctx = masa_core::ContextBuilder::new("test", 0).build();
     let layer = layer_with_tokens(&parent, &mut ctx, 100);
-    let mut response: Result<Response<()>, Status> = Ok(Response::new(()));
-    response
-        .as_mut()
-        .unwrap()
-        .metadata_mut()
-        .insert("x-masa-rajomon-price", "13".parse().unwrap());
+    let response: Result<Response<()>, Status> = Ok(Response::new(()));
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        masa_core::MASA_CONTEXT_HEADER,
+        crate::wire::header_value_with::<RajomonLayer>("Q1RY", &RajomonWire::response(100, 13))
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    let response_wire = WireIn::from_headers(&headers).unwrap();
 
-    crate::layer::Layer::after_child_rpc(&layer, &ctx, &child, &mut response, &RajomonChild)
-        .unwrap();
+    crate::layer::Layer::after_child_rpc(
+        &layer,
+        &ctx,
+        &child,
+        &response,
+        &response_wire,
+        &RajomonChild,
+        &crate::layer::Extensions::new(),
+    )
+    .unwrap();
 
     assert_eq!(RAJOMON_STATE.child_price(&child), 13);
     assert_eq!(
