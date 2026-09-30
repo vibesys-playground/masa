@@ -184,7 +184,7 @@ scenario! {
 
 scenario! {
     /// The reply of a successful request echoes the request's identity and
-    /// deadline, and the hop count it was handled at.
+    /// deadline.
     fn ok_reply_echoes_request_identity(w) {
         let svc = w.service("MetaEchoSvc");
         let req = w.ingress("MetaApi", dur_ms(1000));
@@ -193,11 +193,6 @@ scenario! {
         assert_eq!(view.api, "MetaApi");
         assert_eq!(view.request_id, req.view().request_id);
         assert_eq!(view.deadline, req.view().deadline);
-        assert_eq!(view.hop_count, Some(0));
-        assert_eq!(
-            view.root_method,
-            Some(("MetaEchoSvc".to_string(), "Entry".to_string()))
-        );
         assert_eq!(view.resp().deadline_signal_count, 0);
     }
 }

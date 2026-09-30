@@ -368,6 +368,15 @@ fn rajomon_wire(metadata: &tonic::metadata::MetadataMap) -> Option<masa_policy::
         .expect("decodable rajomon section")
 }
 
+/// Estimation's wire data in `metadata`, if any.
+#[cfg(feature = "estimator")]
+fn estimation_wire(metadata: &tonic::metadata::MetadataMap) -> Option<masa_policy::EstimationWire> {
+    masa::WireIn::from_metadata(metadata)
+        .expect("well-formed wire sections")
+        .get::<masa_policy::modules::EstimationLayer>()
+        .expect("decodable estimation section")
+}
+
 /// Tokens of the Rajomon wire section in `metadata`, if any.
 fn rajomon_tokens(metadata: &tonic::metadata::MetadataMap) -> Option<u64> {
     #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
@@ -411,9 +420,25 @@ fn attach_response_wire(
     metadata: &mut tonic::metadata::MetadataMap,
     queue: Option<&QueueView>,
     price: Option<u64>,
+    meta: Option<RespMeta>,
 ) {
     #[allow(unused_mut)]
     let mut wire = masa::WireOut::new();
+    #[cfg(feature = "estimator")]
+    if let Some(m) = meta {
+        wire.put::<masa_policy::modules::EstimationLayer>(&masa_policy::EstimationWire::response(
+            masa_policy::EstimationResponseWire {
+                compute_time_us: m.compute_time_us,
+                accumulated_compute_us: m.accumulated_compute_us,
+                utilization: m.utilization,
+                max_downstream_util: m.max_downstream_util,
+                early_return_count: m.early_return_count,
+                deadline_signal_count: m.deadline_signal_count,
+            },
+        ))
+        .expect("encodable estimation data");
+    }
+    let _ = &meta;
     #[cfg(feature = "trace_queue_latency")]
     if let Some(q) = queue {
         wire.put::<masa_policy::modules::QueueLatencyLayer>(&masa::QueueLatencyWire {
@@ -437,11 +462,16 @@ fn attach_response_wire(
 impl CtxView {
     /// The view of whatever Masa data `metadata` carries.
     fn of_metadata(metadata: &tonic::metadata::MetadataMap) -> Option<Self> {
-        masa::get_masa_context_from_metadata(metadata)
-            .map(|ctx| Self::from_parts(&ctx, rajomon_tokens(metadata), queue_view(metadata)))
+        masa::get_masa_context_from_metadata(metadata).map(|ctx| Self::from_parts(&ctx, metadata))
     }
 
-    fn from_parts(ctx: &Context, tokens: Option<u64>, queue: Option<QueueView>) -> Self {
+    fn from_parts(ctx: &Context, metadata: &tonic::metadata::MetadataMap) -> Self {
+        let tokens = rajomon_tokens(metadata);
+        let queue = queue_view(metadata);
+        #[cfg(feature = "estimator")]
+        let estimation = estimation_wire(metadata);
+        #[cfg(feature = "estimator")]
+        let request_half = estimation.as_ref().and_then(|w| w.request.clone());
         Self {
             api: ctx.api().clone(),
             request_id: ctx.request_id(),
@@ -450,18 +480,19 @@ impl CtxView {
             deadline: ctx.deadline(),
             priority: ctx.prio_hint().value(),
             #[cfg(feature = "estimator")]
-            hop_count: Some(ctx.hop_count()),
+            hop_count: Some(request_half.as_ref().map_or(0, |r| r.hop_count)),
             #[cfg(not(feature = "estimator"))]
             hop_count: None,
             #[cfg(feature = "estimator")]
-            root_method: ctx
-                .root_method()
+            root_method: request_half
+                .as_ref()
+                .and_then(|r| r.root_method.as_ref())
                 .map(|r| (r.service.clone(), r.method.clone())),
             #[cfg(not(feature = "estimator"))]
             root_method: None,
             tokens,
             #[cfg(feature = "estimator")]
-            meta: ctx.response_meta().map(|m| RespMeta {
+            meta: estimation.and_then(|w| w.response).map(|m| RespMeta {
                 compute_time_us: m.compute_time_us,
                 accumulated_compute_us: m.accumulated_compute_us,
                 utilization: m.utilization,
@@ -570,20 +601,19 @@ impl Crafted {
         if let Some(p) = self.priority {
             b = b.prio_hint(PriorityHint::new(p));
         }
-        #[cfg(feature = "estimator")]
-        {
-            if let Some(n) = self.hop_count {
-                b = b.hop_count(n);
-            }
-            if let Some((svc, method)) = self.root {
-                b = b.root_method(masa_core::RootMethod {
-                    service: svc,
-                    method,
-                });
-            }
-        }
         #[allow(unused_mut)]
         let mut root = RootContext::from(b.build());
+        #[cfg(feature = "estimator")]
+        if let Some(n) = self.hop_count {
+            let root_method = self
+                .root
+                .map(|(service, method)| masa_policy::RootMethod { service, method });
+            root.wire_mut()
+                .put::<masa_policy::modules::EstimationLayer>(
+                    &masa_policy::EstimationWire::request(n, root_method),
+                )
+                .expect("encodable estimation data");
+        }
         #[cfg(feature = "ac_rajomon")]
         if let Some(t) = self.tokens {
             root = root.with_rajomon_tokens(t);
@@ -636,7 +666,7 @@ impl Reply {
     pub fn err_with_price(status: Status, price: u64) -> Self {
         let mut status = status;
         status.set_masa_context(&ContextBuilder::new("synthetic", 1).build());
-        attach_response_wire(status.metadata_mut(), None, Some(price));
+        attach_response_wire(status.metadata_mut(), None, Some(price), None);
         Self {
             result: Err(status),
         }
@@ -645,21 +675,14 @@ impl Reply {
     /// An `Ok` reply carrying the given metadata.
     pub fn synthetic(spec: ReplySpec) -> Self {
         let mut resp = Response::new(());
-        #[allow(unused_mut)]
-        let mut b = ContextBuilder::new("synthetic", 1);
-        #[cfg(feature = "estimator")]
-        {
-            b = b.response_meta(masa_core::EstimatorResponse {
-                compute_time_us: spec.meta.compute_time_us,
-                accumulated_compute_us: spec.meta.accumulated_compute_us,
-                utilization: spec.meta.utilization,
-                max_downstream_util: spec.meta.max_downstream_util,
-                early_return_count: spec.meta.early_return_count,
-                deadline_signal_count: spec.meta.deadline_signal_count,
-            });
-        }
+        let b = ContextBuilder::new("synthetic", 1);
         resp.set_masa_context(&b.build());
-        attach_response_wire(resp.metadata_mut(), spec.queue.as_ref(), spec.price);
+        attach_response_wire(
+            resp.metadata_mut(),
+            spec.queue.as_ref(),
+            spec.price,
+            Some(spec.meta),
+        );
         Self { result: Ok(resp) }
     }
 
