@@ -15,6 +15,7 @@ tonic = { path = "../../tonic" }
 masa = { path = "../../../masa" }
 masa-core = { path = "../../../masa-core" }
 masa-policy = { path = "../../../masa-policy" }
+rpcstack-sched = { path = "../../../rpcstack-sched" }
 http = { version = "0.2" }
 
 [build-dependencies]
@@ -29,4 +30,5 @@ abort_slack = ["masa/abort_slack"]
 signal_slack = ["masa/signal_slack"]
 ac_rajomon = ["masa/ac_rajomon"]
 stack_custom = ["masa/stack_custom"]
+sched_custom = ["masa/sched_custom"]
 trace_queue_latency = ["masa/trace_queue_latency", "masa-policy/trace_queue_latency"]

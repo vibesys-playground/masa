@@ -128,6 +128,12 @@ jobs:
           - label: sched_pred_abort_slack_ac_pred_est_mean_var_stack_custom
             features: "sched_pred,abort_slack,ac_pred,est_mean_var,stack_custom"
             cache_key: sched-pred-abort-slack-ac-pred-est-mean-var-stack-custom
+          - label: sched_slo_sched_custom
+            features: "sched_slo,sched_custom"
+            cache_key: sched-slo-sched-custom
+          - label: sched_pred_abort_slack_ac_pred_est_mean_var_sched_custom
+            features: "sched_pred,abort_slack,ac_pred,est_mean_var,sched_custom"
+            cache_key: sched-pred-abort-slack-ac-pred-est-mean-var-sched-custom
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -230,6 +236,9 @@ jobs:
           - label: sched_slo_stack_custom
             features: "sched_slo,stack_custom"
             cache_key: sched-slo-stack-custom
+          - label: sched_slo_sched_custom
+            features: "sched_slo,sched_custom"
+            cache_key: sched-slo-sched-custom
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master

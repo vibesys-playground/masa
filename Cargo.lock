@@ -3028,6 +3028,7 @@ dependencies = [
  "masa-policy",
  "prost",
  "prost-build",
+ "rpcstack-sched",
  "tokio",
  "tonic",
  "tonic-build",
