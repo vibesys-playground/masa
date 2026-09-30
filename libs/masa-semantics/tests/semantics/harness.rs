@@ -22,7 +22,7 @@ use std::sync::{Arc, Once};
 use std::task::Poll;
 use std::time::Duration;
 
-use masa::{MasaRequestExt, MasaResponseExt, RootContext, MASA_CONTEXT_HEADER};
+use masa::{MasaRequestExt, MasaResponseExt, MasaStatusExt, RootContext, MASA_CONTEXT_HEADER};
 use masa_core::{test_clock, Context, ContextBuilder, PriorityHint};
 use tonic::masa::{ClientHooks, ParentHooks, ServerHooks};
 use tonic::{Code, GrpcMethod, Request, Response, Status};
@@ -359,29 +359,89 @@ pub struct QueueView {
     pub lengths: BTreeMap<String, u64>,
 }
 
-/// Tokens of the Rajomon wire section in `metadata`, if any.
+/// Rajomon's wire data in `metadata`, if any.
 #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
-fn rajomon_tokens(metadata: &tonic::metadata::MetadataMap) -> Option<u64> {
+fn rajomon_wire(metadata: &tonic::metadata::MetadataMap) -> Option<masa_policy::RajomonWire> {
     masa::WireIn::from_metadata(metadata)
         .expect("well-formed wire sections")
         .get::<masa_policy::modules::RajomonLayer>()
         .expect("decodable rajomon section")
-        .map(|wire| wire.tokens)
 }
 
-#[cfg(not(all(feature = "ac_rajomon", not(feature = "ac_pred"))))]
-fn rajomon_tokens(_metadata: &tonic::metadata::MetadataMap) -> Option<u64> {
-    None
+/// Tokens of the Rajomon wire section in `metadata`, if any.
+fn rajomon_tokens(metadata: &tonic::metadata::MetadataMap) -> Option<u64> {
+    #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
+    return rajomon_wire(metadata).map(|wire| wire.tokens);
+    #[cfg(not(all(feature = "ac_rajomon", not(feature = "ac_pred"))))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
+/// The Rajomon price advertised in `metadata`, if any.
+fn rajomon_price(metadata: &tonic::metadata::MetadataMap) -> Option<u64> {
+    #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
+    return rajomon_wire(metadata).and_then(|wire| wire.price);
+    #[cfg(not(all(feature = "ac_rajomon", not(feature = "ac_pred"))))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
+/// Queue-latency telemetry carried in `metadata`, if any.
+fn queue_view(metadata: &tonic::metadata::MetadataMap) -> Option<QueueView> {
+    #[cfg(feature = "trace_queue_latency")]
+    return masa::queue_latencies_from_metadata(metadata).map(|q| QueueView {
+        initial: q.initial,
+        resume: q.resume,
+        lengths: q.queue_lengths.into_iter().collect(),
+    });
+    #[cfg(not(feature = "trace_queue_latency"))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
+/// Attach response wire data (queue telemetry and/or a Rajomon price) to a
+/// reply's metadata. The Masa context must already be attached.
+fn attach_response_wire(
+    metadata: &mut tonic::metadata::MetadataMap,
+    queue: Option<&QueueView>,
+    price: Option<u64>,
+) {
+    #[allow(unused_mut)]
+    let mut wire = masa::WireOut::new();
+    #[cfg(feature = "trace_queue_latency")]
+    if let Some(q) = queue {
+        wire.put::<masa_policy::modules::QueueLatencyLayer>(&masa::QueueLatencyWire {
+            initial: q.initial,
+            resume: q.resume,
+            queue_lengths: q.lengths.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        })
+        .expect("encodable queue telemetry");
+    }
+    #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
+    if let Some(price) = price {
+        wire.put::<masa_policy::modules::RajomonLayer>(&masa_policy::RajomonWire::response(
+            0, price,
+        ))
+        .expect("encodable rajomon price");
+    }
+    let _ = (&queue, &price);
+    wire.install(metadata);
 }
 
 impl CtxView {
     /// The view of whatever Masa data `metadata` carries.
     fn of_metadata(metadata: &tonic::metadata::MetadataMap) -> Option<Self> {
         masa::get_masa_context_from_metadata(metadata)
-            .map(|ctx| Self::from_parts(&ctx, rajomon_tokens(metadata)))
+            .map(|ctx| Self::from_parts(&ctx, rajomon_tokens(metadata), queue_view(metadata)))
     }
 
-    fn from_parts(ctx: &Context, tokens: Option<u64>) -> Self {
+    fn from_parts(ctx: &Context, tokens: Option<u64>, queue: Option<QueueView>) -> Self {
         Self {
             api: ctx.api().clone(),
             request_id: ctx.request_id(),
@@ -411,18 +471,7 @@ impl CtxView {
             }),
             #[cfg(not(feature = "estimator"))]
             meta: None,
-            #[cfg(feature = "trace_queue_latency")]
-            queue: ctx.queue_latencies().map(|q| QueueView {
-                initial: q.initial,
-                resume: q.resume,
-                lengths: q
-                    .queue_lengths
-                    .iter()
-                    .map(|(k, v)| (k.clone(), *v))
-                    .collect(),
-            }),
-            #[cfg(not(feature = "trace_queue_latency"))]
-            queue: None,
+            queue,
         }
     }
 
@@ -586,9 +635,8 @@ impl Reply {
     /// An error reply that advertises a Rajomon price.
     pub fn err_with_price(status: Status, price: u64) -> Self {
         let mut status = status;
-        status
-            .metadata_mut()
-            .insert("x-masa-rajomon-price", price.to_string().parse().unwrap());
+        status.set_masa_context(&ContextBuilder::new("synthetic", 1).build());
+        attach_response_wire(status.metadata_mut(), None, Some(price));
         Self {
             result: Err(status),
         }
@@ -610,19 +658,8 @@ impl Reply {
                 deadline_signal_count: spec.meta.deadline_signal_count,
             });
         }
-        #[cfg(feature = "trace_queue_latency")]
-        if let Some(q) = &spec.queue {
-            b = b.queue_latencies(masa_core::QueueLatencies {
-                initial: q.initial,
-                resume: q.resume,
-                queue_lengths: q.lengths.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-            });
-        }
         resp.set_masa_context(&b.build());
-        if let Some(price) = spec.price {
-            resp.metadata_mut()
-                .insert("x-masa-rajomon-price", price.to_string().parse().unwrap());
-        }
+        attach_response_wire(resp.metadata_mut(), spec.queue.as_ref(), spec.price);
         Self { result: Ok(resp) }
     }
 
@@ -653,13 +690,10 @@ impl Reply {
 
     /// The Rajomon price the callee advertised, if any.
     pub fn price(&self) -> Option<u64> {
-        let md = match &self.result {
-            Ok(resp) => resp.metadata(),
-            Err(status) => status.metadata(),
-        };
-        md.get("x-masa-rajomon-price")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse().ok())
+        match &self.result {
+            Ok(resp) => rajomon_price(resp.metadata()),
+            Err(status) => rajomon_price(status.metadata()),
+        }
     }
 
     /// Response metadata of the callee; panics when absent.
