@@ -4,6 +4,7 @@
 // Active when the `estimator` feature is enabled. Runs independently of the
 // admission control layer (ac_pred / ac_rajomon / noop).
 
+use crate::wire::{WireIn, WireOut};
 use std::task::Poll;
 
 use masa_core::{Context, PriorityHint, RootMethod, ABORT_SLACK};
@@ -53,8 +54,15 @@ pub struct EstimationLayer {
 impl Layer for EstimationLayer {
     type Server = EstimationServer;
     type Child = EstimationChild;
+    const NAME: &'static str = "estimation";
+    type Wire = ();
 
-    fn new(method: &CowGrpcMethod, server: &EstimationServer, ctx: &mut Context) -> Self {
+    fn new(
+        method: &CowGrpcMethod,
+        server: &EstimationServer,
+        ctx: &mut Context,
+        _wire: &WireIn<'_>,
+    ) -> Self {
         let resolved_method_id = MethodRegistry::global().get_or_register(method.clone());
         // Set root_method at ingress (hop_count == 0)
         if ctx.hop_count() == 0 {
@@ -118,6 +126,7 @@ impl Layer for EstimationLayer {
         child_ctx: &mut EstimationChild,
         _request: &mut tonic::Request<T>,
         child_rpc: &mut ChildRpcContext,
+        _child_wire: &mut WireOut,
     ) -> Result<(), Status> {
         let child_tracker = self.estimation.begin_child(child_method_name);
         let time_left = ctx.e2e_deadline().saturating_sub(masa_core::time_now());
@@ -232,7 +241,12 @@ impl Layer for EstimationLayer {
     ///    even more signals.
     /// 3. `Ok` and on-time — the only case where the estimator should learn.
     #[inline]
-    fn finalize<Ret>(&self, ctx: &mut Context, result: &mut Result<Response<Ret>, Status>) {
+    fn finalize<Ret>(
+        &self,
+        ctx: &mut Context,
+        result: &mut Result<Response<Ret>, Status>,
+        _wire: &mut WireOut,
+    ) {
         if is_early_return_response(result) {
             self.request_metadata.mark_early_return();
         } else if !super::signal_slack::should_skip_flush(&self.request_metadata) {

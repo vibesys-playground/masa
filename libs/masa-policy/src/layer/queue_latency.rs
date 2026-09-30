@@ -6,6 +6,7 @@
 // queue latencies from responses, and injects the totals into the response
 // context.
 
+use crate::wire::{WireIn, WireOut};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -49,8 +50,15 @@ pub struct QueueLatencyLayer {
 impl Layer for QueueLatencyLayer {
     type Server = QueueLatencyServer;
     type Child = QueueLatencyChild;
+    const NAME: &'static str = "queue_latency";
+    type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &QueueLatencyServer, _ctx: &mut Context) -> Self {
+    fn new(
+        _method: &CowGrpcMethod,
+        _server: &QueueLatencyServer,
+        _ctx: &mut Context,
+        _wire: &WireIn<'_>,
+    ) -> Self {
         Self {
             initial_q_lat: AtomicU64::new(0),
             resume_q_lat: AtomicU64::new(0),
@@ -105,7 +113,12 @@ impl Layer for QueueLatencyLayer {
     }
 
     #[inline]
-    fn finalize<Ret>(&self, ctx: &mut Context, _result: &mut Result<Response<Ret>, Status>) {
+    fn finalize<Ret>(
+        &self,
+        ctx: &mut Context,
+        _result: &mut Result<Response<Ret>, Status>,
+        _wire: &mut WireOut,
+    ) {
         let initial = self.initial_q_lat.load(Ordering::Acquire);
         let resume = self.resume_q_lat.load(Ordering::Acquire);
         let own_len = self.own_queue_len.load(Ordering::Acquire);

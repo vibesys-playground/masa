@@ -8,9 +8,10 @@ pub use masa_policy::{
     get_service_name_override_from_metadata, read_context, read_context_from_headers,
     read_priority_from_headers, set_masa_context_in_metadata, set_method_name_override_in_headers,
     set_service_name_override_in_headers, MasaRequestExt, MasaResponseExt, MasaStatusExt,
-    MASA_CONTEXT_HEADER,
+    WireError, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -88,29 +89,70 @@ pub fn create_context(api: &str, slo: Duration) -> Context {
         .build()
 }
 
+/// A root request's context together with the module wire data its sender
+/// attaches (for example Rajomon's tokens), which travels beside the `Context`.
+#[derive(Debug, Clone)]
+pub struct RootContext {
+    context: Context,
+    wire: WireOut,
+}
+
+impl From<Context> for RootContext {
+    fn from(context: Context) -> Self {
+        Self {
+            context,
+            wire: WireOut::new(),
+        }
+    }
+}
+
+impl Deref for RootContext {
+    type Target = Context;
+
+    fn deref(&self) -> &Context {
+        &self.context
+    }
+}
+
+impl RootContext {
+    /// The context without the wire data.
+    pub fn into_context(self) -> Context {
+        self.context
+    }
+
+    /// The wire data to attach to the request.
+    pub fn wire_mut(&mut self) -> &mut WireOut {
+        &mut self.wire
+    }
+
+    /// Set the Rajomon token budget this request carries.
+    #[cfg(feature = "ac_rajomon")]
+    pub fn with_rajomon_tokens(mut self, tokens: u64) -> Self {
+        self.wire
+            .put::<masa_policy::modules::RajomonLayer>(&masa_policy::RajomonWire { tokens })
+            .unwrap_or_else(|err| panic!("{err}"));
+        self
+    }
+
+    /// Attach the context and wire data to `request`.
+    pub fn attach<T>(&self, mut request: tonic::Request<T>) -> tonic::Request<T> {
+        request.set_masa_context(&self.context);
+        self.wire.install(request.metadata_mut());
+        request
+    }
+}
+
 /// Try to create a Masa context, checking the client-side Rajomon token bucket first.
 /// Returns None if the client-side rate limiter rejects the request.
 #[cfg(feature = "ac_rajomon")]
-pub fn try_create_context(api: &str, slo: std::time::Duration) -> Option<Context> {
+pub fn try_create_context(api: &str, slo: std::time::Duration) -> Option<RootContext> {
     use masa_policy::CLIENT_TOKEN_BUCKET;
 
     let method = tonic::CowGrpcMethod::new("", api.to_string());
     masa_policy::ClientTokenBucket::ensure_worker_started();
     let tokens = CLIENT_TOKEN_BUCKET.try_acquire(&method)?;
 
-    let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-    let slo_us = slo.as_micros() as u64;
-    let start_at = time_now();
-    let deadline = start_at + slo_us;
-
-    Some(
-        ContextBuilder::new(api, request_id)
-            .slo(slo_us)
-            .gateway_entry(start_at)
-            .deadline(deadline)
-            .tokens(tokens)
-            .build(),
-    )
+    Some(RootContext::from(create_context(api, slo)).with_rajomon_tokens(tokens))
 }
 
 /// Utility function to create and attach a Masa Context to a Request.

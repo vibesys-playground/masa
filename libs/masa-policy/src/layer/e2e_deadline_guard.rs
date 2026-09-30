@@ -2,6 +2,7 @@
 // end-to-end SLO deadline, avoiding wasteful compute on responses that will
 // miss their SLO regardless.
 
+use crate::wire::{WireIn, WireOut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::task::Poll;
@@ -127,8 +128,15 @@ pub struct E2eDeadlineGuardLayer {
 impl Layer for E2eDeadlineGuardLayer {
     type Server = E2eDeadlineGuardServer;
     type Child = E2eDeadlineGuardChild;
+    const NAME: &'static str = "e2e_deadline_guard";
+    type Wire = ();
 
-    fn new(method: &CowGrpcMethod, _server: &E2eDeadlineGuardServer, _ctx: &mut Context) -> Self {
+    fn new(
+        method: &CowGrpcMethod,
+        _server: &E2eDeadlineGuardServer,
+        _ctx: &mut Context,
+        _wire: &WireIn<'_>,
+    ) -> Self {
         Self {
             handler: SloAbortHandler::new(method.clone()),
         }
@@ -150,6 +158,7 @@ impl Layer for E2eDeadlineGuardLayer {
         _child_ctx: &mut E2eDeadlineGuardChild,
         _request: &mut tonic::Request<T>,
         _child_rpc: &mut ChildRpcContext,
+        _child_wire: &mut WireOut,
     ) -> Result<(), Status> {
         if self.handler.check(ctx) {
             return Err(self.handler.issue_error());

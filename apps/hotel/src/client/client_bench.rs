@@ -26,8 +26,8 @@ use app_utils::{
 };
 use frontend::frontend_client::FrontendClient;
 
-use masa::Context;
 use masa::MasaRequestExt;
+use masa::{Context, RootContext};
 use tonic::Response;
 use tonic::Status;
 
@@ -94,7 +94,7 @@ impl HandlerOuter<HotelClient> for RequestHandler {
         &self,
         rng: StdRng,
         client: FrontendClient<Channel>,
-        ctx: Context,
+        ctx: RootContext,
         trace: bool,
     ) -> String {
         match self {
@@ -138,9 +138,9 @@ impl RequestType<HotelClient> for ReservationRequest {
         &self,
         rng: &mut StdRng,
         mut client: FrontendClient<Channel>,
-        ctx: &Context,
+        ctx: &RootContext,
     ) -> Result<Response<Self::ResponseType>, Status> {
-        let r = tonic::Request::new(get_reservation_request(rng)).with_masa_context(ctx);
+        let r = ctx.attach(tonic::Request::new(get_reservation_request(rng)));
         client.handle_reservation(r).await
     }
 
@@ -189,9 +189,9 @@ impl RequestType<HotelClient> for SearchRequest {
         &self,
         rng: &mut StdRng,
         mut client: FrontendClient<Channel>,
-        ctx: &Context,
+        ctx: &RootContext,
     ) -> Result<Response<Self::ResponseType>, Status> {
-        let r = tonic::Request::new(get_search_request(rng)).with_masa_context(ctx);
+        let r = ctx.attach(tonic::Request::new(get_search_request(rng)));
         client.handle_search(r).await
     }
 

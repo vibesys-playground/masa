@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use masa_core::{time_now, Context, ContextBuilder, PriorityHint};
 use masa_policy::{
     get_masa_context_from_metadata, policy_stack, ChildRpcContext, Layer, LayerServer, PolicyHooks,
-    ServerInit, MASA_CONTEXT_HEADER,
+    ServerInit, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
 use tonic::{Code, CowGrpcMethod, GrpcMethod, Request, Status};
@@ -63,8 +63,10 @@ struct FixedChildPriority<const P: u64>;
 impl<const P: u64> Layer for FixedChildPriority<P> {
     type Server = ();
     type Child = ();
+    const NAME: &'static str = "FixedChildPriority";
+    type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context) -> Self {
+    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>) -> Self {
         Self
     }
 
@@ -75,6 +77,7 @@ impl<const P: u64> Layer for FixedChildPriority<P> {
         _child_ctx: &mut (),
         _request: &mut Request<T>,
         child_rpc: &mut ChildRpcContext,
+        _child_wire: &mut WireOut,
     ) -> Result<(), Status> {
         child_rpc.prio_hint = PriorityHint::new(P);
         Ok(())
@@ -88,8 +91,10 @@ struct RejectChildren;
 impl Layer for RejectChildren {
     type Server = ();
     type Child = ();
+    const NAME: &'static str = "RejectChildren";
+    type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context) -> Self {
+    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>) -> Self {
         Self
     }
 
@@ -100,6 +105,7 @@ impl Layer for RejectChildren {
         _child_ctx: &mut (),
         _request: &mut Request<T>,
         _child_rpc: &mut ChildRpcContext,
+        _child_wire: &mut WireOut,
     ) -> Result<(), Status> {
         Err(Status::resource_exhausted("rejected by custom module"))
     }
@@ -112,8 +118,10 @@ struct UnreachableOnChild;
 impl Layer for UnreachableOnChild {
     type Server = ();
     type Child = ();
+    const NAME: &'static str = "UnreachableOnChild";
+    type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context) -> Self {
+    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>) -> Self {
         Self
     }
 
@@ -124,6 +132,7 @@ impl Layer for UnreachableOnChild {
         _child_ctx: &mut (),
         _request: &mut Request<T>,
         _child_rpc: &mut ChildRpcContext,
+        _child_wire: &mut WireOut,
     ) -> Result<(), Status> {
         panic!("module after a rejecting module must not run");
     }
@@ -151,8 +160,15 @@ impl LayerServer for CountChildrenServer {
 impl Layer for CountChildren {
     type Server = CountChildrenServer;
     type Child = ();
+    const NAME: &'static str = "CountChildren";
+    type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, server: &CountChildrenServer, _ctx: &mut Context) -> Self {
+    fn new(
+        _method: &CowGrpcMethod,
+        server: &CountChildrenServer,
+        _ctx: &mut Context,
+        _wire: &WireIn<'_>,
+    ) -> Self {
         Self(server.0.clone())
     }
 
@@ -163,6 +179,7 @@ impl Layer for CountChildren {
         _child_ctx: &mut (),
         _request: &mut Request<T>,
         _child_rpc: &mut ChildRpcContext,
+        _child_wire: &mut WireOut,
     ) -> Result<(), Status> {
         self.0 .0.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -189,8 +206,15 @@ impl LayerServer for PriorityFromCountServer {
 impl Layer for PriorityFromCount {
     type Server = PriorityFromCountServer;
     type Child = ();
+    const NAME: &'static str = "PriorityFromCount";
+    type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, server: &PriorityFromCountServer, _ctx: &mut Context) -> Self {
+    fn new(
+        _method: &CowGrpcMethod,
+        server: &PriorityFromCountServer,
+        _ctx: &mut Context,
+        _wire: &WireIn<'_>,
+    ) -> Self {
         Self(server.0.clone())
     }
 
@@ -201,6 +225,7 @@ impl Layer for PriorityFromCount {
         _child_ctx: &mut (),
         _request: &mut Request<T>,
         child_rpc: &mut ChildRpcContext,
+        _child_wire: &mut WireOut,
     ) -> Result<(), Status> {
         child_rpc.prio_hint = PriorityHint::new(self.0 .0.load(Ordering::Relaxed));
         Ok(())
@@ -226,8 +251,15 @@ impl LayerServer for RecordServiceNameServer {
 impl Layer for RecordServiceName {
     type Server = RecordServiceNameServer;
     type Child = ();
+    const NAME: &'static str = "RecordServiceName";
+    type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &RecordServiceNameServer, _ctx: &mut Context) -> Self {
+    fn new(
+        _method: &CowGrpcMethod,
+        _server: &RecordServiceNameServer,
+        _ctx: &mut Context,
+        _wire: &WireIn<'_>,
+    ) -> Self {
         Self
     }
 }

@@ -247,15 +247,16 @@ async fn sufficient_tokens_executes_and_piggybacks_price() {
     // (= `own_price + max_downstream`) and should retain the positive
     // test floor.
     let now = time_now();
-    let rajomon_ctx = ContextBuilder::new("test.ChildService/Rpc1", 99)
-        .gateway_entry(now)
-        .slo(1_000_000)
-        .deadline(now + 1_000_000)
-        .tokens(1_000_000) // Plenty of tokens
-        .build();
+    let rajomon_ctx = masa::RootContext::from(
+        ContextBuilder::new("test.ChildService/Rpc1", 99)
+            .gateway_entry(now)
+            .slo(1_000_000)
+            .deadline(now + 1_000_000)
+            .build(),
+    )
+    .with_rajomon_tokens(1_000_000); // Plenty of tokens
 
-    let mut request = Request::new(Input1 {});
-    request.set_masa_context(&rajomon_ctx);
+    let request = rajomon_ctx.attach(Request::new(Input1 {}));
 
     let response = client
         .rpc1(request)
@@ -320,15 +321,16 @@ async fn insufficient_tokens_triggers_early_return() {
 
     let now = time_now();
     // Start with very few tokens
-    let rajomon_ctx = ContextBuilder::new("test.ChildService/Rpc1", 99)
-        .gateway_entry(now)
-        .slo(1_000_000)
-        .deadline(now + 1_000_000)
-        .tokens(0) // Not enough tokens to even afford baseline cost of 1
-        .build();
+    let rajomon_ctx = masa::RootContext::from(
+        ContextBuilder::new("test.ChildService/Rpc1", 99)
+            .gateway_entry(now)
+            .slo(1_000_000)
+            .deadline(now + 1_000_000)
+            .build(),
+    )
+    .with_rajomon_tokens(0); // Not enough tokens to even afford baseline cost of 1
 
-    let mut request = Request::new(Input1 {});
-    request.set_masa_context(&rajomon_ctx);
+    let request = rajomon_ctx.attach(Request::new(Input1 {}));
 
     let error = client
         .rpc1(request)

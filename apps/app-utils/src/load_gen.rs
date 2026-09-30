@@ -30,7 +30,7 @@ use crate::{
     logging::init_logging_file,
     timing::{get_timestamp, time_now},
 };
-use masa::Context;
+use masa::{Context, RootContext};
 use tonic::Response;
 use tonic::Status;
 
@@ -524,7 +524,7 @@ where
         &self,
         mut rng: StdRng,
         client: C::FrontendClient,
-        ctx: Context,
+        ctx: RootContext,
         trace: bool,
     ) -> String {
         let latency;
@@ -567,7 +567,7 @@ where
 
         let (response, error) = map_response(response, latency <= self.slo);
 
-        let stats = RequestStats::new(ctx, latency, error.clone(), response);
+        let stats = RequestStats::new(ctx.into_context(), latency, error.clone(), response);
 
         if trace {
             self.trace_tx.as_ref().unwrap().send(stats).unwrap();
@@ -615,7 +615,7 @@ where
         &self,
         rng: &mut StdRng,
         client: C::FrontendClient,
-        ctx: &Context,
+        ctx: &RootContext,
     ) -> impl Future<Output = Result<Response<Self::ResponseType>, Status>>;
 
     fn response_output_headers(&self) -> Vec<String>;
@@ -674,7 +674,7 @@ where
         &self,
         rng: StdRng,
         client: C::FrontendClient,
-        ctx: Context,
+        ctx: RootContext,
         trace: bool,
     ) -> impl Future<Output = String> + Send;
 
@@ -819,10 +819,10 @@ where
                 }
             };
             #[cfg(not(feature = "ac_rajomon"))]
-            let ctx = masa::create_context(
+            let ctx = RootContext::from(masa::create_context(
                 handler.api(),
                 std::time::Duration::from_micros(handler.slo()),
-            );
+            ));
 
             let client = self.client.clone();
             let ctrs = Arc::clone(&counters);

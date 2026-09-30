@@ -22,6 +22,8 @@ use std::task::Poll;
 use std::time::Duration;
 
 use masa_core::{time_now, Context, ContextBuilder, PriorityHint};
+#[cfg(feature = "ac_rajomon")]
+use masa_policy::{header_string_with_wire, modules::RajomonLayer, RajomonWire};
 use masa_policy::{
     MasaRequestExt, MasaResponseExt, MasaStatusExt, PolicyHooks, MASA_CONTEXT_HEADER,
 };
@@ -99,18 +101,70 @@ fn locally_late_ctx(svc: &'static str) -> Context {
         .build()
 }
 
-#[cfg(feature = "ac_rajomon")]
-fn with_tokens(b: ContextBuilder, tokens: u64) -> ContextBuilder {
-    b.tokens(tokens)
-}
-#[cfg(not(feature = "ac_rajomon"))]
-fn with_tokens(b: ContextBuilder, _tokens: u64) -> ContextBuilder {
-    b
+/// An inbound context and the Rajomon tokens its sender attached. Tokens are
+/// Rajomon's wire data rather than part of `Context`, so they travel beside it.
+struct Inbound {
+    ctx: Context,
+    tokens: u64,
 }
 
-fn begin(server: &Arc<Srv>, svc: &'static str, method: &'static str, ctx: &Context) -> Par {
+impl std::ops::Deref for Inbound {
+    type Target = Context;
+
+    fn deref(&self) -> &Context {
+        &self.ctx
+    }
+}
+
+struct InboundBuilder {
+    builder: ContextBuilder,
+    tokens: u64,
+}
+
+impl InboundBuilder {
+    fn build(self) -> Inbound {
+        Inbound {
+            ctx: self.builder.build(),
+            tokens: self.tokens,
+        }
+    }
+}
+
+fn with_tokens(builder: ContextBuilder, tokens: u64) -> InboundBuilder {
+    InboundBuilder { builder, tokens }
+}
+
+/// What `begin` needs to build the inbound `ctx` header.
+trait InboundCtx {
+    fn header_value(&self) -> String;
+}
+
+impl InboundCtx for Context {
+    fn header_value(&self) -> String {
+        self.to_header_string()
+    }
+}
+
+impl InboundCtx for Inbound {
+    #[cfg(feature = "ac_rajomon")]
+    fn header_value(&self) -> String {
+        header_string_with_wire::<RajomonLayer>(
+            &self.ctx,
+            &RajomonWire {
+                tokens: self.tokens,
+            },
+        )
+    }
+
+    #[cfg(not(feature = "ac_rajomon"))]
+    fn header_value(&self) -> String {
+        self.ctx.to_header_string()
+    }
+}
+
+fn begin(server: &Arc<Srv>, svc: &'static str, method: &'static str, ctx: &impl InboundCtx) -> Par {
     let req = http::Request::builder()
-        .header(MASA_CONTEXT_HEADER, ctx.to_header_string())
+        .header(MASA_CONTEXT_HEADER, ctx.header_value())
         .body(())
         .unwrap();
     Par::begin(GrpcMethod::new(svc, method), &req, server.clone())
@@ -256,7 +310,10 @@ mod generic {
                 assert_eq!(root.method, "Parent");
             }
             #[cfg(feature = "ac_rajomon")]
-            assert_eq!(cc.tokens(), 40);
+            assert_eq!(
+                req.get_wire::<RajomonLayer>(),
+                Some(RajomonWire { tokens: 40 })
+            );
         });
     }
 
@@ -375,7 +432,10 @@ mod generic {
                 assert!(ql.queue_lengths.contains_key("char-svc"));
             }
             #[cfg(feature = "ac_rajomon")]
-            assert_eq!(rc.tokens(), 33);
+            assert_eq!(
+                resp.get_wire::<RajomonLayer>(),
+                Some(RajomonWire { tokens: 33 })
+            );
         });
     }
 
@@ -415,7 +475,7 @@ mod generic {
             let (r, _req, c) = issue_child(&p, "CharE3", "Child");
             r.unwrap();
 
-            let child_ctx = with_tokens(fresh_builder("CharE3", SLO), 100)
+            let child_ctx = fresh_builder("CharE3", SLO)
                 .response_meta(masa_core::EstimatorResponse {
                     compute_time_us: 4_000,
                     accumulated_compute_us: 5_000,
@@ -452,7 +512,7 @@ mod generic {
 
             let mut lens = std::collections::HashMap::new();
             lens.insert("down".to_string(), 5);
-            let child_ctx = with_tokens(fresh_builder("CharE4", SLO), 100)
+            let child_ctx = fresh_builder("CharE4", SLO)
                 .queue_latencies(masa_core::QueueLatencies {
                     initial: 11,
                     resume: 22,
@@ -587,7 +647,7 @@ mod generic {
     }
 
     #[cfg(feature = "ac_rajomon")]
-    fn rajomon_ctx(svc: &'static str, tokens: u64) -> Context {
+    fn rajomon_ctx(svc: &'static str, tokens: u64) -> Inbound {
         with_tokens(fresh_builder(svc, SLO), tokens).build()
     }
 
@@ -627,7 +687,10 @@ mod generic {
                 assert!(p.before_poll::<()>().is_ok());
                 let (r, req, _c) = issue_child(&p, "RajSvc", "RajDown");
                 r.unwrap();
-                assert_eq!(req.get_masa_context().unwrap().tokens(), tokens);
+                assert_eq!(
+                    req.get_wire::<RajomonLayer>(),
+                    Some(RajomonWire { tokens: tokens })
+                );
             }
 
             // A different parent has no downstream price, so it is admitted

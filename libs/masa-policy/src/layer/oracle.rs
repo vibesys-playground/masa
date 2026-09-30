@@ -5,6 +5,7 @@
 // wall-clock work after that child returns. It then converts that information
 // into a child completion deadline and priority hint.
 
+use crate::wire::{WireIn, WireOut};
 use masa_core::{
     Context, PriorityHint, ORACLE_CHILD_WORK_US_HEADER, ORACLE_REMAINING_AFTER_US_HEADER,
 };
@@ -27,8 +28,15 @@ pub struct OracleLayer;
 impl Layer for OracleLayer {
     type Server = OracleServer;
     type Child = OracleChild;
+    const NAME: &'static str = "oracle";
+    type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &OracleServer, _ctx: &mut Context) -> Self {
+    fn new(
+        _method: &CowGrpcMethod,
+        _server: &OracleServer,
+        _ctx: &mut Context,
+        _wire: &WireIn<'_>,
+    ) -> Self {
         Self
     }
 
@@ -39,6 +47,7 @@ impl Layer for OracleLayer {
         _child_ctx: &mut OracleChild,
         request: &mut Request<T>,
         child_rpc: &mut ChildRpcContext,
+        _child_wire: &mut WireOut,
     ) -> Result<(), Status> {
         let hint = OracleHint::from_request(request, child_method)?;
         let completion_deadline = ctx.e2e_deadline().saturating_sub(hint.remaining_after_us);
