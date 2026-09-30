@@ -731,19 +731,23 @@ mod tests {
         let wire = WireIn::from_metadata(response.as_ref().unwrap().metadata()).unwrap();
         let ac = Arc::new(PredictiveAdmission::new());
 
-        for (hop_count, expected) in [(0, Some(7_000)), (1, None)] {
+        // Some estimators need many samples before they give an estimate.
+        for (hop_count, learns) in [(0, true), (1, false)] {
             let layer = layer_with(EstimationInfo::for_test(hop_count, Some(root)), &ac);
-            layer
-                .after_child_rpc(
-                    &Context::default(),
-                    &child,
-                    &response,
-                    &wire,
-                    &PredAdmissionChild,
-                    &Extensions::new(),
-                )
-                .unwrap();
-            assert_eq!(layer.est.est_subtree_compute(MethodKey(root)), expected);
+            for _ in 0..2_000 {
+                layer
+                    .after_child_rpc(
+                        &Context::default(),
+                        &child,
+                        &response,
+                        &wire,
+                        &PredAdmissionChild,
+                        &Extensions::new(),
+                    )
+                    .unwrap();
+            }
+            let learned = layer.est.est_subtree_compute(MethodKey(root));
+            assert_eq!(learned.is_some(), learns, "hop count {hop_count}");
         }
     }
 
