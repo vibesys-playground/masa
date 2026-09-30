@@ -23,7 +23,7 @@ use masa_integration_tests::pb::{
     child_service_server::{ChildService, ChildServiceServer},
     Input1, Input2, Output1, Output2,
 };
-use masa_policy::{policy_stack, Layer, PolicyHooks};
+use masa_policy::{policy_stack, Layer, PolicyHooks, WireIn, WireOut};
 use tonic::metadata::MetadataValue;
 use tonic::transport::Server;
 use tonic::{Code, CowGrpcMethod, Request, Response, Status};
@@ -74,8 +74,10 @@ struct RejectBlocked;
 impl Layer for RejectBlocked {
     type Server = ();
     type Child = ();
+    const NAME: &'static str = "RejectBlocked";
+    type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context) -> Self {
+    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>) -> Self {
         Self
     }
 
@@ -94,12 +96,19 @@ struct StampResponse;
 impl Layer for StampResponse {
     type Server = ();
     type Child = ();
+    const NAME: &'static str = "StampResponse";
+    type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context) -> Self {
+    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>) -> Self {
         Self
     }
 
-    fn finalize<Ret>(&self, _ctx: &mut Context, result: &mut Result<Response<Ret>, Status>) {
+    fn finalize<Ret>(
+        &self,
+        _ctx: &mut Context,
+        result: &mut Result<Response<Ret>, Status>,
+        _wire: &mut WireOut,
+    ) {
         if let Ok(response) = result {
             response
                 .metadata_mut()

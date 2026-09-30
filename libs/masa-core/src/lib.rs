@@ -7,11 +7,9 @@ mod timing;
 mod typing;
 
 pub use context::FutureSpan;
-#[cfg(feature = "ac_rajomon")]
-pub use context::RajomonContext;
 pub use context::{
     invalid_context_header_metadata_message, Context, ContextBuilder, RequestContext,
-    MISSING_CONTEXT_HEADER_MESSAGE,
+    MISSING_CONTEXT_HEADER_MESSAGE, WIRE_SEPARATOR,
 };
 #[cfg(feature = "estimator")]
 pub use context::{EstimatorContext, EstimatorResponse, ResponseMeta, RootMethod};

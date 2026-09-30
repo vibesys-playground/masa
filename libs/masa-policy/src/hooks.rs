@@ -19,8 +19,11 @@ use crate::context_ext::{
     get_service_name_override_from_headers, get_service_name_override_from_metadata, read_context,
     MasaRequestExt, MasaResponseExt, MasaStatusExt,
 };
-use crate::layer::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit};
+use crate::layer::{
+    assert_unique_names, ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit,
+};
 use crate::masa_stack::MasaStack;
+use crate::wire::{WireIn, WireOut};
 use masa_core::{Context, ContextBuilder};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
 use tonic::{CowGrpcMethod, GrpcMethod, Request, Response, Status};
@@ -77,6 +80,7 @@ pub struct ServerContext<S: Layer = MasaStack> {
 
 impl<S: Layer + 'static> ServerHooks for ServerContext<S> {
     fn new(service_name: &'static str) -> Self {
+        assert_unique_names::<S>();
         Self {
             layers: S::Server::new(&mut ServerInit::new(service_name)),
         }
@@ -97,7 +101,8 @@ impl<S: Layer + 'static> ParentHooks<ChildContext<S>, ServerContext<S>> for Pare
     ) -> Self {
         let mut ctx = read_context(req);
         let resolved_method = resolve_method_name_from_http(method, req);
-        let layers = S::new(&resolved_method, &server_ctx.layers, &mut ctx);
+        let wire = WireIn::from_headers(req.headers()).unwrap_or_else(|err| panic!("{err}"));
+        let layers = S::new(&resolved_method, &server_ctx.layers, &mut ctx, &wire);
 
         Self { ctx, layers }
     }
@@ -116,18 +121,20 @@ impl<S: Layer + 'static> ParentHooks<ChildContext<S>, ServerContext<S>> for Pare
         child_ctx.set_method_name(child_method_name.clone());
 
         let mut child_rpc = ChildRpcContext::from_parent(&self.ctx);
+        let mut child_wire = WireOut::new();
         self.layers.before_child_rpc(
             &self.ctx,
             &child_method_name,
             &mut child_ctx.layers,
             request,
             &mut child_rpc,
+            &mut child_wire,
         )?;
 
-        #[cfg_attr(
-            not(any(feature = "estimator", feature = "ac_rajomon")),
-            allow(unused_mut)
-        )]
+        // Masa's existing `Context` path: the child's context starts as a copy
+        // of the parent's with deadline, priority and hop count overridden.
+        // This is Masa policy; module wire data is never copied down.
+        #[cfg_attr(not(feature = "estimator"), allow(unused_mut))]
         let mut child_recv_ctx = ContextBuilder::from(&self.ctx)
             .deadline(child_rpc.deadline)
             .prio_hint(child_rpc.prio_hint);
@@ -135,12 +142,9 @@ impl<S: Layer + 'static> ParentHooks<ChildContext<S>, ServerContext<S>> for Pare
         {
             child_recv_ctx = child_recv_ctx.hop_count(child_rpc.hop_count);
         }
-        #[cfg(feature = "ac_rajomon")]
-        {
-            child_recv_ctx = child_recv_ctx.tokens(child_rpc.tokens);
-        }
         let child_recv_ctx = child_recv_ctx.build();
         request.set_masa_context(&child_recv_ctx);
+        child_wire.install(request.metadata_mut());
 
         Ok(())
     }
@@ -167,11 +171,19 @@ impl<S: Layer + 'static> ParentHooks<ChildContext<S>, ServerContext<S>> for Pare
 
     fn finalize_before_serialization<Ret>(&self, result: &mut Result<Response<Ret>, Status>) {
         let mut ctx = self.ctx.clone();
-        self.layers.finalize(&mut ctx, result);
-        match result {
-            Ok(resp) => resp.set_masa_context(&ctx),
-            Err(status) => status.set_masa_context(&ctx),
-        }
+        let mut wire = WireOut::new();
+        self.layers.finalize(&mut ctx, result, &mut wire);
+        let metadata = match result {
+            Ok(resp) => {
+                resp.set_masa_context(&ctx);
+                resp.metadata_mut()
+            }
+            Err(status) => {
+                status.set_masa_context(&ctx);
+                status.metadata_mut()
+            }
+        };
+        wire.install(metadata);
     }
 }
 

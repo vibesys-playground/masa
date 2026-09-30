@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Api, Latency, PriorityHint, RequestId, Timestamp};
 
+/// Separates the base64 bincode `Context` from the module-wire suffix in the
+/// context header value. Not part of the base64 alphabet.
+pub const WIRE_SEPARATOR: char = '.';
+
 pub const MISSING_CONTEXT_HEADER_MESSAGE: &str =
     "missing MASA context header `ctx`; MASA-enabled services require clients to attach context via MASA context helpers";
 
@@ -122,19 +126,6 @@ pub struct EstimatorContext {
     pub root_method: Option<RootMethod>,
 }
 
-#[cfg(feature = "ac_rajomon")]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct RajomonContext {
-    pub tokens: u64,
-}
-
-#[cfg(feature = "ac_rajomon")]
-impl Default for RajomonContext {
-    fn default() -> Self {
-        Self { tokens: 100 }
-    }
-}
-
 /// Represent a Masa context.
 ///
 /// Header serialization uses bincode, so the positional wire layout changes
@@ -152,10 +143,6 @@ pub struct Context {
     #[cfg(feature = "estimator")]
     #[serde(default)]
     pub estimator: EstimatorContext,
-    // Rajomon admission state.
-    #[cfg(feature = "ac_rajomon")]
-    #[serde(default)]
-    pub rajomon: RajomonContext,
 }
 
 impl Default for Context {
@@ -180,8 +167,6 @@ pub struct ContextBuilder {
     hop_count: u8,
     #[cfg(feature = "estimator")]
     root_method: Option<RootMethod>,
-    #[cfg(feature = "ac_rajomon")]
-    tokens: u64,
 }
 
 impl ContextBuilder {
@@ -202,8 +187,6 @@ impl ContextBuilder {
             hop_count: 0,
             #[cfg(feature = "estimator")]
             root_method: None,
-            #[cfg(feature = "ac_rajomon")]
-            tokens: RajomonContext::default().tokens,
         }
     }
 
@@ -224,8 +207,6 @@ impl ContextBuilder {
             hop_count: ctx.estimator.hop_count,
             #[cfg(feature = "estimator")]
             root_method: ctx.estimator.root_method.clone(),
-            #[cfg(feature = "ac_rajomon")]
-            tokens: ctx.rajomon.tokens,
         }
     }
 
@@ -272,12 +253,6 @@ impl ContextBuilder {
         self
     }
 
-    #[cfg(feature = "ac_rajomon")]
-    pub fn tokens(mut self, tokens: u64) -> Self {
-        self.tokens = tokens;
-        self
-    }
-
     #[cfg(feature = "estimator")]
     pub fn root_method(mut self, root_method: RootMethod) -> Self {
         self.root_method = Some(root_method);
@@ -321,10 +296,6 @@ impl ContextBuilder {
                 hop_count: self.hop_count,
                 root_method: self.root_method,
             },
-            #[cfg(feature = "ac_rajomon")]
-            rajomon: RajomonContext {
-                tokens: self.tokens,
-            },
         }
     }
 }
@@ -358,23 +329,6 @@ impl Context {
     /// Get the e2e deadline.
     pub fn e2e_deadline(&self) -> Timestamp {
         self.request.gateway_entry + self.request.slo
-    }
-
-    /// Get the tokens budget.
-    #[cfg(feature = "ac_rajomon")]
-    pub fn tokens(&self) -> u64 {
-        self.rajomon.tokens
-    }
-
-    /// Consume tokens from the budget. Returns false if budget is insufficient.
-    #[cfg(feature = "ac_rajomon")]
-    pub fn consume_tokens(&mut self, amount: u64) -> bool {
-        if self.rajomon.tokens >= amount {
-            self.rajomon.tokens -= amount;
-            true
-        } else {
-            false
-        }
     }
 
     pub fn prio_hint(&self) -> PriorityHint {
@@ -449,7 +403,12 @@ impl Context {
     }
 
     /// Create a new Masa context from Base64 encoded bincode.
+    ///
+    /// The header value may carry a module-wire suffix after a `.` (see
+    /// `masa_policy::wire`); the base64 alphabet has no `.`, so the context is
+    /// everything before it and the suffix is ignored here.
     pub fn from_header_string(s: &str) -> Self {
+        let s = s.split_once(WIRE_SEPARATOR).map_or(s, |(ctx, _)| ctx);
         let bytes = BASE64
             .decode(s)
             .unwrap_or_else(|err| panic!("{}", invalid_context_header_base64_message(err)));

@@ -17,20 +17,24 @@ mod masa_stack;
 pub mod policy_params;
 /// Method registry for mapping service/method strings to IDs.
 pub mod registry;
+/// Codec for per-module wire data carried in the context header.
+pub mod wire;
 
 #[cfg(feature = "stack_custom")]
 pub use agent::AgentStack;
 pub use context_ext::{
     get_masa_context_from_metadata, get_method_name_override_from_headers,
     get_method_name_override_from_metadata, get_service_name_override_from_headers,
-    get_service_name_override_from_metadata, read_context, read_context_from_headers,
-    read_priority_from_headers, set_masa_context_in_metadata, set_method_name_override_in_headers,
-    set_service_name_override_in_headers, MasaRequestExt, MasaResponseExt, MasaStatusExt,
-    MASA_CONTEXT_HEADER,
+    get_service_name_override_from_metadata, get_wire_from_metadata, header_string_with_wire,
+    read_context, read_context_from_headers, read_priority_from_headers,
+    set_masa_context_in_metadata, set_method_name_override_in_headers,
+    set_service_name_override_in_headers, set_wire_in_metadata, MasaRequestExt, MasaResponseExt,
+    MasaStatusExt, MASA_CONTEXT_HEADER,
 };
 pub use hooks::{ChildContext, ParentContext, PolicyHooks, ServerContext};
 pub use layer::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit, Stack};
 pub use masa_stack::MasaStack;
+pub use wire::{peek, WireError, WireIn, WireOut};
 
 /// Masa's built-in policy modules, for reuse in custom stacks. Each is
 /// available only when its feature is enabled.
@@ -55,5 +59,5 @@ pub use policy_params::PolicyParams;
 // Re-export Rajomon public items when the feature is enabled.
 #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
 pub use layer::admission::rajomon::{
-    ClientTokenBucket, RajomonSharedState, CLIENT_TOKEN_BUCKET, RAJOMON_STATE,
+    ClientTokenBucket, RajomonSharedState, RajomonWire, CLIENT_TOKEN_BUCKET, RAJOMON_STATE,
 };

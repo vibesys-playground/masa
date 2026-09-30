@@ -1,6 +1,9 @@
 //! Masa context extension traits and helpers.
 
 use masa_core::Context;
+
+use crate::layer::Layer;
+use crate::wire;
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::{Request, Response, Status};
 
@@ -24,9 +27,32 @@ pub fn get_masa_context_from_metadata(metadata: &tonic::metadata::MetadataMap) -
 }
 
 /// Set the MASA context in metadata.
+///
+/// Module wire data already attached to `metadata` is kept, so the order of
+/// attaching the context and the wire data does not matter.
 pub fn set_masa_context_in_metadata(metadata: &mut tonic::metadata::MetadataMap, ctx: &Context) {
-    let value: MetadataValue<Ascii> = ctx.to_header_string().parse().unwrap();
-    metadata.insert(MASA_CONTEXT_HEADER, value);
+    wire::set_context_part(metadata, ctx.to_header_string());
+}
+
+/// Get module `M`'s wire data from metadata, if present. Panics on malformed
+/// wire data, like a malformed context.
+pub fn get_wire_from_metadata<M: Layer>(
+    metadata: &tonic::metadata::MetadataMap,
+) -> Option<M::Wire> {
+    wire::get_from_metadata::<M>(metadata).unwrap_or_else(|err| panic!("{err}"))
+}
+
+/// Set module `M`'s wire data in metadata that already carries a context,
+/// keeping other modules' data.
+pub fn set_wire_in_metadata<M: Layer>(metadata: &mut tonic::metadata::MetadataMap, data: &M::Wire) {
+    wire::set_in_metadata::<M>(metadata, data).unwrap_or_else(|err| panic!("{err}"));
+}
+
+/// The `ctx` header value for `ctx` carrying module `M`'s wire data, for
+/// building inbound requests by hand (tests, tools).
+pub fn header_string_with_wire<M: Layer>(ctx: &Context, data: &M::Wire) -> String {
+    wire::header_value_with::<M>(&ctx.to_header_string(), data)
+        .unwrap_or_else(|err| panic!("{err}"))
 }
 
 fn get_ascii_metadata<'a>(
@@ -108,6 +134,12 @@ pub trait MasaRequestExt<T> {
 
     /// Get the MASA context from this request.
     fn get_masa_context(&self) -> Option<Context>;
+
+    /// Set module `M`'s wire data. The MASA context must be attached first.
+    fn set_wire<M: Layer>(&mut self, data: &M::Wire);
+
+    /// Get module `M`'s wire data (`M::Wire::default()` if absent).
+    fn get_wire<M: Layer>(&self) -> Option<M::Wire>;
 }
 
 impl<T> MasaRequestExt<T> for Request<T> {
@@ -155,6 +187,14 @@ impl<T> MasaRequestExt<T> for Request<T> {
     fn get_masa_context(&self) -> Option<Context> {
         get_masa_context_from_metadata(self.metadata())
     }
+
+    fn set_wire<M: Layer>(&mut self, data: &M::Wire) {
+        set_wire_in_metadata::<M>(self.metadata_mut(), data);
+    }
+
+    fn get_wire<M: Layer>(&self) -> Option<M::Wire> {
+        get_wire_from_metadata::<M>(self.metadata())
+    }
 }
 
 /// Extension trait for `Response<T>` to manage MASA context.
@@ -167,6 +207,9 @@ pub trait MasaResponseExt<T> {
 
     /// Get the MASA context from this response.
     fn get_masa_context(&self) -> Option<Context>;
+
+    /// Get module `M`'s wire data (`M::Wire::default()` if absent).
+    fn get_wire<M: Layer>(&self) -> Option<M::Wire>;
 }
 
 impl<T> MasaResponseExt<T> for Response<T> {
@@ -182,6 +225,10 @@ impl<T> MasaResponseExt<T> for Response<T> {
     fn get_masa_context(&self) -> Option<Context> {
         get_masa_context_from_metadata(self.metadata())
     }
+
+    fn get_wire<M: Layer>(&self) -> Option<M::Wire> {
+        get_wire_from_metadata::<M>(self.metadata())
+    }
 }
 
 /// Extension trait for `Status` to manage MASA context.
@@ -194,6 +241,9 @@ pub trait MasaStatusExt {
 
     /// Get the MASA context from this status.
     fn get_masa_context(&self) -> Option<Context>;
+
+    /// Get module `M`'s wire data (`M::Wire::default()` if absent).
+    fn get_wire<M: Layer>(&self) -> Option<M::Wire>;
 }
 
 impl MasaStatusExt for Status {
@@ -208,6 +258,10 @@ impl MasaStatusExt for Status {
 
     fn get_masa_context(&self) -> Option<Context> {
         get_masa_context_from_metadata(self.metadata())
+    }
+
+    fn get_wire<M: Layer>(&self) -> Option<M::Wire> {
+        get_wire_from_metadata::<M>(self.metadata())
     }
 }
 

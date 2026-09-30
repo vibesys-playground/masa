@@ -25,7 +25,11 @@ use std::collections::HashMap;
 use std::task::Poll;
 
 use masa_core::{Context, PriorityHint};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use tonic::{CowGrpcMethod, Response, Status};
+
+use crate::wire::{assert_valid_name, WireIn, WireOut};
 
 // ── Submodules ──────────────────────────────────────────────────────────
 
@@ -96,8 +100,9 @@ impl ServerInit {
 /// Mutable state populated by modules in [`Layer::before_child_rpc`].
 ///
 /// Initialized from the parent context. Each module in the stack may mutate
-/// fields (e.g., tighten deadline, set tokens). After all modules have run,
-/// the hooks build the child `Context` from these fields.
+/// fields (e.g., tighten deadline, adjust priority). After all modules have
+/// run, the hooks build the child `Context` from these fields. Module-specific
+/// data does not belong here: it goes in the module's [`Layer::Wire`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct ChildRpcContext {
@@ -105,8 +110,6 @@ pub struct ChildRpcContext {
     pub prio_hint: PriorityHint,
     #[cfg(feature = "estimator")]
     pub hop_count: u8,
-    #[cfg(feature = "ac_rajomon")]
-    pub tokens: u64,
 }
 
 impl ChildRpcContext {
@@ -118,8 +121,6 @@ impl ChildRpcContext {
             prio_hint: ctx.prio_hint(),
             #[cfg(feature = "estimator")]
             hop_count: ctx.hop_count().saturating_add(1),
-            #[cfg(feature = "ac_rajomon")]
-            tokens: ctx.tokens(),
         }
     }
 }
@@ -134,10 +135,33 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
     type Server: LayerServer;
     type Child: LayerChild;
 
+    /// Name of this module's section in the wire envelope. Must be unique
+    /// among the modules of a stack that have wire data (checked when the
+    /// server state is built), ASCII letters, digits, `_` or `-`, and stable
+    /// across the binaries of a deployment. Unused when `Wire` is `()`.
+    const NAME: &'static str;
+
+    /// The type of the data this module exchanges with other hops. The module
+    /// reads it with [`WireIn::get`] and writes it with [`WireOut::put`]; the
+    /// framework never inspects, defaults or forwards it. A module with no
+    /// wire data uses `()`.
+    ///
+    /// Associated type defaults are unstable, so every module declares this
+    /// explicitly. Wrap a field in `Option` when its absence must be told
+    /// apart from any value, such as zero.
+    type Wire: Serialize + DeserializeOwned + Send + Sync + 'static;
+
     /// Construct per-request module state.
     ///
-    /// May inspect and mutate `ctx` (e.g., Rajomon deducts tokens here).
-    fn new(method: &CowGrpcMethod, server: &Self::Server, ctx: &mut Context) -> Self;
+    /// `wire` is the inbound request's wire sections; the module reads its own
+    /// with `wire.get::<Self>()`, which is `None` if the sender attached
+    /// none. May inspect and mutate `ctx`.
+    fn new(
+        method: &CowGrpcMethod,
+        server: &Self::Server,
+        ctx: &mut Context,
+        wire: &WireIn<'_>,
+    ) -> Self;
 
     /// Called before each poll of the handler future.
     ///
@@ -149,7 +173,10 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
     /// Called before each outbound child RPC.
     ///
     /// The module may reject the child RPC (returning `Err`) or mutate
-    /// `child_rpc` to tighten the deadline, adjust priority, or set tokens.
+    /// `child_rpc` to tighten the deadline or adjust priority. `child_wire`
+    /// starts empty and becomes the child request's wire sections: a module
+    /// that does not `put` anything sends nothing, and nothing is carried
+    /// over from this request's inbound wire.
     fn before_child_rpc<T>(
         &self,
         _ctx: &Context,
@@ -157,6 +184,7 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
         _child_ctx: &mut Self::Child,
         _request: &mut tonic::Request<T>,
         _child_rpc: &mut ChildRpcContext,
+        _child_wire: &mut WireOut,
     ) -> Result<(), Status> {
         Ok(())
     }
@@ -187,8 +215,36 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
     ///
     /// Modules should mutate `ctx` directly (e.g., set `response_meta` or
     /// `queue_latencies`). The caller serializes the context once after all
-    /// modules have run.
-    fn finalize<Ret>(&self, _ctx: &mut Context, _result: &mut Result<Response<Ret>, Status>) {}
+    /// modules have run. `wire` starts empty and becomes the response's wire
+    /// sections.
+    fn finalize<Ret>(
+        &self,
+        _ctx: &mut Context,
+        _result: &mut Result<Response<Ret>, Status>,
+        _wire: &mut WireOut,
+    ) {
+    }
+
+    #[doc(hidden)]
+    fn collect_names(names: &mut Vec<&'static str>) {
+        if TypeId::of::<Self::Wire>() != TypeId::of::<()>() {
+            names.push(Self::NAME);
+        }
+    }
+}
+
+/// Panics if two modules in the stack `S` share a wire name, which would make
+/// their data overwrite each other.
+pub(crate) fn assert_unique_names<S: Layer>() {
+    let mut names = Vec::new();
+    S::collect_names(&mut names);
+    for (i, name) in names.iter().enumerate() {
+        assert_valid_name(name);
+        assert!(
+            !names[..i].contains(name),
+            "two modules in the policy stack use the wire name `{name}`; `Layer::NAME` must be unique"
+        );
+    }
 }
 
 /// Per-child-RPC module state.
@@ -210,8 +266,10 @@ impl LayerChild for () {
 impl Layer for () {
     type Server = ();
     type Child = ();
+    const NAME: &'static str = "";
+    type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context) -> Self {}
+    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>) -> Self {}
 }
 
 impl<A: LayerServer, B: LayerServer> LayerServer for (A, B) {
@@ -240,13 +298,25 @@ pub struct Stack<H, T> {
 impl<H: Layer, T: Layer> Layer for Stack<H, T> {
     type Server = (H::Server, T::Server);
     type Child = (H::Child, T::Child);
+    const NAME: &'static str = "";
+    type Wire = ();
 
-    fn new(method: &CowGrpcMethod, server: &Self::Server, ctx: &mut Context) -> Self {
-        let head = H::new(method, &server.0, ctx);
+    fn new(
+        method: &CowGrpcMethod,
+        server: &Self::Server,
+        ctx: &mut Context,
+        wire: &WireIn<'_>,
+    ) -> Self {
+        let head = H::new(method, &server.0, ctx, wire);
         Self {
             head,
-            tail: T::new(method, &server.1, ctx),
+            tail: T::new(method, &server.1, ctx, wire),
         }
+    }
+
+    fn collect_names(names: &mut Vec<&'static str>) {
+        H::collect_names(names);
+        T::collect_names(names);
     }
 
     #[inline]
@@ -263,11 +333,24 @@ impl<H: Layer, T: Layer> Layer for Stack<H, T> {
         child_ctx: &mut Self::Child,
         request: &mut tonic::Request<R>,
         child_rpc: &mut ChildRpcContext,
+        child_wire: &mut WireOut,
     ) -> Result<(), Status> {
-        self.head
-            .before_child_rpc(ctx, child_method, &mut child_ctx.0, request, child_rpc)?;
-        self.tail
-            .before_child_rpc(ctx, child_method, &mut child_ctx.1, request, child_rpc)
+        self.head.before_child_rpc(
+            ctx,
+            child_method,
+            &mut child_ctx.0,
+            request,
+            child_rpc,
+            child_wire,
+        )?;
+        self.tail.before_child_rpc(
+            ctx,
+            child_method,
+            &mut child_ctx.1,
+            request,
+            child_rpc,
+            child_wire,
+        )
     }
 
     #[inline]
@@ -295,9 +378,14 @@ impl<H: Layer, T: Layer> Layer for Stack<H, T> {
     }
 
     #[inline]
-    fn finalize<Ret>(&self, ctx: &mut Context, result: &mut Result<Response<Ret>, Status>) {
-        self.head.finalize(ctx, result);
-        self.tail.finalize(ctx, result);
+    fn finalize<Ret>(
+        &self,
+        ctx: &mut Context,
+        result: &mut Result<Response<Ret>, Status>,
+        wire: &mut WireOut,
+    ) {
+        self.head.finalize(ctx, result, wire);
+        self.tail.finalize(ctx, result, wire);
     }
 }
 
