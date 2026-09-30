@@ -59,6 +59,13 @@ _AC_MAP: dict[str, str] = {
     "ac_rajomon": "rajomon",
 }
 
+# Policy stack override: `stack_custom` runs the agent-owned stack in
+# libs/masa-policy/src/agent/ instead of the feature-selected MasaStack, so the
+# other flags no longer describe the policy on their own.
+_STACK_MAP: dict[str, str] = {
+    "stack_custom": "custom",
+}
+
 # Flags that do not affect plotting/display metadata.
 _IGNORED_FLAGS = {"deadline_equals_slack", "estimator", "trace_queue_latency"}
 
@@ -132,6 +139,7 @@ class Policy:
               slack-related flag is present (prio=slack or ac=slack).
         drop: Drop mechanism — "e2e_slo" (abort past-SLO requests).
         ac:   Admission control — "slack" or "rajomon".
+        stack: Policy stack override — "custom" for the agent-owned stack.
     """
 
     raw: str
@@ -140,6 +148,7 @@ class Policy:
     drop: str | None
     ac: str | None
     deadline_equals_slack: bool
+    stack: str | None = None
 
     # ── construction ───────────────────────────────────────────────────
 
@@ -167,6 +176,12 @@ class Policy:
         for flag, val in _AC_MAP.items():
             if flag in flags:
                 ac = val
+                break
+
+        stack: str | None = None
+        for flag, val in _STACK_MAP.items():
+            if flag in flags:
+                stack = val
                 break
 
         # Estimator — only relevant when any slack-related flag is present.
@@ -198,6 +213,7 @@ class Policy:
             drop=drop,
             ac=ac,
             deadline_equals_slack="deadline_equals_slack" in flags,
+            stack=stack,
         )
 
     # ── display ────────────────────────────────────────────────────────
@@ -219,6 +235,9 @@ class Policy:
         """
         if self.prio is None:
             return self.raw
+
+        if self.stack == "custom":
+            return self._format_display_name("Custom stack", [_PRIO_DISPLAY[self.prio]])
 
         if self.ac == "slack":
             deviations: list[str] = []
@@ -311,7 +330,9 @@ class Policy:
             ("e2e_slo_mt_mq", "e2e_slo"): "#0072B2",
             ("e2e_slo_mt_mq", "slack"): "#009E73",
         }
-        color = _color_map.get((self.prio, self.drop))
+        # A custom stack must not share a color with the Masa policy its flags
+        # would otherwise describe.
+        color = None if self.stack else _color_map.get((self.prio, self.drop))
         if color is not None:
             return color
         return _FALLBACK_COLORS[_stable_index(self.raw, len(_FALLBACK_COLORS))]
@@ -324,7 +345,7 @@ class Policy:
         the same color still get a distinct point symbol. Unrecognized policies
         fall back to a stable marker indexed by the raw policy string.
         """
-        marker = _MARKER_MAP.get((self.prio, self.ac))
+        marker = None if self.stack else _MARKER_MAP.get((self.prio, self.ac))
         if marker is not None:
             return marker
         return _FALLBACK_MARKERS[_stable_index(self.raw, len(_FALLBACK_MARKERS))]

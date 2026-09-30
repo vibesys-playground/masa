@@ -19,7 +19,8 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 /// The default Hooks implementation, selected at compile time by Masa features.
 ///
 /// No scheduling features select `NoopHooks` (zero overhead). Any scheduling
-/// feature selects `masa_policy::PolicyHooks` with full scheduling hooks.
+/// feature selects `masa_policy::PolicyHooks` with full scheduling hooks, and
+/// `stack_custom` swaps its stack for `masa_policy::AgentStack`.
 #[cfg(not(any(
     feature = "sched_fifo",
     feature = "sched_slo",
@@ -29,13 +30,41 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 pub type DefaultHooks = tonic::masa::noop::NoopHooks;
 
 /// The default Hooks implementation, selected at compile time by Masa features.
-#[cfg(any(
-    feature = "sched_fifo",
-    feature = "sched_slo",
-    feature = "sched_tailclipper",
-    feature = "sched_oracle"
+#[cfg(all(
+    any(
+        feature = "sched_fifo",
+        feature = "sched_slo",
+        feature = "sched_tailclipper",
+        feature = "sched_oracle"
+    ),
+    not(feature = "stack_custom")
 ))]
 pub type DefaultHooks = masa_policy::PolicyHooks;
+
+/// The default Hooks implementation, selected at compile time by Masa features.
+#[cfg(all(
+    any(
+        feature = "sched_fifo",
+        feature = "sched_slo",
+        feature = "sched_tailclipper",
+        feature = "sched_oracle"
+    ),
+    feature = "stack_custom"
+))]
+pub type DefaultHooks = masa_policy::PolicyHooks<masa_policy::AgentStack>;
+
+// Without a scheduling feature, Hyper spawns handlers without priorities and
+// Tokio ignores them, so the agent stack would never run.
+#[cfg(all(
+    feature = "stack_custom",
+    not(any(
+        feature = "sched_fifo",
+        feature = "sched_slo",
+        feature = "sched_tailclipper",
+        feature = "sched_oracle"
+    ))
+))]
+compile_error!("`stack_custom` requires a scheduling feature (e.g. `sched_slo`)");
 
 pub mod transport;
 

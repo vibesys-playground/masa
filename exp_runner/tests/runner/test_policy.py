@@ -394,3 +394,36 @@ class TestHatch:
 
     def test_unknown_fallback(self):
         assert Policy.parse("custom").hatch == ""
+
+
+class TestCustomStack:
+    """`stack_custom` runs the agent-owned stack, so it must not be labeled or
+    drawn as the Masa policy its other flags describe."""
+
+    def test_parses_stack(self):
+        p = Policy.parse("sched_slo,stack_custom")
+        assert p.stack == "custom"
+        assert p.prio == "e2e_slo"
+
+    def test_no_stack_by_default(self):
+        assert Policy.parse("sched_slo").stack is None
+
+    def test_display_name(self):
+        assert (
+            Policy.parse("sched_slo,stack_custom").display_name
+            == "Custom stack (SLO priority)"
+        )
+        assert (
+            Policy.parse(
+                "sched_pred,abort_slack,ac_pred,est_mean_var,stack_custom"
+            ).display_name
+            == "Custom stack (Masa priority)"
+        )
+
+    def test_style_differs_from_builtin_policy(self):
+        builtin = Policy.parse("sched_pred,abort_slack,ac_pred,est_mean_var")
+        custom = Policy.parse(
+            "sched_pred,abort_slack,ac_pred,est_mean_var,stack_custom"
+        )
+        assert custom.display_name != builtin.display_name
+        assert (custom.color, custom.marker) != (builtin.color, builtin.marker)

@@ -29,6 +29,8 @@ flag_combos=(
     "sched_mt,ac_rajomon"
     "sched_mt_multiqueue"
     "sched_mt_multiqueue,abort_slo"
+    "sched_slo,stack_custom"
+    "sched_pred,abort_slack,ac_pred,est_mean_var,stack_custom"
 )
 
 CONTINUE_ON_ERROR=false
@@ -105,7 +107,7 @@ check_tests() {
         case "$flags" in
             # Runtime-only flags (sched_mt*) live on tokio/masa, not masa-policy.
             *sched_mt*) continue ;;
-            *ac_pred* | *ac_rajomon* | *abort_slack* | *signal_slack*) ;;
+            *ac_pred* | *ac_rajomon* | *abort_slack* | *signal_slack* | *stack_custom*) ;;
             *) continue ;;
         esac
 

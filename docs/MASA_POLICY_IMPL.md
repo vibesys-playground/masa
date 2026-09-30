@@ -70,7 +70,9 @@ choose modules. Each slot holds a built-in module or `()` (disabled):
 - **Queue latency**: `QueueLatencyLayer` (`trace_queue_latency`)
 
 New policies are new modules composed into a new stack; see
-[`POLICY_MODULES.md`](POLICY_MODULES.md).
+[`POLICY_MODULES.md`](POLICY_MODULES.md). The `stack_custom` feature replaces
+`MasaStack` with `AgentStack` (`libs/masa-policy/src/agent/`) in
+`masa::DefaultHooks`, so a new stack runs in every app without app changes.
 
 Each scheduling flag also selects the corresponding tokio queue implementation (see Section 5).
 

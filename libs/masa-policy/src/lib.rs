@@ -5,6 +5,9 @@
 // hook traits. Tonic does not depend on this crate; `masa::DefaultHooks` selects
 // policy hooks when scheduling features are enabled.
 
+/// Agent-owned policy stack selected by the `stack_custom` feature.
+#[cfg(feature = "stack_custom")]
+pub mod agent;
 /// Masa context extension traits and helpers.
 pub mod context_ext;
 mod hooks;
@@ -15,6 +18,8 @@ pub mod policy_params;
 /// Method registry for mapping service/method strings to IDs.
 pub mod registry;
 
+#[cfg(feature = "stack_custom")]
+pub use agent::AgentStack;
 pub use context_ext::{
     get_masa_context_from_metadata, get_method_name_override_from_headers,
     get_method_name_override_from_metadata, get_service_name_override_from_headers,

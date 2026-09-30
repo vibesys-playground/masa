@@ -95,10 +95,53 @@ producer and consumer share one instance.
 - **Default Masa policies**: build with features as before. `masa::DefaultHooks`
   is `PolicyHooks<MasaStack>`, and `libs/masa-policy/src/masa_stack.rs` maps
   features to modules.
-- **Custom stack**: point code generation at your hooks type so that server
+- **Agent-owned stack (`stack_custom`)**: the way to run a new policy in the
+  existing apps and experiments. See the next section.
+- **Per-app stack**: point code generation at your hooks type so that server
   **and** client stubs agree, e.g. `tonic_build::configure().default_hooks_path(...)`
   set to `crate::MyHooks`. Tests can also instantiate servers directly with
   `FooServer::<_, MyHooks>::with_custom_context(svc)`.
+
+## Agent-owned stack (`stack_custom`)
+
+`libs/masa-policy/src/agent/` is reserved for policies written outside Masa's
+built-in modules, whether by a person or by an optimizing agent. It defines
+`AgentStack`. With the `stack_custom` feature, `masa::DefaultHooks` becomes
+`PolicyHooks<AgentStack>`, so every generated server and client stub in every
+app uses it, with no app or `build.rs` changes.
+
+To try a policy:
+
+1. Write modules as files under `libs/masa-policy/src/agent/` and declare them
+   in `agent/mod.rs`.
+2. Set `AgentStack` in `agent/mod.rs`, e.g.
+   `pub type AgentStack = policy_stack![crate::modules::EstimationLayer, my_policy::MyAdmission];`.
+   It starts as `crate::MasaStack`, so `<features>,stack_custom` behaves like
+   `<features>` until you change it.
+3. Build with a scheduling feature plus `stack_custom`, and add the features
+   the reused built-in modules need, e.g.
+   `cargo build -p hotel --release --features "sched_pred,est_mean_var,stack_custom"`.
+   `stack_custom` without a scheduling feature is a compile error.
+4. Run it as an experiment policy: list `sched_slo,stack_custom` (or any
+   other combination) in the experiment's `policies` file. Plots label it
+   `Custom stack (...)` and do not reuse the built-in policy's style.
+
+Rules for the agent stack:
+
+- Edit only `libs/masa-policy/src/agent/`. Built-in modules, `masa_stack.rs`,
+  `hooks.rs`, and the vendored libraries are out of scope for a policy change.
+- Keep one hooks type per binary: use `masa::DefaultHooks` everywhere rather
+  than naming `PolicyHooks<...>` in app code (see below).
+- Never delay `PriorityHint::infra()` work: it is reserved for infrastructure
+  tasks.
+- Built-in modules are reusable only when their feature is enabled (e.g.
+  `crate::modules::EstimationLayer` needs `estimator`). Features also change
+  the `Context` wire layout, so build every service with the same features.
+- Validate with `./scripts/check.sh "sched_slo,stack_custom"` and
+  `./scripts/test.sh --feature "sched_slo,stack_custom"`.
+  `libs/tonic/tests/masa_integration_tests/tests/custom_stack_serve.rs`
+  checks that `DefaultHooks` resolves to `AgentStack` and that custom modules
+  run on served requests.
 
 The parent context reaches client stubs through an untyped thread-local
 (`tonic::masa::thread_local`). A server and the client stubs its handlers call

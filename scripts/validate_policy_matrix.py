@@ -15,7 +15,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only on Python 3.10.
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MATRIX_PATH = "policy_matrix.toml"
-POLICY_FEATURE_PREFIXES = ("sched_", "abort_", "ac_", "est_")
+POLICY_FEATURE_PREFIXES = ("sched_", "abort_", "ac_", "est_", "stack_")
 POLICY_FEATURE_NAMES = {"estimator", "signal_slack", "trace_queue_latency"}
 
 
@@ -258,6 +258,7 @@ def _validate_python_policy(
     est = _as_str_map(expected["est"], "python_policy.est")
     drop = _as_str_map(expected["drop"], "python_policy.drop")
     ac = _as_str_map(expected["ac"], "python_policy.ac")
+    stack = _as_str_map(expected["stack"], "python_policy.stack")
     ignored = _as_str_list(expected["ignored"], "python_policy.ignored")
     precedence = _as_str_list(
         expected["prio_precedence"], "python_policy.prio_precedence"
@@ -277,6 +278,10 @@ def _validate_python_policy(
         )
     if policy._AC_MAP != ac:
         errors.append(f"exp_runner/runner/policy.py _AC_MAP drifted from {MATRIX_PATH}")
+    if policy._STACK_MAP != stack:
+        errors.append(
+            f"exp_runner/runner/policy.py _STACK_MAP drifted from {MATRIX_PATH}"
+        )
     _compare_sequence(
         errors,
         "exp_runner/runner/policy.py _PRIO_PRIORITY",
@@ -290,7 +295,9 @@ def _validate_python_policy(
         ignored,
     )
 
-    parser_flags = set(prio) | set(est) | set(drop) | set(ac) | set(ignored)
+    parser_flags = (
+        set(prio) | set(est) | set(drop) | set(ac) | set(stack) | set(ignored)
+    )
     expected_parser_flags = set(_as_str_list(manifest["flags"]["known"], "flags.known"))
     if parser_flags != expected_parser_flags:
         errors.append(
