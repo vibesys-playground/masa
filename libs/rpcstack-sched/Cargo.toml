@@ -1,0 +1,19 @@
+[package]
+name = "rpcstack-sched"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Run-queue interface, task metadata, built-in queues and default spawn policy for the Masa runtime"
+
+# Leaf crate: must not depend on tokio, tonic, hyper or any masa crate.
+[dependencies]
+
+[features]
+default = []
+# Select the priority-heap queue instead of FIFO.
+sched_prio = []
+# Select the TailClipper queue (priority heap plus a round-robin window).
+tailclipper = ["sched_prio"]
+# Select `custom::Queue`, the slot for a new queue. Takes precedence over the
+# other selecting features.
+sched_custom = []

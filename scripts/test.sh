@@ -191,6 +191,12 @@ if [ "$IS_MATRIX" = false ] || [ -z "$FEATURE_FLAG" ]; then
     done
 
     execute_test "tokio (masa priority suite)" cargo test -p tokio --features full --test masa_priority
+    execute_test "tokio (masa priority suite, sched_custom)" cargo test -p tokio --features full,sched_custom --test masa_priority
+
+    # Queue replay tests, once per queue-selecting feature.
+    for sched_feat in "" sched_prio tailclipper sched_custom; do
+        execute_test "rpcstack-sched (${sched_feat:-fifo})" cargo test -p rpcstack-sched --features "$sched_feat"
+    done
 fi
 
 # Collect results if parallel

@@ -168,7 +168,7 @@ mod h2_priority_tests {
     fn default_executor_uses_infra_priority() {
         let headers = HeaderMap::new();
 
-        assert_eq!(default_priority(&headers), TaskPriority::infra(),);
+        assert_eq!(default_priority(&headers), meta_for_unannotated_spawn(None));
     }
 
     #[test]
