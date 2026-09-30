@@ -13,8 +13,6 @@ pub use context::{
 };
 #[cfg(feature = "estimator")]
 pub use context::{EstimatorContext, EstimatorResponse, ResponseMeta, RootMethod};
-#[cfg(feature = "trace_queue_latency")]
-pub use context::{QueueContext, QueueLatencies};
 pub use flag::{
     ABORT_SLACK, ABORT_SLO, RAJOMON, SCHED_FIFO, SCHED_ORACLE, SCHED_PRED, SCHED_SLO,
     SCHED_TAILCLIPPER, SIGNAL_SLACK,

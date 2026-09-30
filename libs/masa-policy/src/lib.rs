@@ -32,7 +32,10 @@ pub use context_ext::{
     MasaStatusExt, MASA_CONTEXT_HEADER,
 };
 pub use hooks::{ChildContext, ParentContext, PolicyHooks, ServerContext};
-pub use layer::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit, Stack};
+pub use layer::{
+    ChildRpcContext, Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit,
+    Stack,
+};
 pub use masa_stack::MasaStack;
 pub use wire::{peek, WireError, WireIn, WireOut};
 
@@ -52,6 +55,8 @@ pub mod modules {
     #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
     pub use crate::layer::RajomonLayer;
 }
+#[cfg(feature = "trace_queue_latency")]
+pub use layer::QueueLatencyWire;
 pub use registry::{MethodId, MethodRegistry};
 
 pub use policy_params::PolicyParams;

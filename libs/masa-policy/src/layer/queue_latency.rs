@@ -3,20 +3,32 @@
 //
 // Included in the default stack only with `trace_queue_latency`. Tracks
 // initial and resume queue latencies via the tokio runtime, aggregates child
-// queue latencies from responses, and injects the totals into the response
-// context.
+// queue latencies from the children's response wire sections, and writes the
+// totals into its own response section.
 
 use crate::wire::{WireIn, WireOut};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use masa_core::{Context, QueueLatencies};
+use masa_core::Context;
+use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Response, Status};
 
-use crate::context_ext::MasaResponseExt;
+use super::{Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit};
 
-use super::{Layer, LayerChild, LayerServer, ServerInit};
+// ── Wire data ───────────────────────────────────────────────────────────
+
+/// Queue latencies of a request's subtree, carried in the response.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueLatencyWire {
+    /// Queueing time before each task's first poll, summed over the subtree.
+    pub initial: u64,
+    /// Queueing time after later wake-ups, summed over the subtree.
+    pub resume: u64,
+    /// Queue length at each service when this request's task was first polled.
+    pub queue_lengths: HashMap<String, u64>,
+}
 
 // ── Server ──────────────────────────────────────────────────────────────
 
@@ -24,8 +36,8 @@ use super::{Layer, LayerChild, LayerServer, ServerInit};
 pub struct QueueLatencyServer;
 
 impl LayerServer for QueueLatencyServer {
-    fn new(_init: &mut ServerInit) -> Self {
-        Self
+    fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
+        Ok(Self)
     }
 }
 
@@ -51,13 +63,14 @@ impl Layer for QueueLatencyLayer {
     type Server = QueueLatencyServer;
     type Child = QueueLatencyChild;
     const NAME: &'static str = "queue_latency";
-    type Wire = ();
+    type Wire = QueueLatencyWire;
 
     fn new(
         _method: &CowGrpcMethod,
         _server: &QueueLatencyServer,
         _ctx: &mut Context,
         _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
     ) -> Self {
         Self {
             initial_q_lat: AtomicU64::new(0),
@@ -69,7 +82,11 @@ impl Layer for QueueLatencyLayer {
     }
 
     #[inline]
-    fn before_poll<Ret>(&self, _ctx: &Context) -> Result<(), Result<Response<Ret>, Status>> {
+    fn before_poll<Ret>(
+        &self,
+        _ctx: &Context,
+        _ext: &mut Extensions,
+    ) -> Result<(), Result<Response<Ret>, Status>> {
         let queue_latency = tokio::task::obtain_task_queue_latency().as_micros() as u64;
         if self.is_first_poll.swap(false, Ordering::Relaxed) {
             if queue_latency > 0 {
@@ -89,23 +106,28 @@ impl Layer for QueueLatencyLayer {
         &self,
         _ctx: &Context,
         _child_method: &CowGrpcMethod,
-        response: &mut Result<Response<T>, Status>,
+        response: &Result<Response<T>, Status>,
+        response_wire: &WireIn<'_>,
         _child_ctx: &QueueLatencyChild,
+        _ext: &Extensions,
     ) -> Result<(), Status> {
-        if let Ok(resp) = response {
-            if let Some(ctx) = resp.get_masa_context() {
-                if let Some(ql) = ctx.queue_latencies() {
-                    self.initial_q_lat.fetch_add(ql.initial, Ordering::AcqRel);
-                    self.resume_q_lat.fetch_add(ql.resume, Ordering::AcqRel);
-                    if !ql.queue_lengths.is_empty() {
-                        let mut child_qls = self.child_queue_lengths.lock().unwrap();
-                        for (svc, len) in ql.queue_lengths.iter() {
-                            child_qls
-                                .entry(svc.clone())
-                                .and_modify(|e| *e = (*e).max(*len))
-                                .or_insert(*len);
-                        }
-                    }
+        // Only successful responses have ever contributed to the totals.
+        if response.is_err() {
+            return Ok(());
+        }
+        let child = response_wire
+            .get::<Self>()
+            .unwrap_or_else(|err| panic!("{err}"));
+        if let Some(ql) = child {
+            self.initial_q_lat.fetch_add(ql.initial, Ordering::AcqRel);
+            self.resume_q_lat.fetch_add(ql.resume, Ordering::AcqRel);
+            if !ql.queue_lengths.is_empty() {
+                let mut child_qls = self.child_queue_lengths.lock().unwrap();
+                for (svc, len) in ql.queue_lengths {
+                    child_qls
+                        .entry(svc)
+                        .and_modify(|e| *e = (*e).max(len))
+                        .or_insert(len);
                 }
             }
         }
@@ -115,20 +137,22 @@ impl Layer for QueueLatencyLayer {
     #[inline]
     fn finalize<Ret>(
         &self,
-        ctx: &mut Context,
+        _ctx: &mut Context,
         _result: &mut Result<Response<Ret>, Status>,
-        _wire: &mut WireOut,
+        wire: &mut WireOut,
+        _ext: &Extensions,
     ) {
         let initial = self.initial_q_lat.load(Ordering::Acquire);
         let resume = self.resume_q_lat.load(Ordering::Acquire);
         let own_len = self.own_queue_len.load(Ordering::Acquire);
         let mut queue_lengths = std::mem::take(&mut *self.child_queue_lengths.lock().unwrap());
         queue_lengths.insert(service_name().to_string(), own_len);
-        ctx.set_queue_latencies(QueueLatencies {
+        wire.put::<Self>(&QueueLatencyWire {
             initial,
             resume,
             queue_lengths,
-        });
+        })
+        .unwrap_or_else(|err| panic!("{err}"));
     }
 }
 

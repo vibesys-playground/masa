@@ -319,18 +319,11 @@ pub fn extract_queue_latencies(metadata: &MetadataMap) -> Option<QueueLatencyTra
 
 #[cfg(feature = "trace_queue_latency")]
 fn extract_queue_latencies_enabled(metadata: &MetadataMap) -> Option<QueueLatencyTraceFields> {
-    if let Some(ctx_str) = metadata.get("ctx").and_then(|v| v.to_str().ok()) {
-        let ctx = masa::Context::from_header_string(ctx_str);
-        if let Some(ql) = ctx.queue_latencies() {
-            return Some(QueueLatencyTraceFields {
-                initial_us: ql.initial,
-                resume_us: ql.resume,
-                queue_lengths_json: format_queue_lengths(&ql.queue_lengths),
-            });
-        }
-    }
-
-    None
+    masa::queue_latencies_from_metadata(metadata).map(|ql| QueueLatencyTraceFields {
+        initial_us: ql.initial,
+        resume_us: ql.resume,
+        queue_lengths_json: format_queue_lengths(&ql.queue_lengths),
+    })
 }
 
 #[cfg(feature = "trace_queue_latency")]

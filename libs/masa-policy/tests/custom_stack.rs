@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use masa_core::{time_now, Context, ContextBuilder, PriorityHint};
 use masa_policy::{
-    get_masa_context_from_metadata, policy_stack, ChildRpcContext, Layer, LayerServer, PolicyHooks,
-    ServerInit, WireIn, WireOut, MASA_CONTEXT_HEADER,
+    get_masa_context_from_metadata, policy_stack, ChildRpcContext, Extensions, Layer, LayerServer,
+    MissingDependency, PolicyHooks, ServerInit, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
 use tonic::{Code, CowGrpcMethod, GrpcMethod, Request, Status};
@@ -66,7 +66,13 @@ impl<const P: u64> Layer for FixedChildPriority<P> {
     const NAME: &'static str = "FixedChildPriority";
     type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>) -> Self {
+    fn new(
+        _method: &CowGrpcMethod,
+        _server: &(),
+        _ctx: &mut Context,
+        _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
+    ) -> Self {
         Self
     }
 
@@ -78,6 +84,7 @@ impl<const P: u64> Layer for FixedChildPriority<P> {
         _request: &mut Request<T>,
         child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
         child_rpc.prio_hint = PriorityHint::new(P);
         Ok(())
@@ -94,7 +101,13 @@ impl Layer for RejectChildren {
     const NAME: &'static str = "RejectChildren";
     type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>) -> Self {
+    fn new(
+        _method: &CowGrpcMethod,
+        _server: &(),
+        _ctx: &mut Context,
+        _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
+    ) -> Self {
         Self
     }
 
@@ -106,6 +119,7 @@ impl Layer for RejectChildren {
         _request: &mut Request<T>,
         _child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
         Err(Status::resource_exhausted("rejected by custom module"))
     }
@@ -121,7 +135,13 @@ impl Layer for UnreachableOnChild {
     const NAME: &'static str = "UnreachableOnChild";
     type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>) -> Self {
+    fn new(
+        _method: &CowGrpcMethod,
+        _server: &(),
+        _ctx: &mut Context,
+        _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
+    ) -> Self {
         Self
     }
 
@@ -133,6 +153,7 @@ impl Layer for UnreachableOnChild {
         _request: &mut Request<T>,
         _child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
         panic!("module after a rejecting module must not run");
     }
@@ -150,10 +171,10 @@ struct CountChildren(ChildCounter);
 struct CountChildrenServer(ChildCounter);
 
 impl LayerServer for CountChildrenServer {
-    fn new(init: &mut ServerInit) -> Self {
+    fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
         let counter = ChildCounter::default();
         init.provide(counter.clone());
-        Self(counter)
+        Ok(Self(counter))
     }
 }
 
@@ -168,6 +189,7 @@ impl Layer for CountChildren {
         server: &CountChildrenServer,
         _ctx: &mut Context,
         _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
     ) -> Self {
         Self(server.0.clone())
     }
@@ -180,6 +202,7 @@ impl Layer for CountChildren {
         _request: &mut Request<T>,
         _child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
         self.0 .0.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -195,11 +218,8 @@ struct PriorityFromCount(ChildCounter);
 struct PriorityFromCountServer(ChildCounter);
 
 impl LayerServer for PriorityFromCountServer {
-    fn new(init: &mut ServerInit) -> Self {
-        Self(
-            init.get::<ChildCounter>()
-                .expect("CountChildren runs earlier in the stack"),
-        )
+    fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
+        Ok(Self(init.require::<ChildCounter>()?))
     }
 }
 
@@ -214,6 +234,7 @@ impl Layer for PriorityFromCount {
         server: &PriorityFromCountServer,
         _ctx: &mut Context,
         _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
     ) -> Self {
         Self(server.0.clone())
     }
@@ -226,6 +247,7 @@ impl Layer for PriorityFromCount {
         _request: &mut Request<T>,
         child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
         child_rpc.prio_hint = PriorityHint::new(self.0 .0.load(Ordering::Relaxed));
         Ok(())
@@ -242,9 +264,9 @@ struct RecordServiceNameServer;
 static SEEN_SERVICES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 
 impl LayerServer for RecordServiceNameServer {
-    fn new(init: &mut ServerInit) -> Self {
+    fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
         SEEN_SERVICES.lock().unwrap().push(init.service_name());
-        Self
+        Ok(Self)
     }
 }
 
@@ -259,6 +281,7 @@ impl Layer for RecordServiceName {
         _server: &RecordServiceNameServer,
         _ctx: &mut Context,
         _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
     ) -> Self {
         Self
     }
@@ -329,7 +352,7 @@ fn server_init_carries_service_name() {
 }
 
 #[test]
-#[should_panic(expected = "CountChildren runs earlier in the stack")]
+#[should_panic(expected = "requires a `custom_stack::ChildCounter`")]
 fn misordered_dependency_fails_at_server_construction() {
     let _ = Server::<policy_stack![PriorityFromCount, CountChildren]>::new("custom-misordered");
 }

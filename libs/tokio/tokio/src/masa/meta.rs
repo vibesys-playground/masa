@@ -2,12 +2,10 @@
 //!
 //! `Meta` is an opaque value the run queues order tasks by. Code that only
 //! moves a `Meta` around (task headers, spawn plumbing) names `Meta` and never
-//! interprets it. Both the concrete type and the decision below come from the
-//! active policy in `default_policy.rs`.
+//! interprets it. The type and the decision below both come from
+//! `rpcstack-sched`; this module only dispatches to them.
 
-use super::default_policy;
-
-pub use super::default_policy::Meta;
+pub use rpcstack_sched::Meta;
 
 /// Hook called by every spawn that supplied no `Meta`; returns the `Meta` the
 /// new task gets.
@@ -16,5 +14,5 @@ pub use super::default_policy::Meta;
 /// spawn happens outside any task (for example from `block_on`, from a plain
 /// thread holding a runtime handle, or from the blocking pool).
 pub fn meta_for_unannotated_spawn(spawner: Option<&Meta>) -> Meta {
-    default_policy::meta_for_unannotated_spawn(spawner)
+    rpcstack_sched::default_policy::meta_for_unannotated_spawn(spawner)
 }
