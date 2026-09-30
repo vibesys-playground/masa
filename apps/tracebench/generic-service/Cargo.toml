@@ -53,3 +53,4 @@ est_mean_var = ["masa/est_mean_var"]
 
 trace_queue_latency = ["masa/trace_queue_latency"]
 deadline_equals_slack = ["masa/deadline_equals_slack"]
+stack_custom = ["masa/stack_custom"]

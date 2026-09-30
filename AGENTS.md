@@ -84,7 +84,10 @@ Key policy flags:
 - `ac_pred`: Progressive cost-aware admission control — uses compute-time estimates and downstream utilization signals. Requires `estimator`.
 - `ac_rajomon`: Token-bucket rate limiting admission control.
 
-`scripts/check.sh` checks: default (no features), `sched_fifo`, `sched_fifo,abort_slo`, `sched_slo`, `sched_slo,abort_slo`, `sched_tailclipper,abort_slo`, `sched_slo,ac_rajomon`, `sched_slo,ac_pred,est_mean_var`, `sched_pred,abort_slo,ac_pred,est_mean_var`, `sched_pred,abort_slack,est_mean_var`, `sched_pred,signal_slack,ac_pred,est_mean_var`, `sched_pred,abort_slack,ac_pred,est_mean_var,deadline_equals_slack`, `sched_mt`, `sched_mt,abort_slo`, `sched_mt,ac_rajomon`, `sched_mt_multiqueue`, `sched_mt_multiqueue,abort_slo`.
+**Policy stack override:**
+- `stack_custom`: Replaces the feature-selected `MasaStack` with the agent-owned `AgentStack` in `libs/masa-policy/src/agent/`, for every app. Requires a scheduling feature. Starts equal to `MasaStack`. See `docs/POLICY_MODULES.md`.
+
+`scripts/check.sh` checks: default (no features), `sched_fifo`, `sched_fifo,abort_slo`, `sched_slo`, `sched_slo,abort_slo`, `sched_tailclipper,abort_slo`, `sched_slo,ac_rajomon`, `sched_slo,ac_pred,est_mean_var`, `sched_pred,abort_slo,ac_pred,est_mean_var`, `sched_pred,abort_slack,est_mean_var`, `sched_pred,signal_slack,ac_pred,est_mean_var`, `sched_pred,abort_slack,ac_pred,est_mean_var,deadline_equals_slack`, `sched_mt`, `sched_mt,abort_slo`, `sched_mt,ac_rajomon`, `sched_mt_multiqueue`, `sched_mt_multiqueue,abort_slo`, `sched_slo,stack_custom`, `sched_pred,abort_slack,ac_pred,est_mean_var,stack_custom`.
 
 ## Architecture
 
@@ -103,12 +106,16 @@ Key policy flags:
 Application-facing Masa API and core types:
 - `libs/masa-core`: `Context`/`ContextBuilder`, `PriorityHint`, `Prioritize`, and latency distribution utilities
 - `libs/masa`: `DefaultHooks` selection by feature flag, context creation helpers, load-balanced transport, and policy-facing reexports from `masa-policy`
-- `DefaultHooks`: `tonic::masa::noop::NoopHooks` with no scheduling features; `masa_policy::PolicyHooks` when scheduling features are enabled
+- `DefaultHooks`: `tonic::masa::noop::NoopHooks` with no scheduling features; `masa_policy::PolicyHooks` (= `PolicyHooks<MasaStack>`) when scheduling features are enabled; `PolicyHooks<AgentStack>` with `stack_custom`
 
 ### libs/masa-policy/
 Concrete policy hook implementation and metadata helpers:
-- `hooks.rs`: `PolicyHooks` — unified hook implementation that dispatches the active layer stack in field order
-- `layer/`: Composable layer system — `e2e_deadline_guard.rs`, `queue_latency.rs`, `est/` (estimation), `admission/` (predictive + rajomon)
+- `hooks.rs`: `PolicyHooks<S>` — unified hook implementation; owns context plumbing and dispatches every hook through the module stack `S`
+- `layer/mod.rs`: Public policy module API — `Layer`, `LayerServer`, `LayerChild`, `ChildRpcContext`, `ServerInit`, `Stack`, `policy_stack!`
+- `masa_stack.rs`: `MasaStack`, the only place where features choose modules (disabled slots are `()`)
+- `agent/`: `AgentStack`, the agent-owned stack selected by `stack_custom`; new policies for apps and experiments go here
+- `layer/`: Built-in modules — `e2e_deadline_guard.rs`, `oracle.rs`, `queue_latency.rs`, `est/` (estimation), `admission/` (predictive + rajomon)
+- To add a policy, write a new module implementing `Layer` and compose a stack; do not add branches to `hooks.rs`. See `docs/POLICY_MODULES.md`
 - `context_ext.rs`: Context serialization helpers and `MasaRequestExt`/`MasaResponseExt`/`MasaStatusExt`
 - Depends on `tonic` for hook traits and gRPC boundary types; vendored tonic does not depend on `masa-policy`
 

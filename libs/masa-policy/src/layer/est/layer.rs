@@ -9,7 +9,7 @@ use std::task::Poll;
 use masa_core::{Context, PriorityHint, RootMethod, ABORT_SLACK};
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
-use super::super::{ChildRpcContext, Layer, LayerChild, LayerServer};
+use super::super::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit};
 use super::default_estimator::DefaultLatencyEstimator;
 use super::state::{
     is_early_return_response, ChildRPCTracker, EstimationTracker, LatencyEstimators,
@@ -21,19 +21,19 @@ use crate::MethodRegistry;
 
 /// Server-level estimation state (shared across requests).
 #[derive(Debug)]
-pub(crate) struct EstimationServer {
+pub struct EstimationServer {
     pub(crate) est: LatencyEstimators<DefaultLatencyEstimator>,
 }
 
-impl EstimationServer {
-    pub(crate) fn new(_service_name: &'static str) -> Self {
-        Self {
-            est: LatencyEstimators::new(),
-        }
+impl LayerServer for EstimationServer {
+    /// Publishes the latency estimators so later modules (e.g., predictive
+    /// admission control) share this service's estimates.
+    fn new(init: &mut ServerInit) -> Self {
+        let est = LatencyEstimators::<DefaultLatencyEstimator>::new();
+        init.provide(est.clone());
+        Self { est }
     }
 }
-
-impl LayerServer for EstimationServer {}
 
 // ── Per-Request ─────────────────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ impl LayerServer for EstimationServer {}
 /// SIGNAL_SLACK only signals admission control), and manages response metadata
 /// propagation.
 #[derive(Debug)]
-pub(crate) struct EstimationLayer {
+pub struct EstimationLayer {
     pub(crate) estimation: EstimationTracker<DefaultLatencyEstimator>,
     request_metadata: RequestMetadataTracker,
     rpc: CowGrpcMethod,
@@ -305,7 +305,7 @@ mod tests {
 
 /// Per-child-RPC estimation layer state.
 #[derive(Debug, Clone)]
-pub(crate) struct EstimationChild {
+pub struct EstimationChild {
     pub(crate) child_tracker: Option<ChildRPCTracker>,
 }
 

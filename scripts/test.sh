@@ -92,6 +92,7 @@ feature_combos=(
     "sched_slo,abort_slo"
     "sched_slo,ac_rajomon"
     "sched_pred,abort_slo,ac_pred,est_mean_var"
+    "sched_slo,stack_custom"
 )
 
 # Per-combo test dispatch: runs the hotel sched_policy test for every combo,
@@ -117,6 +118,10 @@ run_feature_tests() {
         sched_pred,abort_slo,ac_pred,est_mean_var)
             execute_test "masa-policy (sched_pred+abort_slo+ac_pred+est_mean_var)" \
                 cargo test -p masa-policy --features sched_pred,abort_slo,ac_pred,est_mean_var
+            ;;
+        sched_slo,stack_custom)
+            execute_test "masa-integration-tests (sched_slo+stack_custom)" \
+                cargo test -p masa-integration-tests --features sched_slo,stack_custom
             ;;
     esac
 }

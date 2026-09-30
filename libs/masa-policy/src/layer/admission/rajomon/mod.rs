@@ -6,7 +6,7 @@ mod shared;
 mod tests;
 
 pub use client::{ClientTokenBucket, CLIENT_TOKEN_BUCKET};
+pub use layer::RajomonLayer;
 #[cfg(test)]
-pub(crate) use layer::RajomonChild;
-pub(crate) use layer::{RajomonLayer, RajomonServer};
+pub(crate) use layer::{RajomonChild, RajomonServer};
 pub use shared::{RajomonSharedState, RAJOMON_STATE};

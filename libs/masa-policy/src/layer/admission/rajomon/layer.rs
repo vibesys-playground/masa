@@ -5,24 +5,22 @@ use masa_core::Context;
 use tonic::{CowGrpcMethod, Response, Status};
 
 use super::shared::{RajomonSharedState, RAJOMON_STATE};
-use crate::layer::{ChildRpcContext, Layer, LayerChild, LayerServer};
+use crate::layer::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit};
 use crate::policy_params::PolicyParams;
 
 // ── Layer Implementation ────────────────────────────────────────────────
 
 #[derive(Debug)]
-pub(crate) struct RajomonServer;
+pub struct RajomonServer;
 
-impl RajomonServer {
-    pub(crate) fn new() -> Self {
+impl LayerServer for RajomonServer {
+    fn new(_init: &mut ServerInit) -> Self {
         Self
     }
 }
 
-impl LayerServer for RajomonServer {}
-
 #[derive(Debug)]
-pub(crate) struct RajomonLayer {
+pub struct RajomonLayer {
     pub(super) rpc: CowGrpcMethod,
     pub(super) should_drop: bool,
     /// Remaining token budget for this request, shared across fan-out branches.
@@ -244,7 +242,7 @@ impl RajomonLayer {
 // ── Per-Child-RPC ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-pub(crate) struct RajomonChild;
+pub struct RajomonChild;
 
 impl LayerChild for RajomonChild {
     fn new() -> Self {

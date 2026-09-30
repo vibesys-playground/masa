@@ -1,22 +1,27 @@
-// Layer module — composable hooks layered on the base request lifecycle.
+// Layer module — composable policy modules layered on the base request
+// lifecycle.
 //
-// Defines the `Layer`, `LayerServer`, and `LayerChild` traits used by the
-// explicit layer containers in `hooks.rs`.
+// A policy module is a type implementing `Layer`. Modules are composed into a
+// stack with `policy_stack!`, and `PolicyHooks<S>` dispatches every lifecycle
+// hook through the stack in order. The first `Err` short-circuits. `()` is the
+// empty module, so a disabled slot in a stack costs nothing.
 //
-// Four layer categories:
-// - **Guard**: `E2eDeadlineGuardLayer` — rejects past-deadline requests.
+// Masa's built-in modules:
+// - **Guard** (feature `abort_slo`): `E2eDeadlineGuardLayer` — rejects
+//   past-deadline requests.
 // - **Estimation** (feature `estimator`): `EstimationLayer` — latency tracking,
 //   deadline tightening, reprioritization, feasibility checks.
 // - **Oracle** (feature `sched_oracle`): `OracleLayer` — perfect-information
 //   child deadline and priority assignment for synthetic experiments.
-// - **Admission** (mutually exclusive, compile-time selected):
-//   - `predictive` (feature `ac_pred`): goodput-tracking token-bucket AC.
-//   - `rajomon` (feature `ac_rajomon`): token-based AC with price signals.
-//   - `noop`: when neither AC is enabled, compiles away to nothing.
-// - **Observer**: `QueueLatencyLayer` — tracks queue latencies.
+// - **Admission**: `predictive` (feature `ac_pred`) or `rajomon`
+//   (feature `ac_rajomon`).
+// - **Observer** (feature `trace_queue_latency`): `QueueLatencyLayer`.
 //
+// Which modules make up the default stack is decided in `masa_stack.rs`.
 // All dispatch is monomorphic — zero runtime cost.
 
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::task::Poll;
 
 use masa_core::{Context, PriorityHint};
@@ -29,22 +34,73 @@ pub(crate) mod admission;
 #[cfg(feature = "estimator")]
 pub(crate) mod est;
 
+#[cfg(feature = "abort_slo")]
 mod e2e_deadline_guard;
+#[cfg(feature = "sched_oracle")]
 mod oracle;
+#[cfg(feature = "trace_queue_latency")]
 mod queue_latency;
 
 // ── Traits ──────────────────────────────────────────────────────────────
 
-/// Server-level layer state, shared across all requests.
-pub(crate) trait LayerServer: Send + Sync + std::fmt::Debug {}
+/// Server-level module state, created once per service and shared across all
+/// requests.
+pub trait LayerServer: Send + Sync + std::fmt::Debug + Sized {
+    /// Construct the server state.
+    ///
+    /// Modules earlier in the stack are constructed first, so a module can
+    /// consume state that an earlier module published with
+    /// [`ServerInit::provide`].
+    fn new(init: &mut ServerInit) -> Self;
+}
 
-/// Mutable state populated by layers in [`Layer::before_child_rpc`].
+/// Construction context passed to every [`LayerServer::new`] in stack order.
 ///
-/// Initialized from the parent context via [`ChildRpcContext::from_parent`].
-/// Each layer in the stack may mutate fields (e.g., tighten deadline, set
-/// tokens). After all layers have run, hooks builds the child `Context`
-/// from these fields.
-pub(crate) struct ChildRpcContext {
+/// Carries the service name and a typed store through which modules share
+/// server-level state (e.g., the estimation module publishes its latency
+/// estimators and predictive admission control reads them).
+#[derive(Debug)]
+pub struct ServerInit {
+    service_name: &'static str,
+    resources: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+}
+
+impl ServerInit {
+    pub(crate) fn new(service_name: &'static str) -> Self {
+        Self {
+            service_name,
+            resources: HashMap::new(),
+        }
+    }
+
+    /// Name of the service whose hooks are being constructed.
+    pub fn service_name(&self) -> &'static str {
+        self.service_name
+    }
+
+    /// Publish a value for modules later in the stack. Replaces any value
+    /// previously published under the same type.
+    pub fn provide<T: Any + Send + Sync + Clone>(&mut self, value: T) {
+        self.resources.insert(TypeId::of::<T>(), Box::new(value));
+    }
+
+    /// Read a value published by an earlier module.
+    pub fn get<T: Any + Send + Sync + Clone>(&self) -> Option<T> {
+        self.resources
+            .get(&TypeId::of::<T>())
+            .and_then(|value| value.downcast_ref::<T>())
+            .cloned()
+    }
+}
+
+/// Mutable state populated by modules in [`Layer::before_child_rpc`].
+///
+/// Initialized from the parent context. Each module in the stack may mutate
+/// fields (e.g., tighten deadline, set tokens). After all modules have run,
+/// the hooks build the child `Context` from these fields.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ChildRpcContext {
     pub deadline: u64,
     pub prio_hint: PriorityHint,
     #[cfg(feature = "estimator")]
@@ -54,7 +110,7 @@ pub(crate) struct ChildRpcContext {
 }
 
 impl ChildRpcContext {
-    pub fn from_parent(ctx: &Context) -> Self {
+    pub(crate) fn from_parent(ctx: &Context) -> Self {
         // hop_count is only incremented when estimation is active — it uses
         // hop_count to distinguish ingress from internal hops.
         Self {
@@ -68,16 +124,17 @@ impl ChildRpcContext {
     }
 }
 
-/// Per-request layer state. Hooks into the request lifecycle at key points
-/// to implement policy-specific logic (estimation, admission control, etc.).
+/// A policy module: per-request state that hooks into the request lifecycle
+/// at key points to implement policy-specific logic (estimation, admission
+/// control, etc.).
 ///
-/// All methods have default no-op implementations so that layers only need
+/// All methods have default no-op implementations so that modules only need
 /// to override the hooks they care about.
-pub(crate) trait Layer: Send + Sync + std::fmt::Debug {
+pub trait Layer: Send + Sync + std::fmt::Debug {
     type Server: LayerServer;
     type Child: LayerChild;
 
-    /// Construct per-request layer state.
+    /// Construct per-request module state.
     ///
     /// May inspect and mutate `ctx` (e.g., Rajomon deducts tokens here).
     fn new(method: &CowGrpcMethod, server: &Self::Server, ctx: &mut Context) -> Self;
@@ -91,7 +148,7 @@ pub(crate) trait Layer: Send + Sync + std::fmt::Debug {
 
     /// Called before each outbound child RPC.
     ///
-    /// The layer may reject the child RPC (returning `Err`) or mutate
+    /// The module may reject the child RPC (returning `Err`) or mutate
     /// `child_rpc` to tighten the deadline, adjust priority, or set tokens.
     fn before_child_rpc<T>(
         &self,
@@ -128,70 +185,147 @@ pub(crate) trait Layer: Send + Sync + std::fmt::Debug {
 
     /// Called before the response is serialized and sent.
     ///
-    /// Layers should mutate `ctx` directly (e.g., set `response_meta` or
+    /// Modules should mutate `ctx` directly (e.g., set `response_meta` or
     /// `queue_latencies`). The caller serializes the context once after all
-    /// layers have run.
+    /// modules have run.
     fn finalize<Ret>(&self, _ctx: &mut Context, _result: &mut Result<Response<Ret>, Status>) {}
 }
 
-/// Per-child-RPC layer state.
-pub(crate) trait LayerChild: Send + Sync + Clone + std::fmt::Debug {
+/// Per-child-RPC module state.
+pub trait LayerChild: Send + Sync + Clone + std::fmt::Debug {
     fn new() -> Self;
 }
 
-// ── Estimation layer type alias ────────────────────────────────────────
+// ── Composition ─────────────────────────────────────────────────────────
 
-#[cfg(feature = "estimator")]
-pub(crate) use est::EstimationLayer;
+/// The empty module. Used to terminate a stack and to fill a disabled slot.
+impl LayerServer for () {
+    fn new(_init: &mut ServerInit) -> Self {}
+}
 
-#[cfg(not(feature = "estimator"))]
-pub(crate) use self::est_noop::NoopEstLayer as EstimationLayer;
+impl LayerChild for () {
+    fn new() -> Self {}
+}
 
-#[cfg(not(feature = "estimator"))]
-mod est_noop {
-    use masa_core::Context;
-    use tonic::CowGrpcMethod;
+impl Layer for () {
+    type Server = ();
+    type Child = ();
 
-    use super::{Layer, LayerChild, LayerServer};
+    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context) -> Self {}
+}
 
-    #[derive(Debug)]
-    pub(crate) struct NoopEstServer;
+impl<A: LayerServer, B: LayerServer> LayerServer for (A, B) {
+    fn new(init: &mut ServerInit) -> Self {
+        let head = A::new(init);
+        (head, B::new(init))
+    }
+}
 
-    impl NoopEstServer {
-        pub(crate) fn new(_service_name: &'static str) -> Self {
-            Self
+impl<A: LayerChild, B: LayerChild> LayerChild for (A, B) {
+    fn new() -> Self {
+        (A::new(), B::new())
+    }
+}
+
+/// A module stack: runs `head` before every module in `tail`.
+///
+/// Build stacks with [`policy_stack!`](crate::policy_stack) rather than by
+/// hand.
+#[derive(Debug)]
+pub struct Stack<H, T> {
+    head: H,
+    tail: T,
+}
+
+impl<H: Layer, T: Layer> Layer for Stack<H, T> {
+    type Server = (H::Server, T::Server);
+    type Child = (H::Child, T::Child);
+
+    fn new(method: &CowGrpcMethod, server: &Self::Server, ctx: &mut Context) -> Self {
+        let head = H::new(method, &server.0, ctx);
+        Self {
+            head,
+            tail: T::new(method, &server.1, ctx),
         }
     }
 
-    impl LayerServer for NoopEstServer {}
-
-    #[derive(Debug)]
-    pub(crate) struct NoopEstLayer;
-
-    impl Layer for NoopEstLayer {
-        type Server = NoopEstServer;
-        type Child = NoopEstChild;
-
-        fn new(_method: &CowGrpcMethod, _server: &NoopEstServer, _ctx: &mut Context) -> Self {
-            Self
-        }
+    #[inline]
+    fn before_poll<Ret>(&self, ctx: &Context) -> Result<(), Result<Response<Ret>, Status>> {
+        self.head.before_poll(ctx)?;
+        self.tail.before_poll(ctx)
     }
 
-    #[derive(Debug, Clone)]
-    pub(crate) struct NoopEstChild;
-
-    impl LayerChild for NoopEstChild {
-        fn new() -> Self {
-            Self
-        }
+    #[inline]
+    fn before_child_rpc<R>(
+        &self,
+        ctx: &Context,
+        child_method: &CowGrpcMethod,
+        child_ctx: &mut Self::Child,
+        request: &mut tonic::Request<R>,
+        child_rpc: &mut ChildRpcContext,
+    ) -> Result<(), Status> {
+        self.head
+            .before_child_rpc(ctx, child_method, &mut child_ctx.0, request, child_rpc)?;
+        self.tail
+            .before_child_rpc(ctx, child_method, &mut child_ctx.1, request, child_rpc)
     }
+
+    #[inline]
+    fn after_child_rpc<R>(
+        &self,
+        ctx: &Context,
+        child_method: &CowGrpcMethod,
+        response: &mut Result<Response<R>, Status>,
+        child_ctx: &Self::Child,
+    ) -> Result<(), Status> {
+        self.head
+            .after_child_rpc(ctx, child_method, response, &child_ctx.0)?;
+        self.tail
+            .after_child_rpc(ctx, child_method, response, &child_ctx.1)
+    }
+
+    #[inline]
+    fn after_poll<Ret>(
+        &self,
+        ctx: &Context,
+        poll: &Poll<Result<Response<Ret>, Status>>,
+    ) -> Result<(), Result<Response<Ret>, Status>> {
+        self.head.after_poll(ctx, poll)?;
+        self.tail.after_poll(ctx, poll)
+    }
+
+    #[inline]
+    fn finalize<Ret>(&self, ctx: &mut Context, result: &mut Result<Response<Ret>, Status>) {
+        self.head.finalize(ctx, result);
+        self.tail.finalize(ctx, result);
+    }
+}
+
+/// Compose policy modules into a stack type, run in the listed order.
+///
+/// ```ignore
+/// type MyStack = masa_policy::policy_stack![MyGuard, MyAdmission];
+/// type MyHooks = masa_policy::PolicyHooks<MyStack>;
+/// ```
+#[macro_export]
+macro_rules! policy_stack {
+    () => { () };
+    ($head:ty $(, $tail:ty)* $(,)?) => {
+        $crate::Stack<$head, $crate::policy_stack![$($tail),*]>
+    };
 }
 
 // ── Re-exports ──────────────────────────────────────────────────────────
 
 #[cfg(feature = "ac_pred")]
-pub(crate) use admission::AdmissionDeps;
-pub(crate) use admission::{AdmissionLayer, AdmissionServer};
-pub(crate) use e2e_deadline_guard::E2eDeadlineGuardLayer;
-pub(crate) use oracle::OracleLayer;
-pub(crate) use queue_latency::QueueLatencyLayer;
+pub use admission::predictive::PredAdmissionLayer;
+#[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
+pub use admission::rajomon::RajomonLayer;
+#[cfg(feature = "abort_slo")]
+pub use e2e_deadline_guard::E2eDeadlineGuardLayer;
+#[cfg(feature = "estimator")]
+pub use est::EstimationLayer;
+#[cfg(feature = "sched_oracle")]
+pub use oracle::OracleLayer;
+#[cfg(feature = "trace_queue_latency")]
+pub use queue_latency::QueueLatencyLayer;
