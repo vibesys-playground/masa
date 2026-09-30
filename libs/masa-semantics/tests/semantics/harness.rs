@@ -211,6 +211,7 @@ impl<H: Hooks> Service<H> {
             method,
             request: inbound.view.clone(),
             in_poll: std::cell::Cell::new(false),
+            aborted: std::cell::Cell::new(false),
         }
     }
 
@@ -568,6 +569,7 @@ pub struct Handler<H: Hooks> {
     pub method: &'static str,
     request: CtxView,
     in_poll: std::cell::Cell<bool>,
+    aborted: std::cell::Cell<bool>,
 }
 
 fn early_status<Ret>(r: Result<(), Result<Response<Ret>, Status>>) -> Result<(), Status> {
@@ -588,7 +590,15 @@ impl<H: Hooks> Handler<H> {
         if self.in_poll.replace(true) {
             return Ok(());
         }
-        early_status(self.parent.before_poll::<()>())
+        self.note_abort(early_status(self.parent.before_poll::<()>()))
+    }
+
+    /// Remember that the hooks cut this handler's future short.
+    fn note_abort(&self, r: Result<(), Status>) -> Result<(), Status> {
+        if r.is_err() {
+            self.aborted.set(true);
+        }
+        r
     }
 
     fn leave_poll(&self, end: PollEnd) -> Result<(), Status> {
@@ -599,7 +609,7 @@ impl<H: Hooks> Handler<H> {
             PollEnd::Pending => Poll::Pending,
             PollEnd::Ready => Poll::Ready(Ok(Response::new(()))),
         };
-        early_status(self.parent.after_poll::<()>(&poll))
+        self.note_abort(early_status(self.parent.after_poll::<()>(&poll)))
     }
 
     /// Start a poll (if none is open) without computing. The handler future
@@ -645,7 +655,14 @@ impl<H: Hooks> Handler<H> {
             Ok(()) => self
                 .enter_poll()
                 .and_then(|()| self.leave_poll(PollEnd::Ready)),
-            Err(status) => Err(status),
+            Err(status) => {
+                // A handler that fails on its own ends its last poll as Ready.
+                // If the hooks aborted it, the future was already cut short.
+                if !self.aborted.get() {
+                    let _ = self.leave_poll(PollEnd::Ready);
+                }
+                Err(status)
+            }
         };
         self.in_poll.set(false);
         let mut r: Result<Response<()>, Status> = match result {
@@ -716,10 +733,9 @@ impl<H: Hooks> Handler<H> {
             replies.push((i, test_clock::now_us(), out, reply));
         }
         replies.sort_by_key(|(_, end, _, _)| *end);
-        let latest = replies.last().map(|r| r.1).unwrap_or(t0);
-        test_clock::set_now_us(latest.max(t0));
-        let _ = self.enter_poll();
         for (i, end, out, reply) in replies {
+            test_clock::set_now_us(end);
+            let _ = self.enter_poll();
             let done = self.complete(out, reply);
             outcomes.push((i, end, done));
         }

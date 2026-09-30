@@ -27,3 +27,22 @@ mod priority;
 
 #[cfg(feature = "abort_slo")]
 mod abort_slo;
+
+mod common;
+#[cfg(feature = "estimator")]
+mod model;
+
+#[cfg(all(
+    feature = "estimator",
+    not(any(feature = "est_rms", feature = "est_hist", feature = "sched_oracle"))
+))]
+mod estimation;
+
+#[cfg(feature = "estimator")]
+mod response_meta;
+
+#[cfg(feature = "abort_slack")]
+mod abort_slack;
+
+#[cfg(feature = "signal_slack")]
+mod signal_slack;
