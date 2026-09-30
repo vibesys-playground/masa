@@ -33,6 +33,7 @@ members = [
   "libs/masa-policy",
   "libs/masa",
   "libs/multiqueue-prio-queue",
+  "libs/rpcstack-sched",
 
   # evaluation applications
   "apps/hotel",

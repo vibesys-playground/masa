@@ -41,7 +41,7 @@ impl<T: Ord + TaskPrioritize + Identifiable + Traceable + Send + 'static> Shared
 
     pub(crate) fn push(&self, mut item: T) {
         item.timer().set_enqueue_time();
-        if item.priority().value() == 0 {
+        if rpcstack_sched::default_policy::is_infra(&item.priority()) {
             let mut infra = self.infra.lock().unwrap();
             infra.push_back(item);
             self.infra_pending.store(true, Ordering::Release);

@@ -7,7 +7,8 @@ use crate::runtime::scheduler::{self, Defer, Inject};
 use crate::runtime::task::{self, JoinHandle, OwnedTasks, Schedule, Task};
 use crate::runtime::{blocking, context, Config, MetricsBatch, SchedulerMetrics, WorkerMetrics};
 use crate::sync::notify::Notify;
-use crate::task::Meta;
+use crate::runtime::task::Identifiable;
+use crate::task::{Meta, TaskPrioritize};
 use crate::util::atomic_cell::AtomicCell;
 use crate::util::{waker_ref, RngSeedGenerator, Wake, WakerRef};
 
@@ -20,7 +21,7 @@ use std::task::Waker;
 use std::time::Duration;
 
 mod queue;
-use queue::Queue;
+use rpcstack_sched::{RunQueue, TaskView};
 
 pub use queue::get_sched_flavor;
 pub use queue::SchedFlavor;
@@ -317,7 +318,10 @@ impl Core {
     }
 
     fn next_local_task(&mut self, handle: &Handle) -> Option<Notified> {
-        let ret = self.tasks.pop().ok();
+        let ret = self.tasks.pop().map(|task| {
+            task.timer().record_queue_lat();
+            task
+        });
         handle
             .shared
             .worker_metrics
@@ -326,9 +330,10 @@ impl Core {
     }
 
     fn push_task(&mut self, handle: &Handle, task: Notified) {
-        self.tasks
-            .push(task)
-            .expect("Queue has infinite capacity and shouldn't be closed");
+        task.timer().set_enqueue_time();
+        let meta = task.priority();
+        let view = TaskView::new(task.id().as_u64(), &meta);
+        self.tasks.push(task, &view);
         self.metrics.inc_local_schedule_count();
         handle
             .shared

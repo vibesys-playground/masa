@@ -5,9 +5,7 @@
 //! before the `Meta` refactor and must not change when that refactor lands.
 //! A pop on an empty queue is recorded as `-1`.
 
-use super::Queue;
-use crate::runtime::task::{Id, Identifiable, TraceTimer, Traceable};
-use crate::task::{TaskPrioritize, TaskPriority};
+use crate::{Meta, RunQueue, TaskView};
 
 #[derive(Clone, Copy)]
 enum Op {
@@ -18,76 +16,16 @@ enum Op {
 
 use Op::{Pop, Push};
 
-struct MockTask {
-    id: Id,
-    priority: TaskPriority,
-    timer: TraceTimer,
-}
-
-impl MockTask {
-    fn new(id: u64, priority: u64) -> Self {
-        Self {
-            id: Id(id),
-            priority: TaskPriority::new(priority),
-            timer: TraceTimer::new(),
-        }
-    }
-}
-
-impl Traceable for MockTask {
-    fn timer(&mut self) -> &mut TraceTimer {
-        &mut self.timer
-    }
-}
-
-impl Identifiable for MockTask {
-    fn id(&self) -> Id {
-        self.id
-    }
-}
-
-impl TaskPrioritize for MockTask {
-    fn priority(&self) -> TaskPriority {
-        self.priority
-    }
-}
-
-impl PartialEq for MockTask {
-    fn eq(&self, other: &Self) -> bool {
-        self.priority == other.priority
-    }
-}
-
-impl Eq for MockTask {}
-
-impl PartialOrd for MockTask {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for MockTask {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority.cmp(&other.priority)
-    }
-}
-
 /// Runs `script` against a fresh queue; returns the popped ids and the queue
 /// length after every step.
-fn replay<Q: Queue<Item = MockTask>>(cap: usize, script: &[Op]) -> (Vec<i64>, Vec<usize>) {
+fn replay<Q: RunQueue<u64>>(cap: usize, script: &[Op]) -> (Vec<i64>, Vec<usize>) {
     let mut q = Q::with_capacity(cap);
     let mut popped = Vec::new();
     let mut lens = Vec::new();
     for op in script {
         match *op {
-            Push(id, prio) => {
-                assert!(q.push(MockTask::new(id, prio)).is_ok());
-                assert!(!q.is_full());
-            }
-            Pop => popped.push(match q.pop() {
-                Ok(t) => t.id.0 as i64,
-                Err(_) => -1,
-            }),
+            Push(id, prio) => q.push(id, &TaskView::new(id, &Meta::new(prio))),
+            Pop => popped.push(q.pop().map_or(-1, |id| id as i64)),
         }
         lens.push(q.len());
     }
@@ -290,7 +228,7 @@ const CAPS: [usize; 3] = [0, 1, 64];
 
 /// Replays every case against `Q` and compares with `expected_pops`, which is
 /// aligned with `CASES`.
-fn check<Q: Queue<Item = MockTask>>(expected_pops: &[&[i64]]) {
+fn check<Q: RunQueue<u64>>(expected_pops: &[&[i64]]) {
     assert_eq!(expected_pops.len(), CASES.len());
     for ((name, script, lens), pops) in CASES.iter().zip(expected_pops) {
         for cap in CAPS {
@@ -301,80 +239,104 @@ fn check<Q: Queue<Item = MockTask>>(expected_pops: &[&[i64]]) {
     }
 }
 
-#[cfg(not(feature = "sched_prio"))]
-mod fifo {
-    use super::*;
-    use crate::masa::scheduler::fifo::FifoQueue;
+const FIFO_POPS: &[&[i64]] = &[
+    &[1, 2, 3, 4, 5, -1],
+    &[1, 2, 3, 4, 5, 6, -1],
+    &[1, 2, 3, 4, 5, -1, -1],
+    &[1, 2, 3, 4, -1],
+    &[-1, -1, 1, -1, 2],
+    &[1, 2, 3, 4, 5, 6, 7, 8, -1],
+    &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, -1],
+    &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, -1],
+    &[1, 2, 3, 4, 5, 6, -1, -1],
+];
 
-    #[test]
-    fn replay_scripts() {
-        check::<FifoQueue<MockTask>>(&[
-            &[1, 2, 3, 4, 5, -1],
-            &[1, 2, 3, 4, 5, 6, -1],
-            &[1, 2, 3, 4, 5, -1, -1],
-            &[1, 2, 3, 4, -1],
-            &[-1, -1, 1, -1, 2],
-            &[1, 2, 3, 4, 5, 6, 7, 8, -1],
-            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, -1],
-            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, -1],
-            &[1, 2, 3, 4, 5, 6, -1, -1],
-        ]);
-    }
+const PRIO_HEAP_POPS: &[&[i64]] = &[
+    &[1, 3, 5, 2, 4, -1],
+    &[2, 4, 6, 5, 3, 1, -1],
+    &[2, 4, 3, 5, 1, -1, -1],
+    &[1, 2, 3, 4, -1],
+    &[-1, -1, 1, -1, 2],
+    &[8, 2, 4, 6, 7, 5, 3, 1, -1],
+    &[1, 8, 2, 3, 4, 5, 6, 10, 7, 9, -1],
+    &[1, 3, 7, 9, 10, 6, 8, 5, 2, 4, -1],
+    &[2, 3, 5, 6, 4, 1, -1, -1],
+];
+
+const TAILCLIPPER_POPS_WITHOUT_INFRA_QUEUE: &[&[i64]] = &[
+    &[1, 3, 5, 2, 4, -1],
+    &[2, 4, 6, 3, 5, 1, -1],
+    &[2, 4, 3, 5, 1, -1, -1],
+    &[1, 2, 3, 4, -1],
+    &[-1, -1, 1, -1, 2],
+    &[8, 2, 4, 6, 7, 5, 3, 1, -1],
+    &[1, 2, 3, 4, 5, 8, 6, 10, 7, 9, -1],
+    &[1, 3, 7, 9, 6, 8, 5, 4, 2, 10, -1],
+    &[2, 3, 5, 4, 6, 1, -1, -1],
+];
+
+const TAILCLIPPER_POPS_WITH_INFRA_QUEUE: &[&[i64]] = &[
+    &[1, 3, 5, 2, 4, -1],
+    &[2, 4, 6, 5, 3, 1, -1],
+    &[2, 4, 3, 5, 1, -1, -1],
+    &[1, 2, 3, 4, -1],
+    &[-1, -1, 1, -1, 2],
+    &[8, 2, 4, 6, 7, 5, 3, 1, -1],
+    &[1, 2, 3, 4, 5, 8, 6, 10, 7, 9, -1],
+    &[1, 3, 7, 9, 6, 8, 5, 4, 2, 10, -1],
+    &[2, 3, 5, 6, 4, 1, -1, -1],
+];
+
+#[test]
+fn fifo_replay_scripts() {
+    check::<crate::builtin::fifo::FifoQueue<u64>>(FIFO_POPS);
 }
 
-#[cfg(all(feature = "sched_prio", not(feature = "tailclipper")))]
-mod prio_heap {
-    use super::*;
-    use crate::masa::scheduler::prio_heap::BinaryHeapQueue;
-
-    #[test]
-    fn replay_scripts() {
-        check::<BinaryHeapQueue<MockTask>>(&[
-            &[1, 3, 5, 2, 4, -1],
-            &[2, 4, 6, 5, 3, 1, -1],
-            &[2, 4, 3, 5, 1, -1, -1],
-            &[1, 2, 3, 4, -1],
-            &[-1, -1, 1, -1, 2],
-            &[8, 2, 4, 6, 7, 5, 3, 1, -1],
-            &[1, 8, 2, 3, 4, 5, 6, 10, 7, 9, -1],
-            &[1, 3, 7, 9, 10, 6, 8, 5, 2, 4, -1],
-            &[2, 3, 5, 6, 4, 1, -1, -1],
-        ]);
-    }
+#[test]
+fn prio_heap_replay_scripts() {
+    check::<crate::builtin::prio_heap::BinaryHeapQueue<u64>>(PRIO_HEAP_POPS);
 }
 
-#[cfg(all(feature = "sched_prio", feature = "tailclipper"))]
-mod tailclipper {
-    use super::*;
-    use crate::masa::scheduler::tailclipper::BinaryHeapRoundRobinQueue;
+#[test]
+fn tailclipper_replay_scripts_without_infra_queue() {
+    check::<crate::builtin::tailclipper::BinaryHeapRoundRobinQueue<u64, false>>(
+        TAILCLIPPER_POPS_WITHOUT_INFRA_QUEUE,
+    );
+}
 
-    #[test]
-    fn replay_scripts_without_infra_queue() {
-        check::<BinaryHeapRoundRobinQueue<MockTask, false>>(&[
-            &[1, 3, 5, 2, 4, -1],
-            &[2, 4, 6, 3, 5, 1, -1],
-            &[2, 4, 3, 5, 1, -1, -1],
-            &[1, 2, 3, 4, -1],
-            &[-1, -1, 1, -1, 2],
-            &[8, 2, 4, 6, 7, 5, 3, 1, -1],
-            &[1, 2, 3, 4, 5, 8, 6, 10, 7, 9, -1],
-            &[1, 3, 7, 9, 6, 8, 5, 4, 2, 10, -1],
-            &[2, 3, 5, 4, 6, 1, -1, -1],
-        ]);
-    }
+#[test]
+fn tailclipper_replay_scripts_with_infra_queue() {
+    check::<crate::builtin::tailclipper::BinaryHeapRoundRobinQueue<u64, true>>(
+        TAILCLIPPER_POPS_WITH_INFRA_QUEUE,
+    );
+}
 
-    #[test]
-    fn replay_scripts_with_infra_queue() {
-        check::<BinaryHeapRoundRobinQueue<MockTask, true>>(&[
-            &[1, 3, 5, 2, 4, -1],
-            &[2, 4, 6, 5, 3, 1, -1],
-            &[2, 4, 3, 5, 1, -1, -1],
-            &[1, 2, 3, 4, -1],
-            &[-1, -1, 1, -1, 2],
-            &[8, 2, 4, 6, 7, 5, 3, 1, -1],
-            &[1, 2, 3, 4, 5, 8, 6, 10, 7, 9, -1],
-            &[1, 3, 7, 9, 6, 8, 5, 4, 2, 10, -1],
-            &[2, 3, 5, 6, 4, 1, -1, -1],
-        ]);
-    }
+/// `custom::Queue` starts as a copy of the priority heap.
+#[test]
+fn custom_replay_scripts() {
+    check::<crate::custom::Queue<u64>>(PRIO_HEAP_POPS);
+}
+
+/// The queue the active Cargo features select behaves as that queue's script
+/// expects.
+#[test]
+fn selected_queue_replay_scripts() {
+    #[cfg(feature = "sched_custom")]
+    let expected = PRIO_HEAP_POPS;
+    #[cfg(all(
+        feature = "sched_prio",
+        feature = "tailclipper",
+        not(feature = "sched_custom")
+    ))]
+    let expected = TAILCLIPPER_POPS_WITHOUT_INFRA_QUEUE;
+    #[cfg(all(
+        feature = "sched_prio",
+        not(feature = "tailclipper"),
+        not(feature = "sched_custom")
+    ))]
+    let expected = PRIO_HEAP_POPS;
+    #[cfg(not(any(feature = "sched_prio", feature = "sched_custom")))]
+    let expected = FIFO_POPS;
+
+    check::<crate::SelectedQueue<u64>>(expected);
 }

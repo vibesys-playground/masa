@@ -4488,6 +4488,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpcstack-sched"
+version = "0.1.0"
+
+[[package]]
 name = "rstar"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5582,6 +5586,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "rand 0.8.5",
+ "rpcstack-sched",
  "signal-hook-registry",
  "socket2 0.5.10",
  "tempfile",
