@@ -90,6 +90,7 @@ scenario! {
     /// The deadline handed to a child already accounts for the parent's
     /// learned post-child work, so a child that starts after that tightened
     /// deadline aborts although the end-to-end SLO has not expired.
+    #[cfg(not(any(feature = "est_rms", feature = "est_hist", feature = "sched_oracle")))]
     fn child_starting_after_tightened_deadline_aborts(w) {
         let svc = w.service("SlackSvc5");
         let child = w.service("SlackChild5");
@@ -111,6 +112,7 @@ scenario! {
 
 scenario! {
     /// A request aborted for lateness is not learned from.
+    #[cfg(not(any(feature = "est_rms", feature = "est_hist", feature = "sched_oracle")))]
     fn aborted_request_teaches_nothing(w) {
         let svc = w.service("SlackSvc6");
         let child = w.service("SlackChild6");

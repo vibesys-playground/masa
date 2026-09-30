@@ -1,5 +1,11 @@
 //! Root priority assignment and deadline propagation along a call chain.
 
+#[cfg(any(
+    feature = "sched_fifo",
+    feature = "sched_slo",
+    feature = "sched_tailclipper",
+    feature = "sched_oracle"
+))]
 use std::cell::RefCell;
 
 use crate::harness::*;
@@ -102,6 +108,12 @@ scenario! {
     /// SLO, entry time), the deadline never loosens, and each hop that tracks
     /// hops advances the hop count by exactly one while the root method
     /// recorded at ingress stays the same.
+    #[cfg(any(
+        feature = "sched_fifo",
+        feature = "sched_slo",
+        feature = "sched_tailclipper",
+        feature = "sched_oracle"
+    ))]
     fn chain_propagates_identity_and_never_loosens_deadline(w) {
         let a = w.service("ChainA");
         let b = w.service("ChainB");

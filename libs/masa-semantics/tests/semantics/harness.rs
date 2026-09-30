@@ -478,6 +478,17 @@ impl Reply {
         }
     }
 
+    /// An error reply that advertises a Rajomon price.
+    pub fn err_with_price(status: Status, price: u64) -> Self {
+        let mut status = status;
+        status
+            .metadata_mut()
+            .insert("x-masa-rajomon-price", price.to_string().parse().unwrap());
+        Self {
+            result: Err(status),
+        }
+    }
+
     /// An `Ok` reply carrying the given metadata.
     pub fn synthetic(spec: ReplySpec) -> Self {
         let mut resp = Response::new(());
@@ -673,6 +684,15 @@ impl<H: Hooks> Handler<H> {
         Reply { result: r }
     }
 
+    /// Finalize without running any poll: records the outcome of a request
+    /// whose handler the scenario does not model, without triggering the
+    /// first-poll admission check.
+    pub fn finalize_now(&self, result: Result<(), Status>) -> Reply {
+        let mut r: Result<Response<()>, Status> = result.map(|()| Response::new(()));
+        self.parent.finalize_before_serialization(&mut r);
+        Reply { result: r }
+    }
+
     /// Run a handler body and finish: the body's `Err` (an aborted poll or a
     /// rejected child RPC propagated with `?`) becomes the reply.
     pub fn run(&self, body: impl FnOnce(&Handler<H>) -> Result<(), Status>) -> Reply {
@@ -683,29 +703,13 @@ impl<H: Hooks> Handler<H> {
     /// Start a child RPC to `service::method` with its response handled by a
     /// real virtual callee.
     pub fn call<'a>(&'a self, callee: &'a Service<H>, method: &'static str) -> Call<'a, H> {
-        Call {
-            parent: self,
-            callee: Some(callee),
-            service: callee.name,
-            method,
-            oracle: None,
-            method_override: None,
-            service_override: None,
-        }
+        Call::new(self, Some(callee), callee.name, method)
     }
 
     /// Start a child RPC to a callee the scenario does not model; give its
     /// reply with [`Call::returns`].
     pub fn call_remote<'a>(&'a self, service: &'static str, method: &'static str) -> Call<'a, H> {
-        Call {
-            parent: self,
-            callee: None,
-            service,
-            method,
-            oracle: None,
-            method_override: None,
-            service_override: None,
-        }
+        Call::new(self, None, service, method)
     }
 
     /// Issue `calls` in parallel: all child RPCs are issued from the current
@@ -769,6 +773,8 @@ pub struct Call<'a, H: Hooks> {
     service: &'static str,
     method: &'static str,
     oracle: Option<(u64, u64)>,
+    hintless: bool,
+    headers: Vec<(&'static str, String)>,
     method_override: Option<&'static str>,
     service_override: Option<&'static str>,
 }
@@ -808,6 +814,37 @@ impl<H: Hooks> Outbound<H> {
 }
 
 impl<'a, H: Hooks> Call<'a, H> {
+    fn new(
+        parent: &'a Handler<H>,
+        callee: Option<&'a Service<H>>,
+        service: &'static str,
+        method: &'static str,
+    ) -> Self {
+        Call {
+            parent,
+            callee,
+            service,
+            method,
+            oracle: None,
+            hintless: false,
+            headers: Vec::new(),
+            method_override: None,
+            service_override: None,
+        }
+    }
+
+    /// Send no oracle hints at all, even in builds that require them.
+    pub fn without_oracle_hints(mut self) -> Self {
+        self.hintless = true;
+        self
+    }
+
+    /// Attach an arbitrary request header.
+    pub fn header(mut self, name: &'static str, value: &str) -> Self {
+        self.headers.push((name, value.to_string()));
+        self
+    }
+
     /// Oracle headers: the child's perfect-information work and the work the
     /// caller still has after it.
     pub fn oracle(mut self, child_work_us: u64, remaining_after_us: u64) -> Self {
@@ -830,9 +867,17 @@ impl<'a, H: Hooks> Call<'a, H> {
         // Oracle builds need hints on every child RPC; a caller that does not
         // care about the oracle supplies neutral ones.
         #[cfg(feature = "sched_oracle")]
-        let oracle = self.oracle.or(Some((0, 0)));
+        let oracle = if self.hintless {
+            None
+        } else {
+            self.oracle.or(Some((0, 0)))
+        };
         #[cfg(not(feature = "sched_oracle"))]
         let oracle = self.oracle;
+        for (name, value) in &self.headers {
+            req.metadata_mut()
+                .insert(*name, value.parse().expect("ascii header value"));
+        }
         if let Some((work, rest)) = oracle {
             req.metadata_mut().insert(
                 masa::ORACLE_CHILD_WORK_US_HEADER,

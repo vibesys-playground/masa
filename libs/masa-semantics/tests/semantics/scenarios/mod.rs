@@ -38,8 +38,45 @@ mod model;
 ))]
 mod estimation;
 
+#[cfg(all(
+    feature = "estimator",
+    any(feature = "est_rms", feature = "est_hist"),
+    not(feature = "sched_oracle")
+))]
+mod estimator_kinds;
+
 #[cfg(feature = "estimator")]
 mod response_meta;
+
+#[cfg(feature = "ac_pred")]
+mod admission_pred;
+
+#[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
+mod rajomon;
+
+#[cfg(feature = "sched_oracle")]
+mod oracle;
+
+#[cfg(feature = "trace_queue_latency")]
+mod queue_latency;
+
+mod ordering;
+
+#[cfg(any(
+    feature = "sched_fifo",
+    feature = "sched_slo",
+    feature = "sched_tailclipper",
+    feature = "sched_oracle"
+))]
+mod finalize;
+
+#[cfg(not(any(
+    feature = "sched_fifo",
+    feature = "sched_slo",
+    feature = "sched_tailclipper",
+    feature = "sched_oracle"
+)))]
+mod noop;
 
 #[cfg(feature = "abort_slack")]
 mod abort_slack;

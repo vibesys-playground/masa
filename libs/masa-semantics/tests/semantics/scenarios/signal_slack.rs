@@ -68,6 +68,7 @@ scenario! {
 scenario! {
     /// A request whose subtree signalled is not learned from: its wall-clock
     /// was inflated by running late, so it must not tighten later children.
+    #[cfg(not(any(feature = "est_rms", feature = "est_hist", feature = "sched_oracle")))]
     fn signalled_request_teaches_nothing(w) {
         let svc = w.service("SigSvc5");
         let child = w.service("SigChild5");
@@ -91,6 +92,7 @@ scenario! {
 
 scenario! {
     /// Control: the same requests without a signal do teach the service.
+    #[cfg(not(any(feature = "est_rms", feature = "est_hist", feature = "sched_oracle")))]
     fn unsignalled_requests_do_teach(w) {
         let svc = w.service("SigSvc6");
         let child = w.service("SigChild6");
