@@ -31,6 +31,8 @@ flag_combos=(
     "sched_mt_multiqueue,abort_slo"
     "sched_slo,stack_custom"
     "sched_pred,abort_slack,ac_pred,est_mean_var,stack_custom"
+    "sched_slo,sched_custom"
+    "sched_pred,abort_slack,ac_pred,est_mean_var,sched_custom"
 )
 
 CONTINUE_ON_ERROR=false
@@ -112,6 +114,8 @@ check_tests() {
             *) continue ;;
         esac
 
+        # sched_custom selects Tokio's run queue; masa-policy has no such feature.
+        flags="${flags/,sched_custom/}"
         local featured_cmd="cargo check --tests --quiet -p masa-policy --features $flags"
         echo "Running: $featured_cmd"
         cargo check --tests --quiet -p masa-policy --features "$flags" || return $?

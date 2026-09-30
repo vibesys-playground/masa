@@ -4,21 +4,13 @@ use std::sync::{
     Mutex,
 };
 
-use masa_core::{Context, ResponseMeta};
 use tonic::{Code, Response, Status};
 
-use crate::context_ext::MasaResponseExt;
+use crate::layer::est::wire::EstimationResponseWire;
 
 // ══════════════════════════════════════════════════════════════════════════
 // Response metadata assembly
 // ══════════════════════════════════════════════════════════════════════════
-
-/// Information extracted from a child RPC response.
-#[allow(dead_code)]
-pub(crate) struct ChildResponseInfo {
-    pub downstream_util: Option<f32>,
-    pub accumulated_compute_us: Option<u64>,
-}
 
 /// Tracks cumulative compute time (CPU time spent in poll) for a single request.
 #[derive(Debug)]
@@ -60,8 +52,8 @@ impl ComputeTracker {
 /// Per-request metadata tracker.
 ///
 /// Accumulates local compute time, downstream utilization, and subtree
-/// compute cost throughout the request lifecycle. Builds `ResponseMeta`
-/// for the outgoing response at finalization.
+/// compute cost throughout the request lifecycle. Builds the
+/// `EstimationResponseWire` for the outgoing response at finalization.
 #[derive(Debug)]
 pub(crate) struct RequestMetadataTracker {
     compute: ComputeTracker,
@@ -100,44 +92,33 @@ impl RequestMetadataTracker {
         self.compute.stop();
     }
 
-    /// Extract response metadata from a child RPC response.
+    /// Fold a child RPC's outcome into this request's totals.
     ///
-    /// Updates max downstream utilization and accumulated subtree compute cost.
-    pub(crate) fn absorb_child_meta<T>(
+    /// `report` is the estimation section of a successful child response (see
+    /// [`child_report`]); it updates max downstream utilization and
+    /// accumulated subtree compute cost.
+    pub(crate) fn absorb_child<T>(
         &self,
         response: &Result<Response<T>, Status>,
-    ) -> ChildResponseInfo {
-        let mut downstream_util = None;
-        let mut accumulated_compute_us = None;
-
+        report: Option<&EstimationResponseWire>,
+    ) {
         if is_early_return_response(response) {
-            // Child early-returned with Err(Status) — no response headers to
-            // read, but we know at least 1 early return occurred.
+            // Child early-returned with Err(Status) — we know at least 1 early
+            // return occurred, whatever the status carries.
             self.accumulated_child_early_returns
                 .fetch_add(1, Ordering::Relaxed);
-        } else if let Ok(resp) = response {
-            if let Some(child_ctx_resp) = resp.get_masa_context() {
-                if let Some(meta) = child_ctx_resp.response_meta() {
-                    let mut max_util = self.max_child_downstream_util.lock().unwrap();
-                    if meta.max_downstream_util > *max_util {
-                        *max_util = meta.max_downstream_util;
-                    }
-                    downstream_util = Some(meta.max_downstream_util);
-                    self.accumulated_child_compute_us
-                        .fetch_add(meta.accumulated_compute_us, Ordering::Relaxed);
-                    self.accumulated_child_early_returns
-                        .fetch_add(meta.early_return_count, Ordering::Relaxed);
-                    if meta.deadline_signal_count > 0 {
-                        self.child_deadline_signal.store(true, Ordering::Relaxed);
-                    }
-                    accumulated_compute_us = Some(meta.accumulated_compute_us);
-                }
+        } else if let Some(report) = report {
+            let mut max_util = self.max_child_downstream_util.lock().unwrap();
+            if report.max_downstream_util > *max_util {
+                *max_util = report.max_downstream_util;
             }
-        }
-
-        ChildResponseInfo {
-            downstream_util,
-            accumulated_compute_us,
+            self.accumulated_child_compute_us
+                .fetch_add(report.accumulated_compute_us, Ordering::Relaxed);
+            self.accumulated_child_early_returns
+                .fetch_add(report.early_return_count, Ordering::Relaxed);
+            if report.deadline_signal_count > 0 {
+                self.child_deadline_signal.store(true, Ordering::Relaxed);
+            }
         }
     }
 
@@ -148,7 +129,7 @@ impl RequestMetadataTracker {
 
     /// Mark this request as having tripped a soft deadline signal
     /// (`signal_slack`) - request continues, but the ingress AC sees the
-    /// signal via `ResponseMeta.deadline_signal_count`.
+    /// signal via `EstimationResponseWire::deadline_signal_count`.
     pub(crate) fn mark_deadline_signal(&self) {
         self.local_deadline_signal.store(true, Ordering::Relaxed);
     }
@@ -162,8 +143,16 @@ impl RequestMetadataTracker {
             || self.child_deadline_signal.load(Ordering::Relaxed)
     }
 
-    /// Build and set `ResponseMeta` on the outgoing context.
-    pub(crate) fn inject_response_meta(&self, ctx: &mut Context) {
+    /// Whether this hop or its subtree has recorded an early return or a
+    /// deadline signal.
+    pub(crate) fn has_early_return_or_signal(&self) -> bool {
+        self.local_early_return.load(Ordering::Relaxed)
+            || self.accumulated_child_early_returns.load(Ordering::Relaxed) > 0
+            || self.is_subtree_signaled()
+    }
+
+    /// The report for the outgoing response.
+    pub(crate) fn response_wire(&self) -> EstimationResponseWire {
         let compute_time_us = self.compute.compute_us();
         let accumulated_compute_us =
             compute_time_us + self.accumulated_child_compute_us.load(Ordering::Relaxed);
@@ -186,14 +175,14 @@ impl RequestMetadataTracker {
             || self.child_deadline_signal.load(Ordering::Relaxed);
         let deadline_signal_count = if signaled { 1 } else { 0 };
 
-        ctx.set_response_meta(ResponseMeta {
+        EstimationResponseWire {
             compute_time_us,
             accumulated_compute_us,
             utilization,
             max_downstream_util,
             early_return_count,
             deadline_signal_count,
-        });
+        }
     }
 }
 
@@ -208,18 +197,21 @@ pub(crate) fn is_early_return_response<T>(response: &Result<Response<T>, Status>
     }
 }
 
-/// True when an Ok response carries a non-zero `deadline_signal_count` —
+/// The estimation report of a child response: its `estimation` section if the
+/// child succeeded and attached one. An error status contributes no report; an
+/// early return is counted from the status alone.
+pub(crate) fn child_report<T>(
+    response: &Result<Response<T>, Status>,
+    wire: Option<EstimationResponseWire>,
+) -> Option<EstimationResponseWire> {
+    response.as_ref().ok().and(wire)
+}
+
+/// True when a child's report carries a non-zero `deadline_signal_count` —
 /// i.e., the request returned successfully but tripped its local deadline at
 /// some hop under `signal_slack`. The wallclock for such a request is
 /// inflated by signal-but-continue runtime, so the latency estimator should
 /// skip these observations the same way it skips Err early-returns.
-pub(crate) fn is_signaled_response<T>(response: &Result<Response<T>, Status>) -> bool {
-    if let Ok(resp) = response {
-        if let Some(ctx) = resp.get_masa_context() {
-            if let Some(meta) = ctx.response_meta() {
-                return meta.deadline_signal_count > 0;
-            }
-        }
-    }
-    false
+pub(crate) fn is_signaled_report(report: Option<&EstimationResponseWire>) -> bool {
+    report.is_some_and(|report| report.deadline_signal_count > 0)
 }

@@ -165,17 +165,12 @@ impl<S: Layer + 'static> ParentHooks<ChildContext<S>, ServerContext<S>> for Pare
         )?;
 
         // Masa's existing `Context` path: the child's context starts as a copy
-        // of the parent's with deadline, priority and hop count overridden.
-        // This is Masa policy; module wire data is never copied down.
-        #[cfg_attr(not(feature = "estimator"), allow(unused_mut))]
-        let mut child_recv_ctx = ContextBuilder::from(&self.ctx)
+        // of the parent's with deadline and priority overridden. Module wire
+        // data is never copied down.
+        let child_recv_ctx = ContextBuilder::from(&self.ctx)
             .deadline(child_rpc.deadline)
-            .prio_hint(child_rpc.prio_hint);
-        #[cfg(feature = "estimator")]
-        {
-            child_recv_ctx = child_recv_ctx.hop_count(child_rpc.hop_count);
-        }
-        let child_recv_ctx = child_recv_ctx.build();
+            .prio_hint(child_rpc.prio_hint)
+            .build();
         request.set_masa_context(&child_recv_ctx);
         child_wire.install(request.metadata_mut());
 

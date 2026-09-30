@@ -5,9 +5,10 @@
 // admission control layer (ac_pred / ac_rajomon / noop).
 
 use crate::wire::{WireIn, WireOut};
+use std::sync::Arc;
 use std::task::Poll;
 
-use masa_core::{Context, PriorityHint, RootMethod, ABORT_SLACK};
+use masa_core::{Context, PriorityHint, ABORT_SLACK};
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
 use super::super::{
@@ -15,9 +16,10 @@ use super::super::{
 };
 use super::default_estimator::DefaultLatencyEstimator;
 use super::state::{
-    is_early_return_response, ChildRPCTracker, EstimationTracker, LatencyEstimators,
+    child_report, is_early_return_response, ChildRPCTracker, EstimationTracker, LatencyEstimators,
     RequestMetadataTracker,
 };
+use super::wire::{EstimationInfo, EstimationWire, PublishesEstimationInfo, RootMethod};
 use crate::MethodRegistry;
 
 // ── Server ──────────────────────────────────────────────────────────────
@@ -34,6 +36,7 @@ impl LayerServer for EstimationServer {
     fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
         let est = LatencyEstimators::<DefaultLatencyEstimator>::new();
         init.provide(est.clone());
+        init.provide(PublishesEstimationInfo);
         Ok(Self { est })
     }
 }
@@ -49,43 +52,65 @@ impl LayerServer for EstimationServer {
 #[derive(Debug)]
 pub struct EstimationLayer {
     pub(crate) estimation: EstimationTracker<DefaultLatencyEstimator>,
-    request_metadata: RequestMetadataTracker,
+    request_metadata: Arc<RequestMetadataTracker>,
     rpc: CowGrpcMethod,
+    info: EstimationInfo,
 }
 
 impl Layer for EstimationLayer {
     type Server = EstimationServer;
     type Child = EstimationChild;
     const NAME: &'static str = "estimation";
-    type Wire = ();
+    type Wire = EstimationWire;
 
     fn new(
         method: &CowGrpcMethod,
         server: &EstimationServer,
-        ctx: &mut Context,
-        _wire: &WireIn<'_>,
-        _ext: &mut Extensions,
+        _ctx: &mut Context,
+        wire: &WireIn<'_>,
+        ext: &mut Extensions,
     ) -> Self {
         let resolved_method_id = MethodRegistry::global().get_or_register(method.clone());
-        // Set root_method at ingress (hop_count == 0)
-        if ctx.hop_count() == 0 {
-            ctx.set_root_method(RootMethod {
+        let inbound = wire
+            .get::<Self>()
+            .unwrap_or_else(|err| panic!("{err}"))
+            .and_then(|wire| wire.request);
+        // A request without an estimation section comes from a sender that
+        // runs no estimation (a load generator, say), so it is at ingress.
+        let hop_count = inbound.as_ref().map_or(0, |request| request.hop_count);
+        let (root_method, root_method_id) = if hop_count == 0 {
+            let root = RootMethod {
                 service: method.service().to_string(),
                 method: method.method().to_string(),
+            };
+            (Some(Arc::new(root)), Some(resolved_method_id))
+        } else {
+            let root = inbound.and_then(|request| request.root_method);
+            let id = root.as_ref().map(|root| {
+                MethodRegistry::global().get_or_register(CowGrpcMethod::new(
+                    root.service.clone(),
+                    root.method.clone(),
+                ))
             });
-        }
-        let root_method_id = ctx.root_method().map(|rm| {
-            MethodRegistry::global()
-                .get_or_register(CowGrpcMethod::new(rm.service.clone(), rm.method.clone()))
-        });
+            (root.map(Arc::new), id)
+        };
+        let request_metadata = Arc::new(RequestMetadataTracker::new());
+        let info = EstimationInfo {
+            hop_count,
+            root_method,
+            root_method_id,
+            meta: request_metadata.clone(),
+        };
+        ext.insert(info.clone());
         Self {
             estimation: EstimationTracker::new(
                 resolved_method_id,
                 root_method_id,
                 server.est.clone(),
             ),
-            request_metadata: RequestMetadataTracker::new(),
+            request_metadata,
             rpc: method.clone(),
+            info,
         }
     }
 
@@ -133,9 +158,17 @@ impl Layer for EstimationLayer {
         child_ctx: &mut EstimationChild,
         _request: &mut tonic::Request<T>,
         child_rpc: &mut ChildRpcContext,
-        _child_wire: &mut WireOut,
+        child_wire: &mut WireOut,
         _ext: &mut Extensions,
     ) -> Result<(), Status> {
+        // Each hop below ingress is one further from it; the root is passed on.
+        child_wire
+            .put::<Self>(&EstimationWire::request(
+                self.info.hop_count.saturating_add(1),
+                self.info.root_method().cloned(),
+            ))
+            .unwrap_or_else(|err| panic!("{err}"));
+
         let child_tracker = self.estimation.begin_child(child_method_name);
         let time_left = ctx.e2e_deadline().saturating_sub(masa_core::time_now());
         let root = self
@@ -189,14 +222,22 @@ impl Layer for EstimationLayer {
         _ctx: &Context,
         _child_method: &CowGrpcMethod,
         response: &Result<Response<T>, Status>,
-        _response_wire: &WireIn<'_>,
+        response_wire: &WireIn<'_>,
         child_ctx: &EstimationChild,
         _ext: &Extensions,
     ) -> Result<(), Status> {
         if let Some(child_tracker) = child_ctx.child_tracker.as_ref() {
+            let report = child_report(
+                response,
+                response_wire
+                    .get::<Self>()
+                    .unwrap_or_else(|err| panic!("{err}"))
+                    .and_then(|wire| wire.response),
+            );
             self.estimation
-                .record_child_complete(child_tracker, response);
-            self.request_metadata.absorb_child_meta(response);
+                .record_child_complete(child_tracker, response, report.as_ref());
+            self.request_metadata
+                .absorb_child(response, report.as_ref());
         }
 
         #[cfg(feature = "sched_pred")]
@@ -254,9 +295,9 @@ impl Layer for EstimationLayer {
     #[inline]
     fn finalize<Ret>(
         &self,
-        ctx: &mut Context,
+        _ctx: &mut Context,
         result: &mut Result<Response<Ret>, Status>,
-        _wire: &mut WireOut,
+        wire: &mut WireOut,
         _ext: &Extensions,
     ) {
         if is_early_return_response(result) {
@@ -264,7 +305,10 @@ impl Layer for EstimationLayer {
         } else if !super::signal_slack::should_skip_flush(&self.request_metadata) {
             self.estimation.flush();
         }
-        self.request_metadata.inject_response_meta(ctx);
+        wire.put::<Self>(&EstimationWire::response(
+            self.request_metadata.response_wire(),
+        ))
+        .unwrap_or_else(|err| panic!("{err}"));
     }
 }
 

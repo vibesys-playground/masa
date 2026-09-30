@@ -33,7 +33,9 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 ///
 /// No scheduling features select `NoopHooks` (zero overhead). Any scheduling
 /// feature selects `masa_policy::PolicyHooks` with full scheduling hooks, and
-/// `stack_custom` swaps its stack for `masa_policy::AgentStack`.
+/// `stack_custom` swaps its stack for `masa_policy::AgentStack`. `sched_custom`
+/// does not change the hooks; it swaps Tokio's run queue for
+/// `rpcstack_sched::custom::Queue`.
 #[cfg(not(any(
     feature = "sched_fifo",
     feature = "sched_slo",
@@ -78,6 +80,20 @@ pub type DefaultHooks = masa_policy::PolicyHooks<masa_policy::AgentStack>;
     ))
 ))]
 compile_error!("`stack_custom` requires a scheduling feature (e.g. `sched_slo`)");
+
+// `sched_custom` only swaps the run queue. Hyper passes priorities to Tokio
+// only under a scheduling feature, so without one the custom queue would
+// receive tasks that carry no priority.
+#[cfg(all(
+    feature = "sched_custom",
+    not(any(
+        feature = "sched_fifo",
+        feature = "sched_slo",
+        feature = "sched_tailclipper",
+        feature = "sched_oracle"
+    ))
+))]
+compile_error!("`sched_custom` requires a scheduling feature (e.g. `sched_slo`)");
 
 pub mod transport;
 

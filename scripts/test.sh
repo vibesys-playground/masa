@@ -100,6 +100,7 @@ feature_combos=(
     "sched_slo,ac_rajomon"
     "sched_pred,abort_slo,ac_pred,est_mean_var"
     "sched_slo,stack_custom"
+    "sched_slo,sched_custom"
 )
 
 # Feature combinations for the server-free semantics suite (libs/masa-semantics).
@@ -157,6 +158,10 @@ run_feature_tests() {
         sched_slo,stack_custom)
             execute_test "masa-integration-tests (sched_slo+stack_custom)" \
                 cargo test -p masa-integration-tests --features sched_slo,stack_custom
+            ;;
+        sched_slo,sched_custom)
+            execute_test "masa-integration-tests (sched_slo+sched_custom)" \
+                cargo test -p masa-integration-tests --features sched_slo,sched_custom
             ;;
     esac
 }
