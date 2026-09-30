@@ -1,7 +1,7 @@
 #[cfg(tokio_unstable)]
 use crate::runtime;
 use crate::runtime::{context, scheduler, RuntimeFlavor};
-use crate::task::TaskPriority;
+use crate::task::meta_for_unannotated_spawn;
 
 /// Handle to the runtime.
 ///
@@ -329,7 +329,8 @@ impl Handle {
         let future = super::task::trace::Trace::root(future);
         #[cfg(all(tokio_unstable, feature = "tracing"))]
         let future = crate::util::trace::task(future, "task", _name, id.as_u64());
-        self.inner.spawn(future, id, TaskPriority::infra())
+        let meta = meta_for_unannotated_spawn(crate::runtime::task::current_task_meta().as_ref());
+        self.inner.spawn(future, id, meta)
     }
 
     /// Returns the flavor of the current `Runtime`.

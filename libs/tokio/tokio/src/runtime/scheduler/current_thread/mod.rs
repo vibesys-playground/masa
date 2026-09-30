@@ -7,7 +7,7 @@ use crate::runtime::scheduler::{self, Defer, Inject};
 use crate::runtime::task::{self, JoinHandle, OwnedTasks, Schedule, Task};
 use crate::runtime::{blocking, context, Config, MetricsBatch, SchedulerMetrics, WorkerMetrics};
 use crate::sync::notify::Notify;
-use crate::task::TaskPriority;
+use crate::task::Meta;
 use crate::util::atomic_cell::AtomicCell;
 use crate::util::{waker_ref, RngSeedGenerator, Wake, WakerRef};
 
@@ -437,7 +437,7 @@ impl Handle {
         me: &Arc<Self>,
         future: F,
         id: crate::runtime::task::Id,
-        priority: TaskPriority,
+        priority: Meta,
     ) -> JoinHandle<F::Output>
     where
         F: crate::future::Future + Send + 'static,

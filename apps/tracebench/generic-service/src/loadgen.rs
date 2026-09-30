@@ -9,7 +9,6 @@ use std::{
 
 use app_utils::load_gen::{ArrivalProcess, ArrivalTimer, TraceRecord};
 use masa::transport::LoadBalancedChannel;
-use masa::MasaRequestExt;
 use masa::{time_now, ContextBuilder as MasaContextBuilder};
 use serde::Deserialize;
 use serde_json;
@@ -332,18 +331,18 @@ async fn run_root_load(
                         let slo_us = entry.slo_ms * 1000;
                         let start_at = time_now();
                         let deadline = start_at + slo_us;
-                        #[allow(unused_mut)]
-                        let mut builder = MasaContextBuilder::new("root".to_string(), req_id)
-                            .slo(slo_us)
-                            .gateway_entry(start_at)
-                            .deadline(deadline);
+                        let root = masa::RootContext::from(
+                            MasaContextBuilder::new("root".to_string(), req_id)
+                                .slo(slo_us)
+                                .gateway_entry(start_at)
+                                .deadline(deadline)
+                                .build(),
+                        );
                         #[cfg(feature = "ac_rajomon")]
-                        {
-                            builder = builder.tokens(tokens);
-                        }
-                        builder.build()
+                        let root = root.with_rajomon_tokens(tokens);
+                        root
                     };
-                    let request = request.with_masa_context(&ctx);
+                    let request = ctx.attach(request);
 
                     let start_time = Instant::now();
                     let res = rpc_client.root(request).await;

@@ -7,6 +7,9 @@ mod prio_heap;
 #[cfg(all(feature = "sched_prio", feature = "tailclipper"))]
 mod tailclipper;
 
+#[cfg(test)]
+mod replay_tests;
+
 pub(crate) type LocalRunQueue<T> = LocalRunQueueInner<T>;
 
 #[cfg(not(feature = "sched_prio"))]

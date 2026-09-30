@@ -2,11 +2,26 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 
 use masa_core::Context;
+use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Response, Status};
 
 use super::shared::{RajomonSharedState, RAJOMON_STATE};
 use crate::layer::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit};
 use crate::policy_params::PolicyParams;
+use crate::wire::{WireIn, WireOut};
+
+// ── Wire data ───────────────────────────────────────────────────────────
+
+/// Token budget Rajomon assumes for a request that arrives with no Rajomon
+/// wire data at all. Absence is Rajomon's to interpret; zero is a real budget.
+pub(super) const DEFAULT_TOKENS: u64 = 100;
+
+/// Rajomon's data on the wire: the token budget a request carries down the
+/// call tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RajomonWire {
+    pub tokens: u64,
+}
 
 // ── Layer Implementation ────────────────────────────────────────────────
 
@@ -32,8 +47,15 @@ pub struct RajomonLayer {
 impl Layer for RajomonLayer {
     type Server = RajomonServer;
     type Child = RajomonChild;
+    const NAME: &'static str = "rajomon";
+    type Wire = RajomonWire;
 
-    fn new(method: &CowGrpcMethod, _server: &RajomonServer, ctx: &mut Context) -> Self {
+    fn new(
+        method: &CowGrpcMethod,
+        _server: &RajomonServer,
+        _ctx: &mut Context,
+        wire: &WireIn<'_>,
+    ) -> Self {
         RajomonSharedState::ensure_worker_started();
 
         let mut layer = Self {
@@ -43,22 +65,26 @@ impl Layer for RajomonLayer {
             inbound_tokens: AtomicU64::new(0),
         };
 
-        // Inbound admission check: accepted iff ctx.tokens() >= accumulated_price.
-        // Paper §3.4 / Go LoadShedding both allow ctx.tokens == accumulated == 0
+        // Inbound admission check: accepted iff tokens >= accumulated_price.
+        // Paper §3.4 / Go LoadShedding both allow tokens == accumulated == 0
         // to pass (nothing to charge for). No artificial minimum price.
+        let tokens = wire
+            .get::<Self>()
+            .unwrap_or_else(|err| panic!("{err}"))
+            .map_or(DEFAULT_TOKENS, |wire| wire.tokens);
         let accumulated = RAJOMON_STATE.accumulated_price(&layer.rpc);
         let own = RAJOMON_STATE.own_price.load(Ordering::Relaxed);
-        layer.inbound_tokens.store(ctx.tokens(), Ordering::Relaxed);
-        if ctx.tokens() < accumulated {
+        layer.inbound_tokens.store(tokens, Ordering::Relaxed);
+        if tokens < accumulated {
             layer.should_drop = true;
             RAJOMON_STATE.diag_rejected.fetch_add(1, Ordering::Relaxed);
             RAJOMON_STATE
                 .diag_token_deficit_sum
-                .fetch_add(accumulated - ctx.tokens(), Ordering::Relaxed);
+                .fetch_add(accumulated - tokens, Ordering::Relaxed);
         } else {
             layer
                 .remaining_tokens
-                .store(ctx.tokens() - own, Ordering::Relaxed);
+                .store(tokens - own, Ordering::Relaxed);
             RAJOMON_STATE.diag_admitted.fetch_add(1, Ordering::Relaxed);
         }
 
@@ -88,7 +114,8 @@ impl Layer for RajomonLayer {
         child_method: &CowGrpcMethod,
         _child_ctx: &mut RajomonChild,
         _request: &mut tonic::Request<T>,
-        child_rpc: &mut ChildRpcContext,
+        _child_rpc: &mut ChildRpcContext,
+        child_wire: &mut WireOut,
     ) -> Result<(), Status> {
         // Check if request was marked for drop before initiating child RPC
         if self.should_drop {
@@ -105,7 +132,9 @@ impl Layer for RajomonLayer {
             return Err(self.issue_error(Some(child_method), "RajomonChildBudgetRej"));
         }
 
-        child_rpc.tokens = self.remaining_tokens.load(Ordering::Relaxed);
+        child_wire
+            .put::<Self>(&RajomonWire { tokens: current })
+            .unwrap_or_else(|err| panic!("{err}"));
 
         Ok(())
     }
@@ -164,7 +193,15 @@ impl Layer for RajomonLayer {
     }
 
     #[inline]
-    fn finalize<Ret>(&self, _ctx: &mut Context, result: &mut Result<Response<Ret>, Status>) {
+    fn finalize<Ret>(
+        &self,
+        _ctx: &mut Context,
+        result: &mut Result<Response<Ret>, Status>,
+        wire: &mut WireOut,
+    ) {
+        let tokens = self.inbound_tokens.load(Ordering::Relaxed);
+        wire.put::<Self>(&RajomonWire { tokens })
+            .unwrap_or_else(|err| panic!("{err}"));
         // Paper §3.4 "Lazy Price Propagation": probabilistic per-response.
         if !self.should_propagate_price() {
             return;

@@ -4,6 +4,8 @@ use tonic::{CowGrpcMethod, Response, Status};
 
 use super::*;
 use crate::layer::Layer;
+use crate::wire::WireIn;
+use masa_core::Context;
 
 // Default parameter values matching PolicyParams defaults.
 // Tests verify algorithmic behaviour with these specific values.
@@ -12,6 +14,20 @@ const INIT_PRICE: u64 = 0;
 const PRICE_STEP_UP: u64 = 8;
 const TOKENS_LEFT_INIT: u64 = 10;
 const TOKEN_UPDATE_STEP: u64 = 5;
+
+/// A layer for a request that arrived carrying `tokens` as Rajomon wire data.
+fn layer_with_tokens(method: &CowGrpcMethod, ctx: &mut Context, tokens: u64) -> RajomonLayer {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        masa_core::MASA_CONTEXT_HEADER,
+        crate::wire::header_value_with::<RajomonLayer>("Q1RY", &RajomonWire { tokens })
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    let wire = WireIn::from_headers(&headers).unwrap();
+    RajomonLayer::new(method, &RajomonServer, ctx, &wire)
+}
 
 /// Mutex to serialize tests that modify the global RAJOMON_STATE.own_price,
 /// since it's a single global value shared across all test threads.
@@ -201,8 +217,8 @@ fn test_check_inbound_deducts_own_price_not_accumulated() {
         .max_downstream_for_method
         .remove(&CowGrpcMethod::new("svc", "method"));
 
-    let mut ctx = masa_core::ContextBuilder::new("test", 0).tokens(20).build();
-    let layer = RajomonLayer::new(&method, &RajomonServer, &mut ctx);
+    let mut ctx = masa_core::ContextBuilder::new("test", 0).build();
+    let layer = layer_with_tokens(&method, &mut ctx, 20);
     assert!(!layer.should_drop);
     assert_eq!(layer.remaining_tokens.load(Ordering::Relaxed), 17); // 20 - own(3) = 17
 }
@@ -219,8 +235,8 @@ fn test_check_inbound_deducts_own_not_accumulated_when_downstream_dominant() {
     RAJOMON_STATE
         .max_downstream_for_method
         .insert(method.clone(), 20); // accumulated = 5 + 20 = 25
-    let mut ctx = masa_core::ContextBuilder::new("test", 0).tokens(25).build();
-    let layer = RajomonLayer::new(&method, &RajomonServer, &mut ctx);
+    let mut ctx = masa_core::ContextBuilder::new("test", 0).build();
+    let layer = layer_with_tokens(&method, &mut ctx, 25);
     assert!(!layer.should_drop); // tok(25) >= accumulated(25) -> admitted
     assert_eq!(layer.remaining_tokens.load(Ordering::Relaxed), 20); // 25 - own(5) = 20
 }
@@ -231,8 +247,8 @@ fn test_check_inbound_rejects_insufficient_tokens() {
     let method = CowGrpcMethod::new("svc", "reject_method");
     RAJOMON_STATE.own_price.store(100, Ordering::Relaxed);
 
-    let mut ctx = masa_core::ContextBuilder::new("test", 0).tokens(10).build();
-    let layer = RajomonLayer::new(&method, &RajomonServer, &mut ctx);
+    let mut ctx = masa_core::ContextBuilder::new("test", 0).build();
+    let layer = layer_with_tokens(&method, &mut ctx, 10);
     assert!(layer.should_drop);
 }
 
@@ -245,8 +261,8 @@ fn test_check_inbound_accepts_exact_tokens() {
         .max_downstream_for_method
         .remove(&CowGrpcMethod::new("svc", "exact_method"));
 
-    let mut ctx = masa_core::ContextBuilder::new("test", 0).tokens(10).build();
-    let layer = RajomonLayer::new(&method, &RajomonServer, &mut ctx);
+    let mut ctx = masa_core::ContextBuilder::new("test", 0).build();
+    let layer = layer_with_tokens(&method, &mut ctx, 10);
     assert!(!layer.should_drop);
     assert_eq!(layer.remaining_tokens.load(Ordering::Relaxed), 0); // 10 - 10 = 0
 }
@@ -264,8 +280,8 @@ fn test_check_inbound_tokens_zero_price_zero() {
     // there is nothing to charge the request for, so it is admitted.
     // This test used to assert rejection under our now-removed .max(1)
     // minimum-effective-price clamp (§10.7).
-    let mut ctx = masa_core::ContextBuilder::new("test", 0).tokens(0).build();
-    let layer = RajomonLayer::new(&method, &RajomonServer, &mut ctx);
+    let mut ctx = masa_core::ContextBuilder::new("test", 0).build();
+    let layer = layer_with_tokens(&method, &mut ctx, 0);
     assert!(!layer.should_drop);
 }
 
@@ -354,10 +370,8 @@ fn test_layer_records_child_price_response_and_updates_parent_max() {
         .remove(&(parent.clone(), child.clone()));
     RAJOMON_STATE.max_downstream_for_method.remove(&parent);
 
-    let mut ctx = masa_core::ContextBuilder::new("test", 0)
-        .tokens(100)
-        .build();
-    let layer = RajomonLayer::new(&parent, &RajomonServer, &mut ctx);
+    let mut ctx = masa_core::ContextBuilder::new("test", 0).build();
+    let layer = layer_with_tokens(&parent, &mut ctx, 100);
     let mut response: Result<Response<()>, Status> = Ok(Response::new(()));
     response
         .as_mut()
@@ -471,13 +485,11 @@ fn test_client_rate_limits_when_insufficient() {
 #[test]
 fn test_price_propagation_edge_cases() {
     let method = CowGrpcMethod::new("svc", "m");
-    let mut ctx = masa_core::ContextBuilder::new("test", 0)
-        .tokens(100)
-        .build();
+    let mut ctx = masa_core::ContextBuilder::new("test", 0).build();
     let _lock = GLOBAL_STATE_LOCK.lock().unwrap();
     RAJOMON_STATE.own_price.store(0, Ordering::Relaxed);
     RAJOMON_STATE.max_downstream_for_method.remove(&method);
-    let layer = RajomonLayer::new(&method, &RajomonServer, &mut ctx);
+    let layer = layer_with_tokens(&method, &mut ctx, 100);
 
     // We can't override PolicyParams::global() at runtime here, so we
     // can't easily test arbitrary price_freq values from the test
@@ -512,8 +524,8 @@ fn test_load_shedding_returns_correct_remaining_tokens() {
     let method = CowGrpcMethod::new("svc", "Foo_ls");
     RAJOMON_STATE.max_downstream_for_method.remove(&method);
 
-    let mut ctx = masa_core::ContextBuilder::new("test", 0).tokens(20).build();
-    let layer = RajomonLayer::new(&method, &RajomonServer, &mut ctx);
+    let mut ctx = masa_core::ContextBuilder::new("test", 0).build();
+    let layer = layer_with_tokens(&method, &mut ctx, 20);
     assert!(!layer.should_drop);
     assert_eq!(layer.remaining_tokens.load(Ordering::Relaxed), 13); // 20 - 7 = 13
 }
@@ -529,10 +541,8 @@ fn test_mixed_tokens_accept_reject() {
     let mut accepted = 0;
     for i in 0..10 {
         let token_val = if i < 5 { 3u64 } else { 20u64 };
-        let mut ctx = masa_core::ContextBuilder::new("test", 0)
-            .tokens(token_val)
-            .build();
-        let layer = RajomonLayer::new(&method, &RajomonServer, &mut ctx);
+        let mut ctx = masa_core::ContextBuilder::new("test", 0).build();
+        let layer = layer_with_tokens(&method, &mut ctx, token_val);
         if layer.should_drop {
             rejected += 1;
         } else {

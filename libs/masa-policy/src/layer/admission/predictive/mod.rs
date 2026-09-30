@@ -6,12 +6,12 @@
 // observed ER fraction exceeds a threshold and recovers additively when healthy.
 // Exponential idle decay opens admission naturally when traffic drops.
 
-use masa_core::Instant;
+use crate::wire::{WireIn, WireOut};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use masa_core::Context;
+use masa_core::{Context, Instant};
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
 use super::super::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit};
@@ -79,8 +79,15 @@ pub struct PredAdmissionLayer {
 impl Layer for PredAdmissionLayer {
     type Server = PredAdmissionServer;
     type Child = PredAdmissionChild;
+    const NAME: &'static str = "pred_admission";
+    type Wire = ();
 
-    fn new(method: &CowGrpcMethod, server: &PredAdmissionServer, ctx: &mut Context) -> Self {
+    fn new(
+        method: &CowGrpcMethod,
+        server: &PredAdmissionServer,
+        ctx: &mut Context,
+        _wire: &WireIn<'_>,
+    ) -> Self {
         let root_method_id = ctx.root_method().map(|rm| {
             crate::MethodRegistry::global()
                 .get_or_register(CowGrpcMethod::new(rm.service.clone(), rm.method.clone()))
@@ -142,6 +149,7 @@ impl Layer for PredAdmissionLayer {
         _child_ctx: &mut PredAdmissionChild,
         _request: &mut tonic::Request<T>,
         _child_rpc: &mut ChildRpcContext,
+        _child_wire: &mut WireOut,
     ) -> Result<(), Status> {
         use masa_core::time_now;
 
@@ -249,7 +257,12 @@ impl Layer for PredAdmissionLayer {
     }
 
     #[inline]
-    fn finalize<Ret>(&self, ctx: &mut Context, result: &mut Result<Response<Ret>, Status>) {
+    fn finalize<Ret>(
+        &self,
+        ctx: &mut Context,
+        result: &mut Result<Response<Ret>, Status>,
+        _wire: &mut WireOut,
+    ) {
         if ctx.hop_count() != 0 {
             return;
         }
@@ -630,7 +643,7 @@ mod tests {
         });
         let mut result = Ok(Response::new(()));
 
-        layer.finalize(&mut ctx, &mut result);
+        layer.finalize(&mut ctx, &mut result, &mut crate::wire::WireOut::new());
 
         let root_id =
             crate::MethodRegistry::global().get_or_register(CowGrpcMethod::new("svc", "method"));

@@ -15,12 +15,12 @@ use crate::server::server::{new_svc::NewSvcTask, Watcher};
 #[cfg(all(feature = "server", any(feature = "http1", feature = "http2")))]
 use crate::service::HttpService;
 use http::HeaderMap;
-use tokio::task::TaskPriority;
+use tokio::task::{meta_for_unannotated_spawn, TaskPriority};
 
 #[cfg(feature = "server")]
 pub trait ConnStreamExec<F, B: HttpBody>: Clone {
     fn h2_stream_priority(&self, _headers: &HeaderMap) -> TaskPriority {
-        TaskPriority::infra()
+        meta_for_unannotated_spawn(None)
     }
 
     fn execute_h2stream_with_prio(&mut self, fut: H2Stream<F, B>, prio: TaskPriority);
@@ -99,7 +99,7 @@ where
             Exec::Default => {
                 TaskPriority::new(masa_core::read_priority_from_headers(headers).value())
             }
-            Exec::Executor(_) => TaskPriority::infra(),
+            Exec::Executor(_) => meta_for_unannotated_spawn(None),
         }
     }
 
