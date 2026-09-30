@@ -43,6 +43,9 @@ scenario! {
             }
         }
         assert!(h.poll_yield().is_err());
+        // Only a poll that yields is cut short: finishing is left alone.
+        assert!(h.poll_begin().is_err());
+        assert!(h.poll_ready().is_ok());
 
         for tokens in [50, 51, 100] {
             let rich = request_with_tokens(w, tokens);

@@ -116,6 +116,21 @@ scenario! {
 }
 
 scenario! {
+    /// An expired request is rejected at its first poll and at a yielding poll,
+    /// but a poll that finishes is never replaced, even for a request that was
+    /// already expired when it arrived.
+    fn expired_request_is_replaced_only_at_yielding_polls(w) {
+        let svc = w.service("GuardSvc6b");
+        let req = w.crafted("GuardApi", dur_ms(1)).entered_at(w.now() - ms(1000)).build();
+        let h = svc.accept("Ping", &req);
+        assert_eq!(h.poll_begin().unwrap_err().code(), Code::DeadlineExceeded);
+        assert_eq!(h.poll_yield().unwrap_err().code(), Code::DeadlineExceeded);
+        assert!(h.poll_begin().is_err());
+        assert!(h.poll_ready().is_ok());
+    }
+}
+
+scenario! {
     /// A child RPC attempted after the deadline is rejected before anything is
     /// sent: the outbound request carries no Masa context.
     fn child_call_after_deadline_is_rejected_untouched(w) {

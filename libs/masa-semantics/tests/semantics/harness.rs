@@ -290,8 +290,19 @@ impl<H: Hooks> Service<H> {
             service: self.name,
             method,
             request: inbound.view.clone(),
+            unpolled: false,
             in_poll: std::cell::Cell::new(false),
             aborted: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Like [`Service::accept`], but the handler's future is never polled: only
+    /// child-RPC hooks and finalization run. For scenarios about the
+    /// bookkeeping around a request rather than its execution.
+    pub fn accept_unpolled(&self, method: &'static str, inbound: &Inbound) -> Handler<H> {
+        Handler {
+            unpolled: true,
+            ..self.accept(method, inbound)
         }
     }
 
@@ -673,6 +684,7 @@ pub struct Handler<H: Hooks> {
     pub service: &'static str,
     pub method: &'static str,
     request: CtxView,
+    unpolled: bool,
     in_poll: std::cell::Cell<bool>,
     aborted: std::cell::Cell<bool>,
 }
@@ -692,7 +704,7 @@ impl<H: Hooks> Handler<H> {
     }
 
     fn enter_poll(&self) -> Result<(), Status> {
-        if self.in_poll.replace(true) {
+        if self.unpolled || self.in_poll.replace(true) {
             return Ok(());
         }
         self.note_abort(early_status(self.parent.before_poll::<()>()))
@@ -721,6 +733,11 @@ impl<H: Hooks> Handler<H> {
     /// is polled for the first time, for instance.
     pub fn poll_begin(&self) -> Result<(), Status> {
         self.enter_poll()
+    }
+
+    /// Close the open poll as `Ready`: the handler future finished in it.
+    pub fn poll_ready(&self) -> Result<(), Status> {
+        self.leave_poll(PollEnd::Ready)
     }
 
     /// Close the open poll as `Pending`.
@@ -831,11 +848,17 @@ impl<H: Hooks> Handler<H> {
             replies.push((i, test_clock::now_us(), out, reply));
         }
         replies.sort_by_key(|(_, end, _, _)| *end);
-        for (i, end, out, reply) in replies {
+        let total = replies.len();
+        for (n, (i, end, out, reply)) in replies.into_iter().enumerate() {
             test_clock::set_now_us(end);
             let _ = self.enter_poll();
             let done = self.complete(out, reply);
             outcomes.push((i, end, done));
+            // The handler future is woken by each completion and, while
+            // siblings are still running, yields again.
+            if n + 1 < total {
+                let _ = self.leave_poll(PollEnd::Pending);
+            }
         }
         outcomes.sort_by_key(|(i, _, _)| *i);
         outcomes.into_iter().map(|(_, _, r)| r).collect()

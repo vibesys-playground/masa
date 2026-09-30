@@ -77,6 +77,28 @@ scenario! {
 }
 
 scenario! {
+    /// When the parent itself never ran, its reported queue latencies are
+    /// exactly the sums of what its children reported.
+    fn queue_totals_are_exact_sums_when_the_parent_never_ran(w) {
+        let svc = w.service("QueueExact");
+        let req = w.ingress("QueueApi", dur_ms(1000));
+        let h = svc.accept_unpolled("Entry", &req);
+        h.call_remote("QueueExactChild", "Down")
+            .returns(Duration::from_millis(1), reply_with_queue(queue(11, 22, &[("down", 5)])))
+            .unwrap();
+        let q = h.finalize_now(Ok(())).view().unwrap().queue.unwrap();
+        assert_eq!((q.initial, q.resume), (11, 22));
+        assert_eq!(
+            q.lengths,
+            BTreeMap::from([
+                ("down".to_string(), 5),
+                (QUEUE_SERVICE_NAME.to_string(), 0),
+            ])
+        );
+    }
+}
+
+scenario! {
     /// Telemetry travels up a real chain: the top of a three-hop chain reports
     /// the queue lengths of its own process, which all hops share by name here.
     fn telemetry_survives_a_chain(w) {

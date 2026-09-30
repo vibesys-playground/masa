@@ -16,8 +16,13 @@ request/response/status extensions).
   implementation under test.
 - `tests/semantics/scenarios/*.rs`: pure semantics written against the harness
   API. Each test's doc comment states the rule it pins.
-- `tests/rajomon_worker/`: Rajomon scenarios that need its background price
-  worker, which is a once-per-process singleton, so they get their own process.
+- `tests/rajomon_worker/`, `tests/rajomon_price_freq_5/`,
+  `tests/rajomon_price_freq_0/`: Rajomon behavior that depends on process-wide
+  state (its background price worker and refill worker start once per process,
+  and the price-propagation probability is configuration read once), so each
+  gets a process of its own. `rajomon_worker` runs with tokio's clock paused and
+  advances it explicitly; it is the only place where a real delay enters, as a
+  lower bound on how long a request waited in the runtime queue.
 
 ## Running
 

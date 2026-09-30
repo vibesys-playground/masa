@@ -96,6 +96,32 @@ scenario! {
 }
 
 scenario! {
+    /// Parallel children's metadata is folded into the parent's reply just like
+    /// sequential children's: accumulated compute is the sum over all branches,
+    /// while the parent's own compute time counts only its own work.
+    fn parallel_children_metadata_is_folded(w) {
+        let svc = w.service("MetaFanSvc");
+        let b = w.service("MetaFanB");
+        let c = w.service("MetaFanC");
+        let req = w.ingress("MetaApi", dur_ms(1000));
+        let reply = svc.serve("Entry", &req, |h| {
+            h.work_ms(1)?;
+            let results = h.fanout(vec![
+                h.call(&b, "B").branch(|hb| hb.work_ms(10)),
+                h.call(&c, "C").branch(|hc| hc.work_ms(30)),
+            ]);
+            for r in results {
+                r?;
+            }
+            h.work_ms(2)
+        });
+        let meta = reply.meta();
+        assert_eq!(meta.compute_time_us, 3_000);
+        assert_eq!(meta.accumulated_compute_us, 43_000);
+    }
+}
+
+scenario! {
     /// Early returns are counted across the subtree: the parent adds one for
     /// its own DeadlineExceeded outcome to the count its children reported.
     fn early_returns_are_summed_over_the_subtree(w) {

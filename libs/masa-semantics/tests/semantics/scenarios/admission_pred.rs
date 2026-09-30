@@ -140,30 +140,52 @@ scenario! {
     }
 }
 
+/// A fresh service after one window of six successful ingress requests whose
+/// single child reported `meta`.
+fn service_after_window_of_subtree_reports<H: Hooks>(
+    w: &World<H>,
+    name: &'static str,
+    meta: RespMeta,
+) -> Service<H> {
+    let svc = w.service(name);
+    let spec = ReplySpec {
+        meta,
+        ..ReplySpec::default()
+    };
+    // Five outcomes in the window, then a sixth after 60 ms closes it.
+    for step in 0..6 {
+        if step == 5 {
+            w.advance_ms(60);
+        }
+        let req = w.ingress("AcApi", dur_ms(10_000));
+        let h = svc.accept(INGRESS, &req);
+        assert!(h.poll_begin().is_ok());
+        let _ = h
+            .call_remote("AcSubtreeChild", "Down")
+            .returns(Duration::from_millis(1), Reply::synthetic(spec.clone()));
+        h.finalize_now(Ok(()));
+    }
+    svc
+}
+
 scenario! {
     /// An `Ok` request whose subtree reported an early return counts as an
     /// early return for the controller: one window of such requests makes the
     /// service start rejecting.
     fn subtree_early_returns_count_as_overload(w) {
-        let svc = w.service("AcSubtree");
-        let spec = ReplySpec {
-            meta: RespMeta { early_return_count: 1, ..RespMeta::default() },
-            ..ReplySpec::default()
-        };
-        // Five outcomes in the window, then a sixth after 60 ms closes it.
-        for step in 0..6 {
-            if step == 5 {
-                w.advance_ms(60);
-            }
-            let req = w.ingress("AcApi", dur_ms(10_000));
-            let h = svc.accept(INGRESS, &req);
-            assert!(h.poll_begin().is_ok());
-            let _ = h
-                .call_remote("AcSubtreeChild", "Down")
-                .returns(Duration::from_millis(1), Reply::synthetic(spec.clone()));
-            h.finalize_now(Ok(()));
-        }
+        let meta = RespMeta { early_return_count: 1, ..RespMeta::default() };
+        let svc = service_after_window_of_subtree_reports(w, "AcSubtree", meta);
         assert_frequency(count_admitted(w, &svc, INGRESS, 4000), 4000, 0.875, "admitted after one overloaded window");
+    }
+}
+
+scenario! {
+    /// A soft deadline signal from the subtree counts as overload too, although
+    /// the request succeeded and nothing was aborted.
+    fn subtree_deadline_signals_count_as_overload(w) {
+        let meta = RespMeta { deadline_signal_count: 1, ..RespMeta::default() };
+        let svc = service_after_window_of_subtree_reports(w, "AcSignals", meta);
+        assert_frequency(count_admitted(w, &svc, INGRESS, 4000), 4000, 0.875, "admitted after one signalling window");
     }
 }
 

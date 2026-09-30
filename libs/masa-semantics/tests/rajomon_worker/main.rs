@@ -115,6 +115,48 @@ mod scenarios {
             .tokens(p)
             .build();
         assert!(svc.accept("Leaf", &enough).poll_begin().is_ok());
+
+        // An admitted request pays this service's price out of the tokens it
+        // forwards to its children.
+        let rich = w
+            .crafted("RwApi", Duration::from_secs(3600))
+            .tokens(p + 37)
+            .build();
+        let h = svc.accept("Leaf", &rich);
+        assert!(h.poll_begin().is_ok());
+        let child = h
+            .call_remote("RwPriceDown", "Down")
+            .outbound()
+            .expect("affordable");
+        assert_eq!(child.view().tokens, Some(37));
+    }
+
+    /// A price learned from a child is forgotten unless refreshed: every 10 ms
+    /// tick halves it (rounding down), so a stale price cannot block traffic
+    /// forever.
+    pub async fn learned_prices_decay<H: Hooks>(w: &World<H>) {
+        let svc = w.service("RwDecay");
+        let req = w
+            .crafted("RwApi", Duration::from_secs(3600))
+            .tokens(1_000_000)
+            .build();
+        let h = svc.accept("Gate", &req);
+        h.poll_begin().expect("admitted");
+        let spec = ReplySpec {
+            price: Some(100),
+            ..ReplySpec::default()
+        };
+        h.call_remote("RwDecayDown", "Down")
+            .returns(Duration::from_millis(1), Reply::synthetic(spec))
+            .expect("within budget");
+        h.finalize_now(Ok(()));
+
+        let mut seen = vec![price_of(w, &svc, "Gate")];
+        for _ in 0..8 {
+            w.elapse(Duration::from_millis(10)).await;
+            seen.push(price_of(w, &svc, "Gate"));
+        }
+        assert_eq!(seen, vec![100, 50, 25, 12, 6, 3, 1, 0, 0]);
     }
 
     /// Clients hold a bucket of tokens that refills with time. A request is
@@ -163,6 +205,7 @@ mod scenarios {
 #[test]
 fn rajomon_time_driven_behavior() {
     harness::run_timed::<harness::Under, _, _>(harness::Params::default(), |w| async move {
+        scenarios::learned_prices_decay(&w).await;
         scenarios::price_follows_queueing_delay(&w).await;
         scenarios::client_bucket_refills_with_time(&w).await;
     });
