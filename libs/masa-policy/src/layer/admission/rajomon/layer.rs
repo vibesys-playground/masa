@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Response, Status};
 
 use super::shared::{RajomonSharedState, RAJOMON_STATE};
-use crate::layer::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit};
+use crate::layer::{
+    ChildRpcContext, Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit,
+};
 use crate::policy_params::PolicyParams;
 use crate::wire::{WireIn, WireOut};
 
@@ -29,8 +31,8 @@ pub struct RajomonWire {
 pub struct RajomonServer;
 
 impl LayerServer for RajomonServer {
-    fn new(_init: &mut ServerInit) -> Self {
-        Self
+    fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
+        Ok(Self)
     }
 }
 
@@ -55,6 +57,7 @@ impl Layer for RajomonLayer {
         _server: &RajomonServer,
         _ctx: &mut Context,
         wire: &WireIn<'_>,
+        _ext: &mut Extensions,
     ) -> Self {
         RajomonSharedState::ensure_worker_started();
 
@@ -92,7 +95,11 @@ impl Layer for RajomonLayer {
     }
 
     #[inline]
-    fn before_poll<Ret>(&self, _ctx: &Context) -> Result<(), Result<Response<Ret>, Status>> {
+    fn before_poll<Ret>(
+        &self,
+        _ctx: &Context,
+        _ext: &mut Extensions,
+    ) -> Result<(), Result<Response<Ret>, Status>> {
         // Track queue delay for price updates
         let q_lat_us = tokio::task::obtain_task_queue_latency().as_micros() as u64;
         RAJOMON_STATE
@@ -116,6 +123,7 @@ impl Layer for RajomonLayer {
         _request: &mut tonic::Request<T>,
         _child_rpc: &mut ChildRpcContext,
         child_wire: &mut WireOut,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
         // Check if request was marked for drop before initiating child RPC
         if self.should_drop {
@@ -144,6 +152,7 @@ impl Layer for RajomonLayer {
         &self,
         _ctx: &Context,
         poll: &Poll<Result<Response<Ret>, Status>>,
+        _ext: &Extensions,
     ) -> Result<(), Result<Response<Ret>, Status>> {
         if let Poll::Pending = poll {
             if self.should_drop {
@@ -161,6 +170,7 @@ impl Layer for RajomonLayer {
         response: &Result<Response<T>, Status>,
         _response_wire: &WireIn<'_>,
         _child_ctx: &RajomonChild,
+        _ext: &Extensions,
     ) -> Result<(), Status> {
         // Extract and cache downstream prices from child response
         let metadata = match response {
@@ -199,6 +209,7 @@ impl Layer for RajomonLayer {
         _ctx: &mut Context,
         result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
+        _ext: &Extensions,
     ) {
         let tokens = self.inbound_tokens.load(Ordering::Relaxed);
         wire.put::<Self>(&RajomonWire { tokens })

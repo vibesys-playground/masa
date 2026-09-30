@@ -12,7 +12,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use masa_core::{time_now, ContextBuilder, PriorityHint};
-use masa_policy::{peek, Layer, MasaRequestExt, WireIn, WireOut, MASA_CONTEXT_HEADER};
+use masa_policy::{peek, Extensions, Layer, MasaRequestExt, WireIn, WireOut, MASA_CONTEXT_HEADER};
 use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Request};
 
@@ -43,6 +43,7 @@ macro_rules! bench_module {
                 _s: &(),
                 _c: &mut masa_core::Context,
                 _w: &WireIn<'_>,
+                _ext: &mut Extensions,
             ) -> Self {
                 Self
             }

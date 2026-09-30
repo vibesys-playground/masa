@@ -26,7 +26,13 @@ fn layer_with_tokens(method: &CowGrpcMethod, ctx: &mut Context, tokens: u64) -> 
             .unwrap(),
     );
     let wire = WireIn::from_headers(&headers).unwrap();
-    RajomonLayer::new(method, &RajomonServer, ctx, &wire)
+    RajomonLayer::new(
+        method,
+        &RajomonServer,
+        ctx,
+        &wire,
+        &mut crate::layer::Extensions::new(),
+    )
 }
 
 /// Mutex to serialize tests that modify the global RAJOMON_STATE.own_price,
@@ -386,6 +392,7 @@ fn test_layer_records_child_price_response_and_updates_parent_max() {
         &response,
         &crate::wire::WireIn::default(),
         &RajomonChild,
+        &crate::layer::Extensions::new(),
     )
     .unwrap();
 

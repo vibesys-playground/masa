@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use masa_core::{time_now, Context, ContextBuilder};
 use masa_policy::{
-    policy_stack, Layer, MasaResponseExt, MasaStatusExt, PolicyHooks, WireIn, WireOut,
+    policy_stack, Extensions, Layer, MasaResponseExt, MasaStatusExt, PolicyHooks, WireIn, WireOut,
     MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
@@ -42,7 +42,13 @@ impl Layer for Sum {
     const NAME: &'static str = "sum";
     type Wire = SumWire;
 
-    fn new(method: &CowGrpcMethod, _s: &(), _c: &mut Context, _wire: &WireIn<'_>) -> Self {
+    fn new(
+        method: &CowGrpcMethod,
+        _s: &(),
+        _c: &mut Context,
+        _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
+    ) -> Self {
         let own = match method.method() {
             "Root" => 100,
             "Mid" => 10,
@@ -62,6 +68,7 @@ impl Layer for Sum {
         _response: &Result<Response<T>, Status>,
         response_wire: &WireIn<'_>,
         _child_ctx: &(),
+        _ext: &Extensions,
     ) -> Result<(), Status> {
         if let Some(wire) = response_wire.get::<Self>().unwrap() {
             self.children.fetch_add(wire.total, Ordering::Relaxed);
@@ -75,6 +82,7 @@ impl Layer for Sum {
         _ctx: &mut Context,
         _result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
+        _ext: &Extensions,
     ) {
         wire.put::<Self>(&SumWire {
             total: self.own + self.children.load(Ordering::Relaxed),
@@ -94,7 +102,13 @@ impl Layer for Mute {
     const NAME: &'static str = "mute";
     type Wire = u8;
 
-    fn new(_m: &CowGrpcMethod, _s: &(), _c: &mut Context, _wire: &WireIn<'_>) -> Self {
+    fn new(
+        _m: &CowGrpcMethod,
+        _s: &(),
+        _c: &mut Context,
+        _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
+    ) -> Self {
         Self
     }
 }

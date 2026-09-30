@@ -15,7 +15,9 @@ use std::time::Instant;
 use masa_core::Context;
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
-use super::super::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit};
+use super::super::{
+    ChildRpcContext, Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit,
+};
 use crate::layer::est::default_estimator::DefaultLatencyEstimator;
 use crate::layer::est::latency_map::{MethodKey, ParentToChildKey};
 use crate::layer::est::state::{is_early_return_response, LatencyEstimators};
@@ -46,18 +48,15 @@ pub struct PredAdmissionServer {
 }
 
 impl LayerServer for PredAdmissionServer {
-    fn new(init: &mut ServerInit) -> Self {
+    fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
         // Admission decisions must use the same estimates the estimation
         // module maintains; a private copy would never be updated. A stack
-        // that omits the estimation module is a composition bug, and server
-        // construction has no error path, so fail loudly at startup.
-        let est = init
-            .get::<LatencyEstimators<DefaultLatencyEstimator>>()
-            .expect("PredAdmissionLayer requires EstimationLayer earlier in the policy stack");
-        Self {
+        // that omits or misorders the estimation module fails at construction.
+        let est = init.require::<LatencyEstimators<DefaultLatencyEstimator>>()?;
+        Ok(Self {
             pred_admission: Arc::new(PredictiveAdmission::new()),
             est,
-        }
+        })
     }
 }
 
@@ -88,6 +87,7 @@ impl Layer for PredAdmissionLayer {
         server: &PredAdmissionServer,
         ctx: &mut Context,
         _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
     ) -> Self {
         let root_method_id = ctx.root_method().map(|rm| {
             crate::MethodRegistry::global()
@@ -109,7 +109,11 @@ impl Layer for PredAdmissionLayer {
     /// The `admission_checked` flag ensures it runs exactly once per request
     /// regardless of how many times the future is polled.
     #[inline]
-    fn before_poll<Ret>(&self, ctx: &Context) -> Result<(), Result<tonic::Response<Ret>, Status>> {
+    fn before_poll<Ret>(
+        &self,
+        ctx: &Context,
+        _ext: &mut Extensions,
+    ) -> Result<(), Result<tonic::Response<Ret>, Status>> {
         if ctx.hop_count() != 0 || self.admission_checked.swap(true, Ordering::Relaxed) {
             return Ok(());
         }
@@ -151,6 +155,7 @@ impl Layer for PredAdmissionLayer {
         _request: &mut tonic::Request<T>,
         _child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
         use masa_core::time_now;
 
@@ -238,6 +243,7 @@ impl Layer for PredAdmissionLayer {
         response: &Result<Response<T>, Status>,
         _response_wire: &WireIn<'_>,
         _child_ctx: &PredAdmissionChild,
+        _ext: &Extensions,
     ) -> Result<(), Status> {
         use crate::context_ext::MasaResponseExt;
 
@@ -264,6 +270,7 @@ impl Layer for PredAdmissionLayer {
         ctx: &mut Context,
         result: &mut Result<Response<Ret>, Status>,
         _wire: &mut WireOut,
+        _ext: &Extensions,
     ) {
         if ctx.hop_count() != 0 {
             return;
@@ -645,7 +652,12 @@ mod tests {
         });
         let mut result = Ok(Response::new(()));
 
-        layer.finalize(&mut ctx, &mut result, &mut crate::wire::WireOut::new());
+        layer.finalize(
+            &mut ctx,
+            &mut result,
+            &mut crate::wire::WireOut::new(),
+            &crate::layer::Extensions::new(),
+        );
 
         let root_id =
             crate::MethodRegistry::global().get_or_register(CowGrpcMethod::new("svc", "method"));

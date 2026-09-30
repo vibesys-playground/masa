@@ -11,14 +11,16 @@ use masa_core::{
 };
 use tonic::{CowGrpcMethod, Request, Status};
 
-use super::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit};
+use super::{
+    ChildRpcContext, Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit,
+};
 
 #[derive(Debug)]
 pub struct OracleServer;
 
 impl LayerServer for OracleServer {
-    fn new(_init: &mut ServerInit) -> Self {
-        Self
+    fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
+        Ok(Self)
     }
 }
 
@@ -36,6 +38,7 @@ impl Layer for OracleLayer {
         _server: &OracleServer,
         _ctx: &mut Context,
         _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
     ) -> Self {
         Self
     }
@@ -48,6 +51,7 @@ impl Layer for OracleLayer {
         request: &mut Request<T>,
         child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
         let hint = OracleHint::from_request(request, child_method)?;
         let completion_deadline = ctx.e2e_deadline().saturating_sub(hint.remaining_after_us);

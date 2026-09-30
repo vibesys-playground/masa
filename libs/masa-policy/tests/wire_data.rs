@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use masa_core::{time_now, Context, ContextBuilder};
 use masa_policy::{
-    peek, policy_stack, Layer, MasaRequestExt, MasaResponseExt, PolicyHooks, WireIn, WireOut,
-    MASA_CONTEXT_HEADER,
+    peek, policy_stack, Extensions, Layer, MasaRequestExt, MasaResponseExt, PolicyHooks, WireIn,
+    WireOut, MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
@@ -89,7 +89,13 @@ impl Layer for Alpha {
     const NAME: &'static str = "alpha";
     type Wire = AlphaWire;
 
-    fn new(_m: &CowGrpcMethod, _s: &(), _c: &mut Context, wire: &WireIn<'_>) -> Self {
+    fn new(
+        _m: &CowGrpcMethod,
+        _s: &(),
+        _c: &mut Context,
+        wire: &WireIn<'_>,
+        _ext: &mut Extensions,
+    ) -> Self {
         Self {
             inbound: wire.get::<Self>().unwrap(),
         }
@@ -103,6 +109,7 @@ impl Layer for Alpha {
         _request: &mut Request<T>,
         _child_rpc: &mut masa_policy::ChildRpcContext,
         child_wire: &mut WireOut,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
         if let Some(wire) = &self.inbound {
             child_wire
@@ -117,6 +124,7 @@ impl Layer for Alpha {
         _ctx: &mut Context,
         _result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
+        _ext: &Extensions,
     ) {
         if let Some(inbound) = &self.inbound {
             wire.put::<Self>(inbound).unwrap();
@@ -143,7 +151,13 @@ impl Layer for Beta {
     const NAME: &'static str = "beta";
     type Wire = BetaWire;
 
-    fn new(_m: &CowGrpcMethod, _s: &(), _c: &mut Context, wire: &WireIn<'_>) -> Self {
+    fn new(
+        _m: &CowGrpcMethod,
+        _s: &(),
+        _c: &mut Context,
+        wire: &WireIn<'_>,
+        _ext: &mut Extensions,
+    ) -> Self {
         Self {
             inbound: wire.get::<Self>().unwrap(),
         }
@@ -157,6 +171,7 @@ impl Layer for Beta {
         _request: &mut Request<T>,
         _child_rpc: &mut masa_policy::ChildRpcContext,
         child_wire: &mut WireOut,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
         if let Some(wire) = &self.inbound {
             child_wire
@@ -174,6 +189,7 @@ impl Layer for Beta {
         _ctx: &mut Context,
         _result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
+        _ext: &Extensions,
     ) {
         if let Some(inbound) = &self.inbound {
             wire.put::<Self>(inbound).unwrap();
@@ -192,7 +208,13 @@ impl Layer for Silent {
     const NAME: &'static str = "silent";
     type Wire = u8;
 
-    fn new(_m: &CowGrpcMethod, _s: &(), _c: &mut Context, _wire: &WireIn<'_>) -> Self {
+    fn new(
+        _m: &CowGrpcMethod,
+        _s: &(),
+        _c: &mut Context,
+        _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
+    ) -> Self {
         Self
     }
 }
@@ -332,7 +354,13 @@ impl Layer for AlphaTwin {
     const NAME: &'static str = "alpha";
     type Wire = u8;
 
-    fn new(_m: &CowGrpcMethod, _s: &(), _c: &mut Context, _wire: &WireIn<'_>) -> Self {
+    fn new(
+        _m: &CowGrpcMethod,
+        _s: &(),
+        _c: &mut Context,
+        _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
+    ) -> Self {
         Self
     }
 }
@@ -352,7 +380,13 @@ impl Layer for BadName {
     const NAME: &'static str = "has.dot";
     type Wire = u8;
 
-    fn new(_m: &CowGrpcMethod, _s: &(), _c: &mut Context, _wire: &WireIn<'_>) -> Self {
+    fn new(
+        _m: &CowGrpcMethod,
+        _s: &(),
+        _c: &mut Context,
+        _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
+    ) -> Self {
         Self
     }
 }

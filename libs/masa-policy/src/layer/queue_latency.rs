@@ -16,7 +16,7 @@ use tonic::{CowGrpcMethod, Response, Status};
 
 use crate::context_ext::MasaResponseExt;
 
-use super::{Layer, LayerChild, LayerServer, ServerInit};
+use super::{Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit};
 
 // ── Server ──────────────────────────────────────────────────────────────
 
@@ -24,8 +24,8 @@ use super::{Layer, LayerChild, LayerServer, ServerInit};
 pub struct QueueLatencyServer;
 
 impl LayerServer for QueueLatencyServer {
-    fn new(_init: &mut ServerInit) -> Self {
-        Self
+    fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
+        Ok(Self)
     }
 }
 
@@ -58,6 +58,7 @@ impl Layer for QueueLatencyLayer {
         _server: &QueueLatencyServer,
         _ctx: &mut Context,
         _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
     ) -> Self {
         Self {
             initial_q_lat: AtomicU64::new(0),
@@ -69,7 +70,11 @@ impl Layer for QueueLatencyLayer {
     }
 
     #[inline]
-    fn before_poll<Ret>(&self, _ctx: &Context) -> Result<(), Result<Response<Ret>, Status>> {
+    fn before_poll<Ret>(
+        &self,
+        _ctx: &Context,
+        _ext: &mut Extensions,
+    ) -> Result<(), Result<Response<Ret>, Status>> {
         let queue_latency = tokio::task::obtain_task_queue_latency().as_micros() as u64;
         if self.is_first_poll.swap(false, Ordering::Relaxed) {
             if queue_latency > 0 {
@@ -92,6 +97,7 @@ impl Layer for QueueLatencyLayer {
         response: &Result<Response<T>, Status>,
         _response_wire: &WireIn<'_>,
         _child_ctx: &QueueLatencyChild,
+        _ext: &Extensions,
     ) -> Result<(), Status> {
         if let Ok(resp) = response {
             if let Some(ctx) = resp.get_masa_context() {
@@ -119,6 +125,7 @@ impl Layer for QueueLatencyLayer {
         ctx: &mut Context,
         _result: &mut Result<Response<Ret>, Status>,
         _wire: &mut WireOut,
+        _ext: &Extensions,
     ) {
         let initial = self.initial_q_lat.load(Ordering::Acquire);
         let resume = self.resume_q_lat.load(Ordering::Acquire);

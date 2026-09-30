@@ -23,7 +23,7 @@ use masa_integration_tests::pb::{
     child_service_server::{ChildService, ChildServiceServer},
     Input1, Input2, Output1, Output2,
 };
-use masa_policy::{policy_stack, Layer, PolicyHooks, WireIn, WireOut};
+use masa_policy::{policy_stack, Extensions, Layer, PolicyHooks, WireIn, WireOut};
 use tonic::metadata::MetadataValue;
 use tonic::transport::Server;
 use tonic::{Code, CowGrpcMethod, Request, Response, Status};
@@ -77,11 +77,11 @@ impl Layer for RejectBlocked {
     const NAME: &'static str = "RejectBlocked";
     type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>) -> Self {
+    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>, _ext: &mut Extensions) -> Self {
         Self
     }
 
-    fn before_poll<Ret>(&self, ctx: &Context) -> Result<(), Result<Response<Ret>, Status>> {
+    fn before_poll<Ret>(&self, ctx: &Context, _ext: &mut Extensions) -> Result<(), Result<Response<Ret>, Status>> {
         if ctx.request_id() == BLOCKED_REQUEST_ID {
             return Err(Err(Status::resource_exhausted("rejected by custom stack")));
         }
@@ -99,7 +99,7 @@ impl Layer for StampResponse {
     const NAME: &'static str = "StampResponse";
     type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>) -> Self {
+    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>, _ext: &mut Extensions) -> Self {
         Self
     }
 
@@ -108,6 +108,7 @@ impl Layer for StampResponse {
         _ctx: &mut Context,
         result: &mut Result<Response<Ret>, Status>,
         _wire: &mut WireOut,
+        _ext: &Extensions,
     ) {
         if let Ok(response) = result {
             response

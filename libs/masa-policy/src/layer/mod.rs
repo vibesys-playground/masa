@@ -31,9 +31,12 @@ use tonic::{CowGrpcMethod, Response, Status};
 
 use crate::wire::{assert_valid_name, WireIn, WireOut};
 
+pub use extensions::Extensions;
+
 // ── Submodules ──────────────────────────────────────────────────────────
 
 pub(crate) mod admission;
+mod extensions;
 
 #[cfg(feature = "estimator")]
 pub(crate) mod est;
@@ -54,9 +57,43 @@ pub trait LayerServer: Send + Sync + std::fmt::Debug + Sized {
     ///
     /// Modules earlier in the stack are constructed first, so a module can
     /// consume state that an earlier module published with
-    /// [`ServerInit::provide`].
-    fn new(init: &mut ServerInit) -> Self;
+    /// [`ServerInit::provide`]. A module whose prerequisite is missing returns
+    /// the [`MissingDependency`] from [`ServerInit::require`] instead of
+    /// panicking, so a misordered stack is reported at construction.
+    fn new(init: &mut ServerInit) -> Result<Self, MissingDependency>;
 }
+
+/// A module needs server state that no earlier module of the stack published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingDependency {
+    resource: &'static str,
+    module: &'static str,
+}
+
+impl MissingDependency {
+    /// Type name of the missing value.
+    pub fn resource(&self) -> &'static str {
+        self.resource
+    }
+
+    /// Type name of the server state of the module that required it.
+    pub fn module(&self) -> &'static str {
+        self.module
+    }
+}
+
+impl std::fmt::Display for MissingDependency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "policy stack misconfigured: module server `{}` requires a `{}` published by a module \
+             earlier in the stack, but none did; add the providing module or move it before `{}`",
+            self.module, self.resource, self.module
+        )
+    }
+}
+
+impl std::error::Error for MissingDependency {}
 
 /// Construction context passed to every [`LayerServer::new`] in stack order.
 ///
@@ -66,6 +103,8 @@ pub trait LayerServer: Send + Sync + std::fmt::Debug + Sized {
 #[derive(Debug)]
 pub struct ServerInit {
     service_name: &'static str,
+    /// Type name of the module server being constructed, for error messages.
+    module: &'static str,
     resources: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
 }
 
@@ -73,8 +112,14 @@ impl ServerInit {
     pub(crate) fn new(service_name: &'static str) -> Self {
         Self {
             service_name,
+            module: "",
             resources: HashMap::new(),
         }
+    }
+
+    /// Record which module server is about to be constructed.
+    fn enter<M: LayerServer>(&mut self) {
+        self.module = std::any::type_name::<M>();
     }
 
     /// Name of the service whose hooks are being constructed.
@@ -94,6 +139,15 @@ impl ServerInit {
             .get(&TypeId::of::<T>())
             .and_then(|value| value.downcast_ref::<T>())
             .cloned()
+    }
+
+    /// Read a value published by an earlier module, or fail with an error
+    /// naming the missing type and the module that needed it.
+    pub fn require<T: Any + Send + Sync + Clone>(&self) -> Result<T, MissingDependency> {
+        self.get::<T>().ok_or(MissingDependency {
+            resource: std::any::type_name::<T>(),
+            module: self.module,
+        })
     }
 }
 
@@ -156,17 +210,25 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
     /// `wire` is the inbound request's wire sections; the module reads its own
     /// with `wire.get::<Self>()`, which is `None` if the sender attached
     /// none. May inspect and mutate `ctx`.
+    ///
+    /// `ext` is the request's [`Extensions`], empty when the first module
+    /// runs; modules earlier in the stack may already have stored values.
     fn new(
         method: &CowGrpcMethod,
         server: &Self::Server,
         ctx: &mut Context,
         wire: &WireIn<'_>,
+        ext: &mut Extensions,
     ) -> Self;
 
     /// Called before each poll of the handler future.
     ///
     /// Returns `Err` to abort the request.
-    fn before_poll<Ret>(&self, _ctx: &Context) -> Result<(), Result<Response<Ret>, Status>> {
+    fn before_poll<Ret>(
+        &self,
+        _ctx: &Context,
+        _ext: &mut Extensions,
+    ) -> Result<(), Result<Response<Ret>, Status>> {
         Ok(())
     }
 
@@ -185,6 +247,7 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
         _request: &mut tonic::Request<T>,
         _child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
         Ok(())
     }
@@ -204,6 +267,7 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
         _response: &Result<Response<T>, Status>,
         _response_wire: &WireIn<'_>,
         _child_ctx: &Self::Child,
+        _ext: &Extensions,
     ) -> Result<(), Status> {
         Ok(())
     }
@@ -215,6 +279,7 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
         &self,
         _ctx: &Context,
         _poll: &Poll<Result<Response<Ret>, Status>>,
+        _ext: &Extensions,
     ) -> Result<(), Result<Response<Ret>, Status>> {
         Ok(())
     }
@@ -230,6 +295,7 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
         _ctx: &mut Context,
         _result: &mut Result<Response<Ret>, Status>,
         _wire: &mut WireOut,
+        _ext: &Extensions,
     ) {
     }
 
@@ -264,7 +330,9 @@ pub trait LayerChild: Send + Sync + Clone + std::fmt::Debug {
 
 /// The empty module. Used to terminate a stack and to fill a disabled slot.
 impl LayerServer for () {
-    fn new(_init: &mut ServerInit) -> Self {}
+    fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
+        Ok(())
+    }
 }
 
 impl LayerChild for () {
@@ -277,13 +345,22 @@ impl Layer for () {
     const NAME: &'static str = "";
     type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>) -> Self {}
+    fn new(
+        _method: &CowGrpcMethod,
+        _server: &(),
+        _ctx: &mut Context,
+        _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
+    ) -> Self {
+    }
 }
 
 impl<A: LayerServer, B: LayerServer> LayerServer for (A, B) {
-    fn new(init: &mut ServerInit) -> Self {
-        let head = A::new(init);
-        (head, B::new(init))
+    fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
+        init.enter::<A>();
+        let head = A::new(init)?;
+        init.enter::<B>();
+        Ok((head, B::new(init)?))
     }
 }
 
@@ -314,11 +391,12 @@ impl<H: Layer, T: Layer> Layer for Stack<H, T> {
         server: &Self::Server,
         ctx: &mut Context,
         wire: &WireIn<'_>,
+        ext: &mut Extensions,
     ) -> Self {
-        let head = H::new(method, &server.0, ctx, wire);
+        let head = H::new(method, &server.0, ctx, wire, ext);
         Self {
             head,
-            tail: T::new(method, &server.1, ctx, wire),
+            tail: T::new(method, &server.1, ctx, wire, ext),
         }
     }
 
@@ -328,9 +406,13 @@ impl<H: Layer, T: Layer> Layer for Stack<H, T> {
     }
 
     #[inline]
-    fn before_poll<Ret>(&self, ctx: &Context) -> Result<(), Result<Response<Ret>, Status>> {
-        self.head.before_poll(ctx)?;
-        self.tail.before_poll(ctx)
+    fn before_poll<Ret>(
+        &self,
+        ctx: &Context,
+        ext: &mut Extensions,
+    ) -> Result<(), Result<Response<Ret>, Status>> {
+        self.head.before_poll(ctx, ext)?;
+        self.tail.before_poll(ctx, ext)
     }
 
     #[inline]
@@ -342,6 +424,7 @@ impl<H: Layer, T: Layer> Layer for Stack<H, T> {
         request: &mut tonic::Request<R>,
         child_rpc: &mut ChildRpcContext,
         child_wire: &mut WireOut,
+        ext: &mut Extensions,
     ) -> Result<(), Status> {
         self.head.before_child_rpc(
             ctx,
@@ -350,6 +433,7 @@ impl<H: Layer, T: Layer> Layer for Stack<H, T> {
             request,
             child_rpc,
             child_wire,
+            ext,
         )?;
         self.tail.before_child_rpc(
             ctx,
@@ -358,6 +442,7 @@ impl<H: Layer, T: Layer> Layer for Stack<H, T> {
             request,
             child_rpc,
             child_wire,
+            ext,
         )
     }
 
@@ -369,11 +454,24 @@ impl<H: Layer, T: Layer> Layer for Stack<H, T> {
         response: &Result<Response<R>, Status>,
         response_wire: &WireIn<'_>,
         child_ctx: &Self::Child,
+        ext: &Extensions,
     ) -> Result<(), Status> {
-        self.head
-            .after_child_rpc(ctx, child_method, response, response_wire, &child_ctx.0)?;
-        self.tail
-            .after_child_rpc(ctx, child_method, response, response_wire, &child_ctx.1)
+        self.head.after_child_rpc(
+            ctx,
+            child_method,
+            response,
+            response_wire,
+            &child_ctx.0,
+            ext,
+        )?;
+        self.tail.after_child_rpc(
+            ctx,
+            child_method,
+            response,
+            response_wire,
+            &child_ctx.1,
+            ext,
+        )
     }
 
     #[inline]
@@ -381,9 +479,10 @@ impl<H: Layer, T: Layer> Layer for Stack<H, T> {
         &self,
         ctx: &Context,
         poll: &Poll<Result<Response<Ret>, Status>>,
+        ext: &Extensions,
     ) -> Result<(), Result<Response<Ret>, Status>> {
-        self.head.after_poll(ctx, poll)?;
-        self.tail.after_poll(ctx, poll)
+        self.head.after_poll(ctx, poll, ext)?;
+        self.tail.after_poll(ctx, poll, ext)
     }
 
     #[inline]
@@ -392,9 +491,10 @@ impl<H: Layer, T: Layer> Layer for Stack<H, T> {
         ctx: &mut Context,
         result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
+        ext: &Extensions,
     ) {
-        self.head.finalize(ctx, result, wire);
-        self.tail.finalize(ctx, result, wire);
+        self.head.finalize(ctx, result, wire, ext);
+        self.tail.finalize(ctx, result, wire, ext);
     }
 }
 

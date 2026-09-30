@@ -32,7 +32,10 @@ pub use context_ext::{
     MasaStatusExt, MASA_CONTEXT_HEADER,
 };
 pub use hooks::{ChildContext, ParentContext, PolicyHooks, ServerContext};
-pub use layer::{ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit, Stack};
+pub use layer::{
+    ChildRpcContext, Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit,
+    Stack,
+};
 pub use masa_stack::MasaStack;
 pub use wire::{peek, WireError, WireIn, WireOut};
 

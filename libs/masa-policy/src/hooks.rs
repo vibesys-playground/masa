@@ -11,7 +11,7 @@
 // hints that the stack's modules assign.
 
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 
 use crate::context_ext::{
@@ -20,7 +20,8 @@ use crate::context_ext::{
     MasaRequestExt, MasaResponseExt, MasaStatusExt,
 };
 use crate::layer::{
-    assert_unique_names, ChildRpcContext, Layer, LayerChild, LayerServer, ServerInit,
+    assert_unique_names, ChildRpcContext, Extensions, Layer, LayerChild, LayerServer,
+    MissingDependency, ServerInit,
 };
 use crate::masa_stack::MasaStack;
 use crate::wire::{WireIn, WireOut};
@@ -78,12 +79,23 @@ pub struct ServerContext<S: Layer = MasaStack> {
     layers: S::Server,
 }
 
+impl<S: Layer> ServerContext<S> {
+    /// Build the server state of the stack `S`, or report the first module
+    /// whose prerequisite an earlier module did not publish.
+    /// [`ServerHooks::new`] panics with the same message.
+    ///
+    /// Panics if two modules share a wire name.
+    pub fn try_new(service_name: &'static str) -> Result<Self, MissingDependency> {
+        assert_unique_names::<S>();
+        Ok(Self {
+            layers: S::Server::new(&mut ServerInit::new(service_name))?,
+        })
+    }
+}
+
 impl<S: Layer + 'static> ServerHooks for ServerContext<S> {
     fn new(service_name: &'static str) -> Self {
-        assert_unique_names::<S>();
-        Self {
-            layers: S::Server::new(&mut ServerInit::new(service_name)),
-        }
+        Self::try_new(service_name).unwrap_or_else(|err| panic!("{err}"))
     }
 }
 
@@ -91,6 +103,15 @@ impl<S: Layer + 'static> ServerHooks for ServerContext<S> {
 pub struct ParentContext<S: Layer = MasaStack> {
     ctx: Context,
     layers: S,
+    /// Hooks take `&self`, so the per-request extensions sit behind a lock;
+    /// hooks run one at a time, so it is never contended.
+    ext: Mutex<Extensions>,
+}
+
+impl<S: Layer> ParentContext<S> {
+    fn ext(&self) -> MutexGuard<'_, Extensions> {
+        self.ext.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl<S: Layer + 'static> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentContext<S> {
@@ -102,13 +123,24 @@ impl<S: Layer + 'static> ParentHooks<ChildContext<S>, ServerContext<S>> for Pare
         let mut ctx = read_context(req);
         let resolved_method = resolve_method_name_from_http(method, req);
         let wire = WireIn::from_headers(req.headers()).unwrap_or_else(|err| panic!("{err}"));
-        let layers = S::new(&resolved_method, &server_ctx.layers, &mut ctx, &wire);
+        let mut ext = Extensions::new();
+        let layers = S::new(
+            &resolved_method,
+            &server_ctx.layers,
+            &mut ctx,
+            &wire,
+            &mut ext,
+        );
 
-        Self { ctx, layers }
+        Self {
+            ctx,
+            layers,
+            ext: Mutex::new(ext),
+        }
     }
 
     fn before_poll<Ret>(&self) -> Result<(), Result<Response<Ret>, Status>> {
-        self.layers.before_poll(&self.ctx)
+        self.layers.before_poll(&self.ctx, &mut self.ext())
     }
 
     fn before_child_rpc<T>(
@@ -129,6 +161,7 @@ impl<S: Layer + 'static> ParentHooks<ChildContext<S>, ServerContext<S>> for Pare
             request,
             &mut child_rpc,
             &mut child_wire,
+            &mut self.ext(),
         )?;
 
         // Masa's existing `Context` path: the child's context starts as a copy
@@ -168,6 +201,7 @@ impl<S: Layer + 'static> ParentHooks<ChildContext<S>, ServerContext<S>> for Pare
                 response,
                 &response_wire,
                 &child_ctx.layers,
+                &self.ext(),
             )?;
         }
         Ok(())
@@ -177,13 +211,14 @@ impl<S: Layer + 'static> ParentHooks<ChildContext<S>, ServerContext<S>> for Pare
         &self,
         poll: &Poll<Result<Response<Ret>, Status>>,
     ) -> Result<(), Result<Response<Ret>, Status>> {
-        self.layers.after_poll(&self.ctx, poll)
+        self.layers.after_poll(&self.ctx, poll, &self.ext())
     }
 
     fn finalize_before_serialization<Ret>(&self, result: &mut Result<Response<Ret>, Status>) {
         let mut ctx = self.ctx.clone();
         let mut wire = WireOut::new();
-        self.layers.finalize(&mut ctx, result, &mut wire);
+        self.layers
+            .finalize(&mut ctx, result, &mut wire, &self.ext());
         let metadata = match result {
             Ok(resp) => {
                 resp.set_masa_context(&ctx);
