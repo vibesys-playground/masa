@@ -1,7 +1,8 @@
 // What estimation puts on the wire and shares through per-request extensions:
 // hop count and root method travel down in the request section, estimation
-// alone decides when the hop count grows, and later modules read the parsed
-// facts from `Extensions` instead of from `Context`.
+// alone decides when the hop count grows, each hop's cost report travels up in
+// the response section and is aggregated by its parent, and later modules read
+// the parsed facts from `Extensions` instead of from `Context`.
 
 #![cfg(feature = "estimator")]
 
@@ -11,13 +12,14 @@ use masa_core::{time_now, Context, ContextBuilder};
 use masa_policy::modules::EstimationLayer;
 use masa_policy::{
     get_wire_from_metadata, policy_stack, set_masa_context_in_metadata, set_wire_in_metadata,
-    EstimationInfo, EstimationRequestWire, EstimationWire, Extensions, Layer, MasaRequestExt,
-    MasaResponseExt, PolicyHooks, RootMethod, WireIn, WireOut, MASA_CONTEXT_HEADER,
+    EstimationInfo, EstimationRequestWire, EstimationResponseWire, EstimationWire, Extensions,
+    Layer, MasaRequestExt, MasaResponseExt, MasaStatusExt, PolicyHooks, RootMethod, WireIn,
+    WireOut, MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
 use tonic::metadata::MetadataMap;
-use tonic::{CowGrpcMethod, GrpcMethod, Request, Response, Status};
+use tonic::{Code, CowGrpcMethod, GrpcMethod, Request, Response, Status};
 
 type Server<S> = <PolicyHooks<S> as Hooks>::ServerContext;
 type Parent<S> = <PolicyHooks<S> as Hooks>::ParentContext;
@@ -59,9 +61,26 @@ fn call_child<S: Layer + 'static>(
     method: &'static str,
     req: &http::Request<()>,
 ) -> Request<()> {
+    let parent = begin::<S>(service, method, req);
+    issue_child(&parent).0
+}
+
+fn begin<S: Layer + 'static>(
+    service: &'static str,
+    method: &'static str,
+    req: &http::Request<()>,
+) -> Parent<S> {
     let server = Arc::new(Server::<S>::new(service));
-    let parent = Parent::<S>::begin(GrpcMethod::new(service, method), req, server);
-    let child = GrpcMethod::new("down", "Child");
+    Parent::<S>::begin(GrpcMethod::new(service, method), req, server)
+}
+
+fn child_method() -> GrpcMethod {
+    GrpcMethod::new("down", "Child")
+}
+
+/// Issue a child RPC from `parent`; returns the outbound request and the child
+/// context to hand back with the response.
+fn issue_child<S: Layer + 'static>(parent: &Parent<S>) -> (Request<()>, Child<S>) {
     let mut request = Request::new(());
     // The oracle refuses child RPCs that lack its headers.
     #[cfg(feature = "sched_oracle")]
@@ -71,11 +90,11 @@ fn call_child<S: Layer + 'static>(
     ] {
         request.metadata_mut().insert(header, "1".parse().unwrap());
     }
-    let mut child_ctx = Child::<S>::new(child, &request);
+    let mut child_ctx = Child::<S>::new(child_method(), &request);
     parent
-        .before_child_rpc(child, &mut request, &mut child_ctx)
+        .before_child_rpc(child_method(), &mut request, &mut child_ctx)
         .unwrap();
-    request
+    (request, child_ctx)
 }
 
 type DefaultStack = masa_policy::MasaStack;
@@ -320,4 +339,257 @@ mod ordering {
         type Ordered = policy_stack![EstimationLayer, PredAdmissionLayer];
         assert!(masa_policy::ServerContext::<Ordered>::try_new("ordered").is_ok());
     }
+}
+
+// ── Response section ────────────────────────────────────────────────────
+
+fn report(
+    accumulated: u64,
+    max_util: f32,
+    early_returns: u32,
+    signals: u32,
+) -> EstimationResponseWire {
+    EstimationResponseWire {
+        compute_time_us: accumulated / 2,
+        accumulated_compute_us: accumulated,
+        utilization: max_util / 2.0,
+        max_downstream_util: max_util,
+        early_return_count: early_returns,
+        deadline_signal_count: signals,
+    }
+}
+
+fn child_ok(report: Option<EstimationResponseWire>) -> Result<Response<()>, Status> {
+    let mut response = Response::new(()).with_masa_context(&context());
+    if let Some(report) = report {
+        response.set_wire::<EstimationLayer>(&EstimationWire::response(report));
+    }
+    Ok(response)
+}
+
+fn child_err(
+    code: Code,
+    message: &str,
+    report: Option<EstimationResponseWire>,
+) -> Result<Response<()>, Status> {
+    let mut status = Status::new(code, message).with_masa_context(&context());
+    if let Some(report) = report {
+        status.set_wire::<EstimationLayer>(&EstimationWire::response(report));
+    }
+    Err(status)
+}
+
+/// Begin a request at ingress, run one child RPC per entry of `children`, and
+/// return the estimation report of the parent's (successful) response.
+fn report_after(children: Vec<Result<Response<()>, Status>>) -> EstimationResponseWire {
+    let parent = begin::<DefaultStack>("agg", "Method", &inbound(None));
+    for mut response in children {
+        let (_request, child_ctx) = issue_child(&parent);
+        // `sched_pred` passes a failed child's status on; what it does with
+        // it is not under test, only what the hooks recorded.
+        let _ = parent.after_child_rpc(child_method(), &mut response, child_ctx);
+    }
+    let mut result: Result<Response<()>, Status> = Ok(Response::new(()));
+    parent.finalize_before_serialization(&mut result);
+    let wire = result
+        .unwrap()
+        .get_wire::<EstimationLayer>()
+        .expect("estimation section");
+    assert_eq!(
+        wire.request, None,
+        "a response carries only the response half"
+    );
+    wire.response.expect("response half")
+}
+
+#[test]
+fn response_section_round_trips_including_zero_values() {
+    for wire in [
+        report(0, 0.0, 0, 0),
+        report(5_000, 0.5, 2, 1),
+        EstimationResponseWire {
+            compute_time_us: u64::MAX,
+            accumulated_compute_us: u64::MAX,
+            utilization: 1.0,
+            max_downstream_util: 1.0,
+            early_return_count: u32::MAX,
+            deadline_signal_count: u32::MAX,
+        },
+    ] {
+        let mut response = Response::new(()).with_masa_context(&context());
+        response.set_wire::<EstimationLayer>(&EstimationWire::response(wire.clone()));
+        assert_eq!(
+            response.get_wire::<EstimationLayer>(),
+            Some(EstimationWire::response(wire))
+        );
+    }
+}
+
+#[test]
+fn a_quiet_request_reports_zeros() {
+    let quiet = report_after(vec![]);
+    assert_eq!(quiet.compute_time_us, 0, "no polls ran");
+    assert_eq!(quiet.accumulated_compute_us, 0);
+    assert_eq!(quiet.early_return_count, 0);
+    assert_eq!(quiet.deadline_signal_count, 0);
+    assert!(quiet.max_downstream_util >= quiet.utilization);
+}
+
+#[test]
+fn a_parent_aggregates_its_children_reports() {
+    let total = report_after(vec![
+        child_ok(Some(report(3_000, 0.2, 1, 0))),
+        child_ok(Some(report(2_000, 0.9, 2, 1))),
+        child_ok(Some(report(1_000, 0.4, 0, 1))),
+    ]);
+    assert_eq!(total.compute_time_us, 0, "local compute only");
+    assert_eq!(total.accumulated_compute_us, 6_000);
+    assert_eq!(total.early_return_count, 3);
+    assert_eq!(total.deadline_signal_count, 1, "signals saturate at one");
+    assert!(total.max_downstream_util >= 0.9);
+}
+
+#[test]
+fn a_child_without_a_report_contributes_nothing() {
+    let total = report_after(vec![
+        child_ok(None),
+        child_ok(Some(report(4_000, 0.3, 0, 0))),
+    ]);
+    assert_eq!(total.accumulated_compute_us, 4_000);
+    assert_eq!(total.early_return_count, 0);
+}
+
+#[test]
+fn an_early_return_child_counts_once_whatever_its_status_carries() {
+    let total = report_after(vec![
+        child_err(
+            Code::DeadlineExceeded,
+            "/EarlyReturn?src=x",
+            Some(report(9_000, 0.99, 5, 1)),
+        ),
+        child_err(Code::DeadlineExceeded, "/EarlyReturn?src=y", None),
+    ]);
+    assert_eq!(total.early_return_count, 2);
+    assert_eq!(total.accumulated_compute_us, 0);
+    assert_eq!(total.deadline_signal_count, 0);
+}
+
+#[test]
+fn a_failed_child_that_is_not_an_early_return_contributes_nothing() {
+    let total = report_after(vec![child_err(
+        Code::Internal,
+        "boom",
+        Some(report(9_000, 0.99, 5, 1)),
+    )]);
+    assert_eq!(total.accumulated_compute_us, 0);
+    assert_eq!(total.early_return_count, 0);
+    assert_eq!(total.deadline_signal_count, 0);
+}
+
+#[test]
+fn an_error_status_carries_the_response_half_and_counts_its_own_early_return() {
+    let parent = begin::<DefaultStack>("agg", "Method", &inbound(None));
+    let mut result: Result<Response<()>, Status> =
+        Err(Status::new(Code::DeadlineExceeded, "/EarlyReturn?src=agg"));
+    parent.finalize_before_serialization(&mut result);
+    let wire = result
+        .unwrap_err()
+        .get_wire::<EstimationLayer>()
+        .expect("estimation section on the status");
+    assert_eq!(wire.response.expect("response half").early_return_count, 1);
+}
+
+#[test]
+fn a_report_makes_a_grandparent_see_the_whole_subtree() {
+    // The middle hop aggregates its child's report into its own response,
+    // which is what the ingress hop reads.
+    let middle = begin::<DefaultStack>(
+        "mid",
+        "Method",
+        &inbound(Some(EstimationWire::request(1, None))),
+    );
+    let (_request, child_ctx) = issue_child(&middle);
+    let mut response = child_ok(Some(report(8_000, 0.7, 1, 0)));
+    middle
+        .after_child_rpc(child_method(), &mut response, child_ctx)
+        .unwrap();
+    let mut result: Result<Response<()>, Status> = Ok(Response::new(()));
+    middle.finalize_before_serialization(&mut result);
+    let sent_up = result
+        .unwrap()
+        .get_wire::<EstimationLayer>()
+        .and_then(|wire| wire.response)
+        .expect("response half");
+
+    let total = report_after(vec![child_ok(Some(sent_up))]);
+    assert_eq!(total.accumulated_compute_us, 8_000);
+    assert_eq!(total.early_return_count, 1);
+    assert!(total.max_downstream_util >= 0.7);
+}
+
+// ── The subtree outcome through extensions ──────────────────────────────
+
+/// Reports, at finalize, whether estimation's published info saw an early
+/// return or signal in the subtree.
+#[derive(Debug)]
+struct OutcomeProbe(EstimationInfo);
+
+impl Layer for OutcomeProbe {
+    type Server = ();
+    type Child = ();
+    const NAME: &'static str = "outcome_probe";
+    type Wire = bool;
+
+    fn new(
+        _m: &CowGrpcMethod,
+        _s: &(),
+        _c: &mut Context,
+        _w: &WireIn<'_>,
+        ext: &mut Extensions,
+    ) -> Self {
+        Self(
+            ext.get::<EstimationInfo>()
+                .expect("estimation runs first")
+                .clone(),
+        )
+    }
+
+    fn finalize<Ret>(
+        &self,
+        _ctx: &mut Context,
+        _result: &mut Result<Response<Ret>, Status>,
+        wire: &mut WireOut,
+        _ext: &Extensions,
+    ) {
+        wire.put::<Self>(&self.0.subtree_had_early_return_or_signal())
+            .unwrap();
+    }
+}
+
+type Outcome = policy_stack![EstimationLayer, OutcomeProbe];
+
+fn subtree_outcome(child: Option<Result<Response<()>, Status>>) -> bool {
+    let parent = begin::<Outcome>("outcome", "Method", &inbound(None));
+    if let Some(mut response) = child {
+        let (_request, child_ctx) = issue_child(&parent);
+        // `sched_pred` passes a failed child's status on; what it does with
+        // it is not under test, only what the hooks recorded.
+        let _ = parent.after_child_rpc(child_method(), &mut response, child_ctx);
+    }
+    let mut result: Result<Response<()>, Status> = Ok(Response::new(()));
+    parent.finalize_before_serialization(&mut result);
+    result.unwrap().get_wire::<OutcomeProbe>().unwrap()
+}
+
+#[test]
+fn later_modules_see_early_returns_and_signals_below_them() {
+    assert!(!subtree_outcome(None));
+    assert!(!subtree_outcome(Some(child_ok(Some(report(1, 0.1, 0, 0))))));
+    assert!(subtree_outcome(Some(child_ok(Some(report(1, 0.1, 1, 0))))));
+    assert!(subtree_outcome(Some(child_ok(Some(report(1, 0.1, 0, 1))))));
+    assert!(subtree_outcome(Some(child_err(
+        Code::DeadlineExceeded,
+        "/EarlyReturn",
+        None
+    ))));
 }

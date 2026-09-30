@@ -15,7 +15,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use masa_core::{time_now, ContextBuilder};
-use masa_policy::{MasaResponseExt, PolicyHooks, MASA_CONTEXT_HEADER};
+use masa_policy::modules::EstimationLayer;
+use masa_policy::{
+    EstimationResponseWire, EstimationWire, MasaResponseExt, PolicyHooks, MASA_CONTEXT_HEADER,
+};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
 use tonic::{GrpcMethod, Request, Response, Status};
 
@@ -26,17 +29,16 @@ type Chi = <PolicyHooks as Hooks>::ChildContext;
 /// A successful child response carrying the estimation data a real child
 /// attaches.
 fn child_response(parent: &masa_core::Context) -> Response<()> {
-    let ctx = ContextBuilder::from(parent)
-        .response_meta(masa_core::EstimatorResponse {
-            compute_time_us: 4_000,
-            accumulated_compute_us: 5_000,
-            utilization: 0.5,
-            max_downstream_util: 0.5,
-            early_return_count: 0,
-            deadline_signal_count: 0,
-        })
-        .build();
-    Response::new(()).with_masa_context(&ctx)
+    let mut response = Response::new(()).with_masa_context(parent);
+    response.set_wire::<EstimationLayer>(&EstimationWire::response(EstimationResponseWire {
+        compute_time_us: 4_000,
+        accumulated_compute_us: 5_000,
+        utilization: 0.5,
+        max_downstream_util: 0.5,
+        early_return_count: 0,
+        deadline_signal_count: 0,
+    }));
+    response
 }
 
 #[test]
@@ -88,6 +90,36 @@ fn per_rpc_hook_cost() {
                 }
                 start.elapsed().as_nanos() as f64 / f64::from(iterations)
             };
+            let phases = || {
+                let mut totals = [0u128; 4];
+                for _ in 0..iterations {
+                    let response = rebuild();
+                    let t0 = Instant::now();
+                    let p = Par::begin(parent, &req, server.clone());
+                    let t1 = Instant::now();
+                    let mut creq = Request::new(());
+                    let mut cc = Chi::new(child, &creq);
+                    p.before_child_rpc(child, &mut creq, &mut cc).unwrap();
+                    let t2 = Instant::now();
+                    let mut response = Ok(response);
+                    p.after_child_rpc(child, &mut response, cc).unwrap();
+                    let t3 = Instant::now();
+                    let mut result: Result<Response<()>, Status> = Ok(Response::new(()));
+                    p.finalize_before_serialization(&mut result);
+                    let t4 = Instant::now();
+                    black_box((creq, result.is_ok()));
+                    for (total, (a, b)) in totals.iter_mut().zip([(t0, t1), (t1, t2), (t2, t3), (t3, t4)]) {
+                        *total += b.duration_since(a).as_nanos();
+                    }
+                }
+                totals.map(|t| t as f64 / f64::from(iterations))
+            };
+            phases();
+            let [begin, before_child, after_child, finalize] = phases();
+            println!(
+                "phases (ns): begin {begin:.0}, before_child_rpc {before_child:.0}, \
+                 after_child_rpc {after_child:.0}, finalize {finalize:.0}"
+            );
             run(true);
             let base = run(false);
             let mut samples: Vec<f64> = (0..5).map(|_| run(true)).collect();

@@ -23,7 +23,10 @@ use std::time::Duration;
 
 use masa_core::{time_now, Context, ContextBuilder, PriorityHint};
 #[cfg(feature = "estimator")]
-use masa_policy::{modules::EstimationLayer, EstimationRequestWire, EstimationWire, RootMethod};
+use masa_policy::{
+    modules::EstimationLayer, EstimationRequestWire, EstimationResponseWire, EstimationWire,
+    RootMethod,
+};
 #[cfg(feature = "trace_queue_latency")]
 use masa_policy::{modules::QueueLatencyLayer, QueueLatencyWire};
 #[cfg(feature = "ac_rajomon")]
@@ -289,9 +292,40 @@ fn train_cycle(
     }
 }
 
+/// A response or error status that may carry estimation's report.
 #[cfg(feature = "estimator")]
-fn response_meta(ctx: &Context) -> masa_core::EstimatorResponse {
-    ctx.response_meta().expect("response_meta present").clone()
+trait Reported {
+    fn estimation(&self) -> Option<EstimationWire>;
+}
+
+#[cfg(feature = "estimator")]
+impl Reported for Response<()> {
+    fn estimation(&self) -> Option<EstimationWire> {
+        self.get_wire::<EstimationLayer>()
+    }
+}
+
+#[cfg(feature = "estimator")]
+impl Reported for Status {
+    fn estimation(&self) -> Option<EstimationWire> {
+        self.get_wire::<EstimationLayer>()
+    }
+}
+
+#[cfg(feature = "estimator")]
+fn response_meta(message: &impl Reported) -> EstimationResponseWire {
+    message
+        .estimation()
+        .and_then(|wire| wire.response)
+        .expect("estimation report present")
+}
+
+/// A successful child response carrying `report`.
+#[cfg(feature = "estimator")]
+fn child_response(report: EstimationResponseWire) -> Response<()> {
+    let mut resp = Response::new(()).with_masa_context(&fresh_ctx("CharChild", SLO));
+    resp.set_wire::<EstimationLayer>(&EstimationWire::response(report));
+    resp
 }
 
 // ── Tests that issue child RPCs without the oracle ──────────────────────
@@ -452,7 +486,7 @@ mod generic {
             assert_eq!(rc.deadline(), ctx.deadline());
             #[cfg(feature = "estimator")]
             {
-                let meta = response_meta(&rc);
+                let meta = response_meta(&resp);
                 assert_eq!(meta.early_return_count, 0);
                 assert_eq!(meta.deadline_signal_count, 0);
             }
@@ -484,16 +518,15 @@ mod generic {
             let rc = status.get_masa_context().expect("context on status");
             assert_eq!(rc.request_id(), ctx.request_id());
             #[cfg(feature = "estimator")]
-            assert_eq!(response_meta(&rc).early_return_count, 0);
+            assert_eq!(response_meta(&status).early_return_count, 0);
 
             // A DeadlineExceeded status counts as a local early return.
             let p = begin(&server, "CharE2", "Parent", &ctx);
             let er = Status::new(Code::DeadlineExceeded, "/EarlyReturn?src=CharE2::Parent");
             let status = finalize_err(&p, er);
             assert_eq!(status.code(), Code::DeadlineExceeded);
-            let rc = status.get_masa_context().unwrap();
             #[cfg(feature = "estimator")]
-            assert_eq!(response_meta(&rc).early_return_count, 1);
+            assert_eq!(response_meta(&status).early_return_count, 1);
         });
     }
 
@@ -508,21 +541,17 @@ mod generic {
             let (r, _req, c) = issue_child(&p, "CharE3", "Child");
             r.unwrap();
 
-            let child_ctx = fresh_builder("CharE3", SLO)
-                .response_meta(masa_core::EstimatorResponse {
-                    compute_time_us: 4_000,
-                    accumulated_compute_us: 5_000,
-                    utilization: 0.5,
-                    max_downstream_util: 0.5,
-                    early_return_count: 2,
-                    deadline_signal_count: 0,
-                })
-                .build();
-            let resp = Response::new(()).with_masa_context(&child_ctx);
+            let resp = child_response(EstimationResponseWire {
+                compute_time_us: 4_000,
+                accumulated_compute_us: 5_000,
+                utilization: 0.5,
+                max_downstream_util: 0.5,
+                early_return_count: 2,
+                deadline_signal_count: 0,
+            });
             child_done(&p, "CharE3", "Child", c, Ok(resp)).unwrap();
 
-            let rc = finalize_ok(&p).get_masa_context().unwrap();
-            let meta = response_meta(&rc);
+            let meta = response_meta(&finalize_ok(&p));
             // No polls ran, so local compute is zero.
             assert_eq!(meta.compute_time_us, 0);
             assert_eq!(meta.accumulated_compute_us, 5_000);
@@ -642,7 +671,7 @@ mod generic {
             let p = begin(&server, "CharG4", "Ping", &expired_ctx("CharG4"));
             let st = early_return_err(p.before_poll::<()>());
             let st = finalize_err(&p, st);
-            let meta = response_meta(&st.get_masa_context().unwrap());
+            let meta = response_meta(&st);
             assert_eq!(meta.early_return_count, 1);
             assert_eq!(meta.deadline_signal_count, 0);
             // Not polled, so no compute was recorded either.
@@ -894,10 +923,7 @@ mod generic {
                 .after_poll::<()>(&Poll::Ready(Ok(Response::new(()))))
                 .is_ok());
             let st = finalize_err(&p, st);
-            assert_eq!(
-                response_meta(&st.get_masa_context().unwrap()).early_return_count,
-                1
-            );
+            assert_eq!(response_meta(&st).early_return_count, 1);
 
             // On-time control.
             let p = begin(&server, "CharS1", "OnTime", &fresh_ctx("CharS1", SLO));
@@ -953,7 +979,7 @@ mod generic {
             assert!(p
                 .after_poll::<()>(&Poll::Ready(Ok(Response::new(()))))
                 .is_ok());
-            let meta = response_meta(&finalize_ok(&p).get_masa_context().unwrap());
+            let meta = response_meta(&finalize_ok(&p));
             assert_eq!(meta.deadline_signal_count, 1);
             assert_eq!(meta.early_return_count, 0);
 
@@ -961,7 +987,7 @@ mod generic {
             let p = begin(&server, "CharS3", "OnTime", &fresh_ctx("CharS3", SLO));
             assert!(p.before_poll::<()>().is_ok());
             assert!(p.after_poll::<()>(&Poll::Pending).is_ok());
-            let meta = response_meta(&finalize_ok(&p).get_masa_context().unwrap());
+            let meta = response_meta(&finalize_ok(&p));
             assert_eq!(meta.deadline_signal_count, 0);
         });
     }
@@ -978,17 +1004,14 @@ mod generic {
                 let p = begin(&server, "CharS4", "Parent", &fresh_ctx("CharS4", SLO));
                 let (r, _req, c) = issue_child(&p, "CharS4", "Child");
                 r.unwrap();
-                let child_ctx = fresh_builder("CharS4", SLO)
-                    .response_meta(masa_core::EstimatorResponse {
-                        deadline_signal_count: 1,
-                        ..Default::default()
-                    })
-                    .build();
-                let resp = Response::new(()).with_masa_context(&child_ctx);
+                let resp = child_response(EstimationResponseWire {
+                    deadline_signal_count: 1,
+                    ..Default::default()
+                });
                 sleep_ms(5);
                 child_done(&p, "CharS4", "Child", c, Ok(resp)).unwrap();
                 sleep_ms(10);
-                let meta = response_meta(&finalize_ok(&p).get_masa_context().unwrap());
+                let meta = response_meta(&finalize_ok(&p));
                 assert_eq!(meta.deadline_signal_count, 1);
                 assert_eq!(meta.early_return_count, 0);
             }

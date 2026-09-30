@@ -16,7 +16,7 @@ use super::super::{
 };
 use super::default_estimator::DefaultLatencyEstimator;
 use super::state::{
-    is_early_return_response, ChildRPCTracker, EstimationTracker, LatencyEstimators,
+    child_report, is_early_return_response, ChildRPCTracker, EstimationTracker, LatencyEstimators,
     RequestMetadataTracker,
 };
 use super::wire::{EstimationInfo, EstimationWire, PublishesEstimationInfo, RootMethod};
@@ -52,7 +52,7 @@ impl LayerServer for EstimationServer {
 #[derive(Debug)]
 pub struct EstimationLayer {
     pub(crate) estimation: EstimationTracker<DefaultLatencyEstimator>,
-    request_metadata: RequestMetadataTracker,
+    request_metadata: Arc<RequestMetadataTracker>,
     rpc: CowGrpcMethod,
     info: EstimationInfo,
 }
@@ -94,10 +94,12 @@ impl Layer for EstimationLayer {
             });
             (root.map(Arc::new), id)
         };
+        let request_metadata = Arc::new(RequestMetadataTracker::new());
         let info = EstimationInfo {
             hop_count,
             root_method,
             root_method_id,
+            meta: request_metadata.clone(),
         };
         ext.insert(info.clone());
         Self {
@@ -106,7 +108,7 @@ impl Layer for EstimationLayer {
                 root_method_id,
                 server.est.clone(),
             ),
-            request_metadata: RequestMetadataTracker::new(),
+            request_metadata,
             rpc: method.clone(),
             info,
         }
@@ -220,14 +222,22 @@ impl Layer for EstimationLayer {
         _ctx: &Context,
         _child_method: &CowGrpcMethod,
         response: &Result<Response<T>, Status>,
-        _response_wire: &WireIn<'_>,
+        response_wire: &WireIn<'_>,
         child_ctx: &EstimationChild,
         _ext: &Extensions,
     ) -> Result<(), Status> {
         if let Some(child_tracker) = child_ctx.child_tracker.as_ref() {
+            let report = child_report(
+                response,
+                response_wire
+                    .get::<Self>()
+                    .unwrap_or_else(|err| panic!("{err}"))
+                    .and_then(|wire| wire.response),
+            );
             self.estimation
-                .record_child_complete(child_tracker, response);
-            self.request_metadata.absorb_child_meta(response);
+                .record_child_complete(child_tracker, response, report.as_ref());
+            self.request_metadata
+                .absorb_child(response, report.as_ref());
         }
 
         #[cfg(feature = "sched_pred")]
@@ -285,9 +295,9 @@ impl Layer for EstimationLayer {
     #[inline]
     fn finalize<Ret>(
         &self,
-        ctx: &mut Context,
+        _ctx: &mut Context,
         result: &mut Result<Response<Ret>, Status>,
-        _wire: &mut WireOut,
+        wire: &mut WireOut,
         _ext: &Extensions,
     ) {
         if is_early_return_response(result) {
@@ -295,7 +305,10 @@ impl Layer for EstimationLayer {
         } else if !super::signal_slack::should_skip_flush(&self.request_metadata) {
             self.estimation.flush();
         }
-        self.request_metadata.inject_response_meta(ctx);
+        wire.put::<Self>(&EstimationWire::response(
+            self.request_metadata.response_wire(),
+        ))
+        .unwrap_or_else(|err| panic!("{err}"));
     }
 }
 

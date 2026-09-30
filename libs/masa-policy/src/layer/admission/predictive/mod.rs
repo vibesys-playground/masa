@@ -21,7 +21,7 @@ use super::super::{
 use crate::layer::est::default_estimator::DefaultLatencyEstimator;
 use crate::layer::est::latency_map::{MethodKey, ParentToChildKey};
 use crate::layer::est::state::{is_early_return_response, LatencyEstimators};
-use crate::layer::est::{EstimationInfo, PublishesEstimationInfo};
+use crate::layer::est::{EstimationInfo, EstimationLayer, PublishesEstimationInfo};
 use crate::policy_params::PolicyParams;
 use crate::registry::MethodId;
 
@@ -252,25 +252,25 @@ impl Layer for PredAdmissionLayer {
         _ctx: &Context,
         _child_method: &CowGrpcMethod,
         response: &Result<Response<T>, Status>,
-        _response_wire: &WireIn<'_>,
+        response_wire: &WireIn<'_>,
         _child_ctx: &PredAdmissionChild,
         _ext: &Extensions,
     ) -> Result<(), Status> {
-        use crate::context_ext::MasaResponseExt;
-
-        if self.info.is_ingress() {
-            if let Ok(resp) = response {
-                if let Some(child_ctx_resp) = resp.get_masa_context() {
-                    if let Some(meta) = child_ctx_resp.response_meta() {
-                        if let Some(root_mid) = self.info.root_method_id() {
-                            self.est.track_subtree_compute(
-                                MethodKey(root_mid),
-                                meta.accumulated_compute_us,
-                            );
-                        }
-                    }
-                }
-            }
+        if !self.info.is_ingress() || response.is_err() {
+            return Ok(());
+        }
+        let Some(root_mid) = self.info.root_method_id() else {
+            return Ok(());
+        };
+        // The child's own estimation report, read from the response wire: the
+        // extensions hold only this request's data, not its children's.
+        let report = response_wire
+            .get::<EstimationLayer>()
+            .unwrap_or_else(|err| panic!("{err}"))
+            .and_then(|wire| wire.response);
+        if let Some(report) = report {
+            self.est
+                .track_subtree_compute(MethodKey(root_mid), report.accumulated_compute_us);
         }
         Ok(())
     }
@@ -278,7 +278,7 @@ impl Layer for PredAdmissionLayer {
     #[inline]
     fn finalize<Ret>(
         &self,
-        ctx: &mut Context,
+        _ctx: &mut Context,
         result: &mut Result<Response<Ret>, Status>,
         _wire: &mut WireOut,
         _ext: &Extensions,
@@ -297,11 +297,8 @@ impl Layer for PredAdmissionLayer {
         // `LocalDeadlineExceeded` are visible to predictive admission. The
         // `signal_slack` feature emits a parallel soft-deadline signal that
         // also feeds the AIMD controller without requiring an actual abort.
-        let is_er = is_early_return_response(result)
-            || ctx
-                .response_meta()
-                .map(|meta| meta.early_return_count > 0 || meta.deadline_signal_count > 0)
-                .unwrap_or(false);
+        let is_er =
+            is_early_return_response(result) || self.info.subtree_had_early_return_or_signal();
 
         let root_id = self
             .info
@@ -646,30 +643,33 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_deadline_signal_records_single_ac_outcome() {
-        let ac = Arc::new(PredictiveAdmission::new());
-        let layer = PredAdmissionLayer {
+    fn layer_with(info: EstimationInfo, ac: &Arc<PredictiveAdmission>) -> PredAdmissionLayer {
+        PredAdmissionLayer {
             pred_admission: ac.clone(),
             est: LatencyEstimators::new(),
-            info: EstimationInfo::ingress(),
+            info,
             rpc: CowGrpcMethod::new("svc", "method"),
             self_rejected: AtomicBool::new(false),
             admission_checked: AtomicBool::new(false),
-        };
-        let mut ctx = Context::default();
-        ctx.set_response_meta(masa_core::ResponseMeta {
-            deadline_signal_count: 1,
-            ..Default::default()
-        });
-        let mut result = Ok(Response::new(()));
+        }
+    }
 
+    fn finalize_ok(layer: &PredAdmissionLayer) {
         layer.finalize(
-            &mut ctx,
-            &mut result,
+            &mut Context::default(),
+            &mut Ok(Response::new(())),
             &mut crate::wire::WireOut::new(),
             &crate::layer::Extensions::new(),
         );
+    }
+
+    #[test]
+    fn test_deadline_signal_records_single_ac_outcome() {
+        let ac = Arc::new(PredictiveAdmission::new());
+        let layer = layer_with(EstimationInfo::for_test(0, None), &ac);
+        layer.info.meta.mark_deadline_signal();
+
+        finalize_ok(&layer);
 
         let root_id =
             crate::MethodRegistry::global().get_or_register(CowGrpcMethod::new("svc", "method"));
@@ -685,6 +685,86 @@ mod tests {
             .expect("deadline signal should record an outcome for the request root");
         assert_eq!(root_state.window_total, 1);
         assert_eq!(root_state.er_count, 1);
+    }
+
+    #[test]
+    fn test_subtree_early_return_counts_as_er_and_quiet_subtree_does_not() {
+        let ac = Arc::new(PredictiveAdmission::new());
+        let layer = layer_with(EstimationInfo::for_test(0, None), &ac);
+        finalize_ok(&layer);
+        assert_eq!(ac.global_state.lock().unwrap().er_count, 0);
+
+        layer.info.meta.mark_early_return();
+        finalize_ok(&layer);
+        let global_state = ac.global_state.lock().unwrap();
+        assert_eq!(global_state.window_total, 2);
+        assert_eq!(global_state.er_count, 1);
+    }
+
+    #[test]
+    fn test_non_ingress_records_no_outcome() {
+        let ac = Arc::new(PredictiveAdmission::new());
+        let layer = layer_with(EstimationInfo::for_test(1, None), &ac);
+        layer.info.meta.mark_deadline_signal();
+
+        finalize_ok(&layer);
+
+        assert_eq!(ac.global_state.lock().unwrap().window_total, 0);
+    }
+
+    /// The child's estimation report reaches admission through the response
+    /// wire, and only at ingress.
+    #[test]
+    fn test_child_report_feeds_subtree_compute_at_ingress_only() {
+        use crate::context_ext::MasaResponseExt;
+        use crate::layer::est::{EstimationResponseWire, EstimationWire};
+
+        let root = test_root("test_child_report_feeds_subtree_compute");
+        let child = CowGrpcMethod::new("svc", "child");
+        let mut resp = Response::new(());
+        resp.set_masa_context(&Context::default());
+        resp.set_wire::<EstimationLayer>(&EstimationWire::response(EstimationResponseWire {
+            accumulated_compute_us: 7_000,
+            ..Default::default()
+        }));
+        let response = Ok(resp);
+        let wire = WireIn::from_metadata(response.as_ref().unwrap().metadata()).unwrap();
+        let ac = Arc::new(PredictiveAdmission::new());
+
+        for (hop_count, expected) in [(0, Some(7_000)), (1, None)] {
+            let layer = layer_with(EstimationInfo::for_test(hop_count, Some(root)), &ac);
+            layer
+                .after_child_rpc(
+                    &Context::default(),
+                    &child,
+                    &response,
+                    &wire,
+                    &PredAdmissionChild,
+                    &Extensions::new(),
+                )
+                .unwrap();
+            assert_eq!(layer.est.est_subtree_compute(MethodKey(root)), expected);
+        }
+    }
+
+    #[test]
+    fn test_missing_extension_panics_with_a_clear_message() {
+        let server = PredAdmissionServer {
+            pred_admission: Arc::new(PredictiveAdmission::new()),
+            est: LatencyEstimators::new(),
+        };
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            PredAdmissionLayer::new(
+                &CowGrpcMethod::new("svc", "method"),
+                &server,
+                &mut Context::default(),
+                &WireIn::default(),
+                &mut Extensions::new(),
+            )
+        }))
+        .expect_err("admission without estimation's info cannot be built");
+        let message = panic.downcast_ref::<&str>().expect("literal message");
+        assert!(message.contains("put estimation before it"), "{message}");
     }
 
     /// Verify idle decay reopens admission when no outcomes arrive.

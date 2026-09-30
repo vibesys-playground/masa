@@ -59,7 +59,8 @@ pub mod modules {
 pub use layer::QueueLatencyWire;
 #[cfg(feature = "estimator")]
 pub use layer::{
-    EstimationInfo, EstimationRequestWire, EstimationWire, PublishesEstimationInfo, RootMethod,
+    EstimationInfo, EstimationRequestWire, EstimationResponseWire, EstimationWire,
+    PublishesEstimationInfo, RootMethod,
 };
 pub use registry::{MethodId, MethodRegistry};
 

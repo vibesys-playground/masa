@@ -8,5 +8,6 @@ mod wire;
 
 pub use layer::EstimationLayer;
 pub use wire::{
-    EstimationInfo, EstimationRequestWire, EstimationWire, PublishesEstimationInfo, RootMethod,
+    EstimationInfo, EstimationRequestWire, EstimationResponseWire, EstimationWire,
+    PublishesEstimationInfo, RootMethod,
 };

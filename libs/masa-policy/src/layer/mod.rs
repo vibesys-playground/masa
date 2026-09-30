@@ -517,7 +517,7 @@ pub use admission::rajomon::RajomonLayer;
 pub use e2e_deadline_guard::E2eDeadlineGuardLayer;
 #[cfg(feature = "estimator")]
 pub use est::{
-    EstimationInfo, EstimationLayer, EstimationRequestWire, EstimationWire,
+    EstimationInfo, EstimationLayer, EstimationRequestWire, EstimationResponseWire, EstimationWire,
     PublishesEstimationInfo, RootMethod,
 };
 #[cfg(feature = "sched_oracle")]

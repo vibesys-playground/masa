@@ -11,8 +11,6 @@ pub use context::{
     invalid_context_header_metadata_message, Context, ContextBuilder, RequestContext,
     MISSING_CONTEXT_HEADER_MESSAGE, WIRE_SEPARATOR,
 };
-#[cfg(feature = "estimator")]
-pub use context::{EstimatorContext, EstimatorResponse, ResponseMeta};
 pub use flag::{
     ABORT_SLACK, ABORT_SLO, RAJOMON, SCHED_FIFO, SCHED_ORACLE, SCHED_PRED, SCHED_SLO,
     SCHED_TAILCLIPPER, SIGNAL_SLACK,

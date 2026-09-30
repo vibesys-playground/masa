@@ -60,50 +60,13 @@ pub struct RequestContext {
     pub frontend_elapse: Option<u64>,
 }
 
-#[cfg(feature = "estimator")]
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct EstimatorResponse {
-    pub compute_time_us: u64,
-    #[serde(default)]
-    pub accumulated_compute_us: u64,
-    pub utilization: f32,
-    pub max_downstream_util: f32,
-    /// Number of early returns in the subtree (this hop + all children).
-    #[serde(default)]
-    pub early_return_count: u32,
-    /// Whether any hop in this request's subtree (this hop or any descendant)
-    /// tripped its local deadline under `signal_slack`. Saturated at 1 so a
-    /// single user-facing request never counts as multiple events, regardless
-    /// of how many hops it traversed. Stored as `u32` for forward-compat with
-    /// any future weighted use; today consumers should treat it as a boolean
-    /// (`> 0`).
-    #[serde(default)]
-    pub deadline_signal_count: u32,
-}
-
-#[cfg(feature = "estimator")]
-pub type ResponseMeta = EstimatorResponse;
-
-#[cfg(feature = "estimator")]
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct EstimatorContext {
-    #[serde(default)]
-    pub response: Option<EstimatorResponse>,
-}
-
 /// Represent a Masa context.
 ///
-/// Header serialization uses bincode, so the positional wire layout changes
-/// with these feature-gated fields. Masa deployments assume all binaries are
-/// built with the same feature set; invalid decodes panic immediately.
+/// Header serialization uses bincode. Masa deployments assume all binaries are
+/// built from the same code; invalid decodes panic immediately.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Context {
-    // Core request lifecycle data.
     request: RequestContext,
-    // Estimation propagation and response metadata.
-    #[cfg(feature = "estimator")]
-    #[serde(default)]
-    pub estimator: EstimatorContext,
 }
 
 impl Default for Context {
@@ -120,8 +83,6 @@ pub struct ContextBuilder {
     deadline: Timestamp,
     prio_hint: Option<PriorityHint>,
     frontend_elapse: Option<u64>,
-    #[cfg(feature = "estimator")]
-    response: Option<EstimatorResponse>,
 }
 
 impl ContextBuilder {
@@ -134,8 +95,6 @@ impl ContextBuilder {
             deadline: 0,
             prio_hint: None,
             frontend_elapse: None,
-            #[cfg(feature = "estimator")]
-            response: None,
         }
     }
 
@@ -148,8 +107,6 @@ impl ContextBuilder {
             deadline: ctx.request.deadline,
             prio_hint: Some(ctx.request.prio_hint),
             frontend_elapse: ctx.request.frontend_elapse,
-            #[cfg(feature = "estimator")]
-            response: ctx.estimator.response.clone(),
         }
     }
 
@@ -175,12 +132,6 @@ impl ContextBuilder {
 
     pub fn frontend_elapse(mut self, elapse: u64) -> Self {
         self.frontend_elapse = Some(elapse);
-        self
-    }
-
-    #[cfg(feature = "estimator")]
-    pub fn response_meta(mut self, meta: EstimatorResponse) -> Self {
-        self.response = Some(meta);
         self
     }
 
@@ -210,10 +161,6 @@ impl ContextBuilder {
                     }
                 }),
                 frontend_elapse: self.frontend_elapse,
-            },
-            #[cfg(feature = "estimator")]
-            estimator: EstimatorContext {
-                response: self.response,
             },
         }
     }
@@ -267,18 +214,6 @@ impl Context {
     /// Get request lifecycle data.
     pub fn request(&self) -> &RequestContext {
         &self.request
-    }
-
-    /// Get the response metadata.
-    #[cfg(feature = "estimator")]
-    pub fn response_meta(&self) -> Option<&EstimatorResponse> {
-        self.estimator.response.as_ref()
-    }
-
-    /// Set the response metadata.
-    #[cfg(feature = "estimator")]
-    pub fn set_response_meta(&mut self, meta: EstimatorResponse) {
-        self.estimator.response = Some(meta);
     }
 
     /// Create a new Masa context from JSON.
