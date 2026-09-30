@@ -7,4 +7,5 @@ cfg_rt! {
     pub(crate) mod scheduler;
     pub(crate) mod utilization;
 }
+pub(crate) mod meta;
 pub(crate) mod priority;

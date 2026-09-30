@@ -43,7 +43,7 @@ impl Ord for TaskPriority {
 
 #[cfg_attr(not(feature = "sched_prio"), allow(dead_code))]
 pub(crate) trait TaskPrioritize {
-    fn priority(&self) -> TaskPriority;
+    fn priority(&self) -> super::meta::Meta;
 }
 
 #[cfg(test)]
