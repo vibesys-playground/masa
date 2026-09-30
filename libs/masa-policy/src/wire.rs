@@ -108,10 +108,7 @@ impl<'a> WireIn<'a> {
     pub fn from_headers(headers: &'a http::HeaderMap) -> Result<Self, WireError> {
         match headers.get(MASA_CONTEXT_HEADER) {
             None => Ok(Self::default()),
-            Some(value) => value
-                .to_str()
-                .map(Self::from_header_value)
-                .map_err(WireError::new),
+            Some(value) => Self::from_header_bytes(value.as_bytes()),
         }
     }
 
@@ -120,11 +117,16 @@ impl<'a> WireIn<'a> {
     pub fn from_metadata(metadata: &'a MetadataMap) -> Result<Self, WireError> {
         match metadata.get(MASA_CONTEXT_HEADER) {
             None => Ok(Self::default()),
-            Some(value) => value
-                .to_str()
-                .map(Self::from_header_value)
-                .map_err(WireError::new),
+            Some(value) => Self::from_header_bytes(value.as_encoded_bytes()),
         }
+    }
+
+    // Bytes rather than `to_str`: the latter re-validates every byte as
+    // visible ASCII, which costs more than the split itself.
+    fn from_header_bytes(value: &'a [u8]) -> Result<Self, WireError> {
+        std::str::from_utf8(value)
+            .map(Self::from_header_value)
+            .map_err(WireError::new)
     }
 
     /// Module `M`'s wire data, or `None` if the sender attached none; what

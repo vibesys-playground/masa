@@ -13,6 +13,7 @@ use std::sync::{
     Arc,
 };
 
+#[cfg(any(feature = "abort_slo", feature = "trace_queue_latency"))]
 use masa::MasaRequestExt;
 #[cfg(feature = "trace_queue_latency")]
 use masa::MasaResponseExt;

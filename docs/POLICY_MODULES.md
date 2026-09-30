@@ -15,7 +15,9 @@ policy is a new module, composed into a new stack. It does not need edits to
 | `Layer` | Per-request state and lifecycle hooks. All hooks default to no-ops. |
 | `Layer::Server: LayerServer` | Per-service state, built once by `LayerServer::new(&mut ServerInit)`. |
 | `Layer::Child: LayerChild` | Per-child-RPC state, created before `before_child_rpc` and passed back to `after_child_rpc`. |
-| `ChildRpcContext` | What the child will receive: `deadline`, `prio_hint`, plus feature-gated fields (`hop_count`, `tokens`). Modules mutate it in `before_child_rpc`. |
+| `ChildRpcContext` | What the child will receive in the shared `Context`: `deadline`, `prio_hint`, plus feature-gated `hop_count`. Modules mutate it in `before_child_rpc`. |
+| `Layer::NAME`, `Layer::Wire` | The module's own wire data: a serde type and the unique name of its section in the `ctx` header. `()` means none. See "Wire data". |
+| `WireIn` / `WireOut` | Typed access to the wire sections: `wire.get::<Self>()` on the inbound message, `out.put::<Self>(&value)` on an outbound one. |
 | `ServerInit` | Service name plus a typed store: `provide::<T>()` publishes server state and `get::<T>()` reads state from an earlier module. |
 | `()` | The empty module. Terminates stacks and fills disabled slots. |
 
@@ -23,12 +25,12 @@ Lifecycle, per inbound request:
 
 | Hook | When | Can |
 |---|---|---|
-| `Layer::new` | Request arrives, context decoded | Read or mutate the inbound `Context` |
+| `Layer::new` | Request arrives, context decoded | Read or mutate the inbound `Context`; read the inbound wire data (`wire.get::<Self>()`, `None` if absent) |
 | `before_poll` | Before each handler poll | Abort (`Err`), reprioritize the task (`tokio::task::reprioritize`) |
-| `before_child_rpc` | Before each outbound RPC | Reject the child (`Err`), set child deadline/priority |
+| `before_child_rpc` | Before each outbound RPC | Reject the child (`Err`), set child deadline/priority, write the child's wire data |
 | `after_child_rpc` | Child response received | Record latencies, inspect response context |
 | `after_poll` | After each handler poll | Abort (`Err`), e.g. on `Pending` past deadline |
-| `finalize` | Before response serialization | Write response metadata into `Context` |
+| `finalize` | Before response serialization | Write response metadata into `Context`, write the response's wire data |
 
 Modules run in stack order and the first `Err` short-circuits the rest. For
 `ChildRpcContext`, the last writer wins.
@@ -37,7 +39,7 @@ Modules run in stack order and the first `Err` short-circuits the rest. For
 
 ```rust
 use masa_core::{Context, PriorityHint};
-use masa_policy::{policy_stack, ChildRpcContext, Layer, PolicyHooks};
+use masa_policy::{policy_stack, ChildRpcContext, Layer, PolicyHooks, WireIn, WireOut};
 use tonic::{CowGrpcMethod, Request, Status};
 
 /// Earliest-deadline-first for children: child priority = child deadline.
@@ -47,8 +49,10 @@ pub struct ChildEdf;
 impl Layer for ChildEdf {
     type Server = ();
     type Child = ();
+    const NAME: &'static str = "child_edf";
+    type Wire = ();
 
-    fn new(_m: &CowGrpcMethod, _s: &(), _ctx: &mut Context) -> Self {
+    fn new(_m: &CowGrpcMethod, _s: &(), _ctx: &mut Context, _wire: &WireIn<'_>) -> Self {
         Self
     }
 
@@ -59,6 +63,7 @@ impl Layer for ChildEdf {
         _child_ctx: &mut (),
         _req: &mut Request<T>,
         child_rpc: &mut ChildRpcContext,
+        _child_wire: &mut WireOut,
     ) -> Result<(), Status> {
         child_rpc.prio_hint = PriorityHint::new(child_rpc.deadline);
         Ok(())
@@ -72,6 +77,41 @@ pub type MyHooks = PolicyHooks<MyStack>;
 
 `libs/masa-policy/tests/custom_stack.rs` has runnable modules covering
 priority assignment, ordering, short-circuiting, and shared server state.
+
+## Wire data
+
+A module that needs to send data to other hops (tokens, prices, hints) defines
+a serde type and exchanges it through the framework's codec, instead of adding
+fields to `Context`:
+
+```rust
+#[derive(Serialize, Deserialize)]
+pub struct MyWire { pub budget: u64 }
+
+impl Layer for MyModule {
+    const NAME: &'static str = "my_module";
+    type Wire = MyWire;
+    // ...
+    fn new(_m: &CowGrpcMethod, _s: &(), _ctx: &mut Context, wire: &WireIn<'_>) -> Self {
+        // `None` means the sender attached nothing; what that implies is the
+        // module's decision, and zero is an ordinary value.
+        let budget = wire.get::<Self>().unwrap().map_or(100, |w| w.budget);
+        // ...
+    }
+    // before_child_rpc / finalize: `child_wire.put::<Self>(&MyWire { budget })`
+}
+```
+
+The framework carries nothing by itself: a child request or response has wire
+data only for modules that `put` it, including values received from the parent.
+Each section travels in the `ctx` header as `.<NAME>:<base64 JSON>` after the
+unchanged `Context` blob (`libs/masa-policy/src/wire.rs` documents the layout).
+Sections are decoded independently, and `masa_policy::peek::<M>(&headers)`
+decodes one module's section without decoding the `Context`. `NAME` must be
+unique among modules with wire data and use only ASCII letters, digits, `_` or
+`-`; a stack that violates this panics when the server is constructed. Root
+clients attach wire data with `masa::RootContext` (for example
+`with_rajomon_tokens`).
 
 ## Sharing state between modules
 
