@@ -15,7 +15,7 @@ use crate::runtime::context;
 use crate::runtime::task::raw::{self, Vtable};
 use crate::runtime::task::state::State;
 use crate::runtime::task::{Id, Schedule};
-use crate::task::TaskPriority;
+use crate::task::Meta;
 use crate::util::linked_list;
 
 use std::num::NonZeroU64;
@@ -176,7 +176,7 @@ pub(crate) struct Header {
     pub(super) owner_id: UnsafeCell<Option<NonZeroU64>>,
 
     /// Priority associated with this task.
-    pub(super) priority: UnsafeCell<TaskPriority>,
+    pub(super) priority: UnsafeCell<Meta>,
 
     // [TODO(vic)] should this be in the Trailer?
     /// Poll behavior customization for this task.
@@ -255,13 +255,13 @@ impl<T: Future, S: Schedule> Cell<T, S> {
         scheduler: S,
         state: State,
         task_id: Id,
-        priority: TaskPriority,
+        priority: Meta,
     ) -> Box<Cell<T, S>> {
         // Separated into a non-generic function to reduce LLVM codegen
         fn new_header(
             state: State,
             vtable: &'static Vtable,
-            priority: TaskPriority,
+            priority: Meta,
             #[cfg(all(tokio_unstable, feature = "tracing"))] tracing_id: Option<tracing::Id>,
         ) -> Header {
             Header {
@@ -458,11 +458,11 @@ impl Header {
     }
 
     // SAFETY: caller must guarantee exclusive access to the field.
-    pub(crate) unsafe fn set_priority(&self, priority: TaskPriority) {
+    pub(crate) unsafe fn set_priority(&self, priority: Meta) {
         self.priority.with_mut(|ptr| *ptr = priority);
     }
 
-    pub(super) fn get_priority(&self) -> TaskPriority {
+    pub(super) fn get_priority(&self) -> Meta {
         // SAFETY: If there are concurrent writes, then that write has violated
         // the safety requirements on `set_priority`.
         unsafe { self.priority.with(|ptr| *ptr) }

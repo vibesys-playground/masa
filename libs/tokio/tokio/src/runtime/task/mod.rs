@@ -187,7 +187,7 @@ mod id;
 pub(crate) use id::Identifiable;
 #[cfg_attr(not(tokio_unstable), allow(unreachable_pub, unused_imports))]
 pub use id::{id, try_id, Id};
-use crate::task::{TaskPrioritize, TaskPriority};
+use crate::task::{meta_for_unannotated_spawn, Meta, TaskPrioritize};
 
 #[cfg(feature = "rt")]
 mod abort;
@@ -224,6 +224,11 @@ use std::{fmt, mem};
 
 pub(crate) fn current_task_header() -> Option<&'static Header> {
     crate::runtime::context::current_task_header()
+}
+
+/// The `Meta` of the task running on this thread, if any.
+pub(crate) fn current_task_meta() -> Option<Meta> {
+    current_task_header().map(Header::get_priority)
 }
 
 pub(crate) fn current_task_queue_latency() -> Duration {
@@ -296,7 +301,7 @@ pub(crate) trait Schedule: Sync + Sized + 'static {
 }
 
 impl<S> TaskPrioritize for Task<S> {
-    fn priority(&self) -> TaskPriority {
+    fn priority(&self) -> Meta {
         self.header().get_priority()
     }
 }
@@ -332,7 +337,7 @@ impl<S: 'static> Identifiable for Task<S> {
 }
 
 impl<S> TaskPrioritize for Notified<S> {
-    fn priority(&self) -> TaskPriority {
+    fn priority(&self) -> Meta {
         self.0.priority()
     }
 }
@@ -372,7 +377,7 @@ cfg_rt! {
         task: T,
         scheduler: S,
         id: Id,
-        priority: TaskPriority
+        priority: Meta
     ) -> (Task<S>, Notified<S>, JoinHandle<T::Output>)
     where
         S: Schedule,
@@ -403,7 +408,12 @@ cfg_rt! {
         T: Send + Future + 'static,
         T::Output: Send + 'static,
     {
-        let (task, notified, join) = new_task(task, scheduler, id, TaskPriority::infra());
+        let (task, notified, join) = new_task(
+            task,
+            scheduler,
+            id,
+            meta_for_unannotated_spawn(current_task_meta().as_ref()),
+        );
 
         // This transfers the ref-count of task and notified into an UnownedTask.
         // This is valid because an UnownedTask holds two ref-counts.
