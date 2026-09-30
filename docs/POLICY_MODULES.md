@@ -225,6 +225,42 @@ The runtime still needs a scheduling feature (`sched_slo`, `sched_fifo`, ...)
 so that Hyper spawns handlers with priorities and Tokio orders its queue by
 them.
 
+## Agent-owned run queue (`sched_custom`)
+
+`libs/rpcstack-sched/src/custom.rs` is the slot for a new run queue (the
+structure that decides which runnable task the Tokio current-thread runtime
+polls next). `custom::Queue` starts as a copy of the default priority-heap
+queue. With the `sched_custom` feature, the runtime uses it instead of the
+queue that `sched_slo`, `sched_fifo` or `sched_tailclipper` would select. This
+describes shipped behavior; the feature only selects the slot and encodes no
+policy.
+
+To try a queue:
+
+1. Edit `custom::Queue` in `libs/rpcstack-sched/src/custom.rs`: implement
+   `RunQueue` and read each task's `Meta` from the `TaskView` passed to
+   `push`. Edit only that file.
+2. Update the expected pop orders in `custom_replay_scripts` (in
+   `libs/rpcstack-sched/src/replay_tests.rs`) if the new ordering is
+   intentional, and run them with
+   `cargo test -p rpcstack-sched --features sched_custom`.
+3. Build with a scheduling feature plus `sched_custom`, e.g.
+   `cargo build -p hotel --release --features "sched_slo,sched_custom"`.
+   `sched_custom` without a scheduling feature is a compile error, because
+   Hyper only passes priorities to Tokio under one. It composes with
+   `stack_custom` and with every modifier. It only affects the current-thread
+   runtime, so `sched_mt*` ignores it.
+4. Run it as an experiment policy: list `sched_slo,sched_custom` in the
+   experiment's `policies` file and sweep load as usual (see
+   `docs/experiments/workflow.md`). Plots label it `Custom scheduler (...)`
+   (`Custom stack + Custom scheduler (...)` with both custom features) and do
+   not reuse the built-in policy's style.
+5. Validate with `./scripts/check.sh "sched_slo,sched_custom"` and
+   `./scripts/test.sh --feature "sched_slo,sched_custom"`.
+   `libs/tonic/tests/masa_integration_tests/tests/custom_sched_serve.rs`
+   checks that the runtime selects `custom::Queue` and that generated stubs
+   serve through it.
+
 ## Not yet modular
 
 These policy decisions are still selected by features outside `masa-policy`:
@@ -233,9 +269,9 @@ These policy decisions are still selected by features outside `masa-policy`:
   gateway entry time (TailClipper), or remaining budget (`sched_pred`) when the
   gateway does not set `prio_hint`. Modules can override it per task with
   `tokio::task::reprioritize` in `before_poll`.
-- **Queue discipline**: FIFO, binary heap, TailClipper round-robin, and the
-  multi-threaded heap/multiqueue live in the patched Tokio (`sched_prio`,
-  `sched_fifo`, `tailclipper`, `sched_mt*`).
+- **Queue discipline**: FIFO, binary heap and TailClipper round-robin live in
+  `rpcstack-sched` (new queues go in `custom.rs`, see above); the
+  multi-threaded heap/multiqueue live in the patched Tokio (`sched_mt*`).
 - **Wire context schema**: `ChildRpcContext` and `Context` fields are fixed by
   `masa-core`. A module that needs new propagated metadata should use its own
   wire section; estimation and predictive-admission data (response metadata,
