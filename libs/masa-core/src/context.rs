@@ -84,24 +84,11 @@ pub struct EstimatorResponse {
 #[cfg(feature = "estimator")]
 pub type ResponseMeta = EstimatorResponse;
 
-/// Identifies the root (ingress) RPC method. Transported over the wire as a
-/// (service, method) pair so that method identity is stable across replicas.
-#[cfg(feature = "estimator")]
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
-pub struct RootMethod {
-    pub service: String,
-    pub method: String,
-}
-
 #[cfg(feature = "estimator")]
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct EstimatorContext {
     #[serde(default)]
     pub response: Option<EstimatorResponse>,
-    #[serde(default)]
-    pub hop_count: u8,
-    #[serde(default)]
-    pub root_method: Option<RootMethod>,
 }
 
 /// Represent a Masa context.
@@ -135,10 +122,6 @@ pub struct ContextBuilder {
     frontend_elapse: Option<u64>,
     #[cfg(feature = "estimator")]
     response: Option<EstimatorResponse>,
-    #[cfg(feature = "estimator")]
-    hop_count: u8,
-    #[cfg(feature = "estimator")]
-    root_method: Option<RootMethod>,
 }
 
 impl ContextBuilder {
@@ -153,10 +136,6 @@ impl ContextBuilder {
             frontend_elapse: None,
             #[cfg(feature = "estimator")]
             response: None,
-            #[cfg(feature = "estimator")]
-            hop_count: 0,
-            #[cfg(feature = "estimator")]
-            root_method: None,
         }
     }
 
@@ -171,10 +150,6 @@ impl ContextBuilder {
             frontend_elapse: ctx.request.frontend_elapse,
             #[cfg(feature = "estimator")]
             response: ctx.estimator.response.clone(),
-            #[cfg(feature = "estimator")]
-            hop_count: ctx.estimator.hop_count,
-            #[cfg(feature = "estimator")]
-            root_method: ctx.estimator.root_method.clone(),
         }
     }
 
@@ -209,18 +184,6 @@ impl ContextBuilder {
         self
     }
 
-    #[cfg(feature = "estimator")]
-    pub fn hop_count(mut self, hop_count: u8) -> Self {
-        self.hop_count = hop_count;
-        self
-    }
-
-    #[cfg(feature = "estimator")]
-    pub fn root_method(mut self, root_method: RootMethod) -> Self {
-        self.root_method = Some(root_method);
-        self
-    }
-
     pub fn build(self) -> Context {
         Context {
             request: RequestContext {
@@ -251,8 +214,6 @@ impl ContextBuilder {
             #[cfg(feature = "estimator")]
             estimator: EstimatorContext {
                 response: self.response,
-                hop_count: self.hop_count,
-                root_method: self.root_method,
             },
         }
     }
@@ -318,24 +279,6 @@ impl Context {
     #[cfg(feature = "estimator")]
     pub fn set_response_meta(&mut self, meta: EstimatorResponse) {
         self.estimator.response = Some(meta);
-    }
-
-    /// Get the hop count.
-    #[cfg(feature = "estimator")]
-    pub fn hop_count(&self) -> u8 {
-        self.estimator.hop_count
-    }
-
-    /// Get the root API method (set at ingress, propagated unchanged).
-    #[cfg(feature = "estimator")]
-    pub fn root_method(&self) -> Option<&RootMethod> {
-        self.estimator.root_method.as_ref()
-    }
-
-    /// Set the root API method at ingress.
-    #[cfg(feature = "estimator")]
-    pub fn set_root_method(&mut self, root_method: RootMethod) {
-        self.estimator.root_method = Some(root_method);
     }
 
     /// Create a new Masa context from JSON.

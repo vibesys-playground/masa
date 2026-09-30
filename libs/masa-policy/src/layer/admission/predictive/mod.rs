@@ -1,7 +1,7 @@
 // Predictive admission control layer — AIMD-based admission control.
 //
 // When `ac_pred` is enabled, this layer runs admission control at ingress
-// (hop_count == 0). It rejects requests probabilistically based on an
+// (as reported by the estimation module). It rejects requests probabilistically based on an
 // AIMD-controlled admission probability (`admit_p`) that decreases when the
 // observed ER fraction exceeds a threshold and recovers additively when healthy.
 // Exponential idle decay opens admission naturally when traffic drops.
@@ -21,6 +21,7 @@ use super::super::{
 use crate::layer::est::default_estimator::DefaultLatencyEstimator;
 use crate::layer::est::latency_map::{MethodKey, ParentToChildKey};
 use crate::layer::est::state::{is_early_return_response, LatencyEstimators};
+use crate::layer::est::{EstimationInfo, PublishesEstimationInfo};
 use crate::policy_params::PolicyParams;
 use crate::registry::MethodId;
 
@@ -53,6 +54,9 @@ impl LayerServer for PredAdmissionServer {
         // module maintains; a private copy would never be updated. A stack
         // that omits or misorders the estimation module fails at construction.
         let est = init.require::<LatencyEstimators<DefaultLatencyEstimator>>()?;
+        // The per-request `EstimationInfo` exists only if estimation runs
+        // first, so fail here rather than on the first request.
+        init.require::<PublishesEstimationInfo>()?;
         Ok(Self {
             pred_admission: Arc::new(PredictiveAdmission::new()),
             est,
@@ -67,7 +71,8 @@ impl LayerServer for PredAdmissionServer {
 pub struct PredAdmissionLayer {
     pred_admission: Arc<PredictiveAdmission>,
     est: LatencyEstimators<DefaultLatencyEstimator>,
-    root_method_id: Option<MethodId>,
+    /// What estimation published about this request.
+    info: EstimationInfo,
     rpc: CowGrpcMethod,
     /// Set when this layer rejects a request. Prevents the rejection
     /// from feeding back into the admission controller via `finalize`.
@@ -85,18 +90,23 @@ impl Layer for PredAdmissionLayer {
     fn new(
         method: &CowGrpcMethod,
         server: &PredAdmissionServer,
-        ctx: &mut Context,
+        _ctx: &mut Context,
         _wire: &WireIn<'_>,
-        _ext: &mut Extensions,
+        ext: &mut Extensions,
     ) -> Self {
-        let root_method_id = ctx.root_method().map(|rm| {
-            crate::MethodRegistry::global()
-                .get_or_register(CowGrpcMethod::new(rm.service.clone(), rm.method.clone()))
-        });
+        let info = ext
+            .get::<EstimationInfo>()
+            .unwrap_or_else(|| {
+                panic!(
+                    "predictive admission needs the `EstimationInfo` that the estimation module \
+                     publishes; put estimation before it in the policy stack"
+                )
+            })
+            .clone();
         Self {
             pred_admission: server.pred_admission.clone(),
             est: server.est.clone(),
-            root_method_id,
+            info,
             rpc: method.clone(),
             self_rejected: AtomicBool::new(false),
             admission_checked: AtomicBool::new(false),
@@ -111,14 +121,15 @@ impl Layer for PredAdmissionLayer {
     #[inline]
     fn before_poll<Ret>(
         &self,
-        ctx: &Context,
+        _ctx: &Context,
         _ext: &mut Extensions,
     ) -> Result<(), Result<tonic::Response<Ret>, Status>> {
-        if ctx.hop_count() != 0 || self.admission_checked.swap(true, Ordering::Relaxed) {
+        if !self.info.is_ingress() || self.admission_checked.swap(true, Ordering::Relaxed) {
             return Ok(());
         }
         let root_id = self
-            .root_method_id
+            .info
+            .root_method_id()
             .unwrap_or_else(|| crate::MethodRegistry::global().get_or_register(self.rpc.clone()));
         if !self.pred_admission.should_admit(root_id) {
             self.self_rejected.store(true, Ordering::Relaxed);
@@ -161,7 +172,7 @@ impl Layer for PredAdmissionLayer {
 
         let child_id = crate::MethodRegistry::global().get_or_register(child_method_name.clone());
         let parent_id = crate::MethodRegistry::global().get_or_register(self.rpc.clone());
-        let root_id = self.root_method_id.unwrap_or(parent_id);
+        let root_id = self.info.root_method_id().unwrap_or(parent_id);
         let key = ParentToChildKey::root_rpc_method(root_id)
             .parent_rpc_method(parent_id)
             .child_rpc_method(child_id);
@@ -238,7 +249,7 @@ impl Layer for PredAdmissionLayer {
     #[inline]
     fn after_child_rpc<T>(
         &self,
-        ctx: &Context,
+        _ctx: &Context,
         _child_method: &CowGrpcMethod,
         response: &Result<Response<T>, Status>,
         _response_wire: &WireIn<'_>,
@@ -247,11 +258,11 @@ impl Layer for PredAdmissionLayer {
     ) -> Result<(), Status> {
         use crate::context_ext::MasaResponseExt;
 
-        if ctx.hop_count() == 0 {
+        if self.info.is_ingress() {
             if let Ok(resp) = response {
                 if let Some(child_ctx_resp) = resp.get_masa_context() {
                     if let Some(meta) = child_ctx_resp.response_meta() {
-                        if let Some(root_mid) = self.root_method_id {
+                        if let Some(root_mid) = self.info.root_method_id() {
                             self.est.track_subtree_compute(
                                 MethodKey(root_mid),
                                 meta.accumulated_compute_us,
@@ -272,7 +283,7 @@ impl Layer for PredAdmissionLayer {
         _wire: &mut WireOut,
         _ext: &Extensions,
     ) {
-        if ctx.hop_count() != 0 {
+        if !self.info.is_ingress() {
             return;
         }
 
@@ -293,7 +304,8 @@ impl Layer for PredAdmissionLayer {
                 .unwrap_or(false);
 
         let root_id = self
-            .root_method_id
+            .info
+            .root_method_id()
             .unwrap_or_else(|| crate::MethodRegistry::global().get_or_register(self.rpc.clone()));
         self.pred_admission.record_outcome(root_id, is_er);
     }
@@ -640,7 +652,7 @@ mod tests {
         let layer = PredAdmissionLayer {
             pred_admission: ac.clone(),
             est: LatencyEstimators::new(),
-            root_method_id: None,
+            info: EstimationInfo::ingress(),
             rpc: CowGrpcMethod::new("svc", "method"),
             self_rejected: AtomicBool::new(false),
             admission_checked: AtomicBool::new(false),
