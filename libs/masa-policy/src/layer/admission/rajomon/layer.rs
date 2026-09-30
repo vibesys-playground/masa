@@ -158,7 +158,8 @@ impl Layer for RajomonLayer {
         &self,
         _ctx: &Context,
         child_method: &CowGrpcMethod,
-        response: &mut Result<Response<T>, Status>,
+        response: &Result<Response<T>, Status>,
+        _response_wire: &WireIn<'_>,
         _child_ctx: &RajomonChild,
     ) -> Result<(), Status> {
         // Extract and cache downstream prices from child response

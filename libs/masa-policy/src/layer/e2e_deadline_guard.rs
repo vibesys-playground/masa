@@ -171,7 +171,8 @@ impl Layer for E2eDeadlineGuardLayer {
         &self,
         _ctx: &Context,
         child_method: &CowGrpcMethod,
-        _response: &mut Result<Response<T>, Status>,
+        _response: &Result<Response<T>, Status>,
+        _response_wire: &WireIn<'_>,
         _child_ctx: &E2eDeadlineGuardChild,
     ) -> Result<(), Status> {
         self.handler.set_last_child(child_method.clone());

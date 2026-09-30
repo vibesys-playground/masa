@@ -156,8 +156,19 @@ impl<S: Layer + 'static> ParentHooks<ChildContext<S>, ServerContext<S>> for Pare
         child_ctx: ChildContext<S>,
     ) -> Result<(), Status> {
         if let Some(child_method) = child_ctx.child_method_name.as_ref() {
-            self.layers
-                .after_child_rpc(&self.ctx, child_method, response, &child_ctx.layers)?;
+            let metadata = match &*response {
+                Ok(resp) => resp.metadata(),
+                Err(status) => status.metadata(),
+            };
+            let response_wire =
+                WireIn::from_metadata(metadata).unwrap_or_else(|err| panic!("{err}"));
+            self.layers.after_child_rpc(
+                &self.ctx,
+                child_method,
+                response,
+                &response_wire,
+                &child_ctx.layers,
+            )?;
         }
         Ok(())
     }

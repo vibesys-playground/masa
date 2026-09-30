@@ -89,7 +89,8 @@ impl Layer for QueueLatencyLayer {
         &self,
         _ctx: &Context,
         _child_method: &CowGrpcMethod,
-        response: &mut Result<Response<T>, Status>,
+        response: &Result<Response<T>, Status>,
+        _response_wire: &WireIn<'_>,
         _child_ctx: &QueueLatencyChild,
     ) -> Result<(), Status> {
         if let Ok(resp) = response {

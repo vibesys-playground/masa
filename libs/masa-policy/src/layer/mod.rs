@@ -190,11 +190,19 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
     }
 
     /// Called after a child RPC response is received.
+    ///
+    /// `response_wire` is the wire sections the child's modules attached to
+    /// the response (or to the error status); read this module's own with
+    /// `response_wire.get::<Self>()`. It borrows from `response`, which is
+    /// therefore read-only here. The framework carries none of it forward:
+    /// whatever this module wants to report upstream it must `put` in
+    /// [`Layer::finalize`].
     fn after_child_rpc<T>(
         &self,
         _ctx: &Context,
         _child_method: &CowGrpcMethod,
-        _response: &mut Result<Response<T>, Status>,
+        _response: &Result<Response<T>, Status>,
+        _response_wire: &WireIn<'_>,
         _child_ctx: &Self::Child,
     ) -> Result<(), Status> {
         Ok(())
@@ -358,13 +366,14 @@ impl<H: Layer, T: Layer> Layer for Stack<H, T> {
         &self,
         ctx: &Context,
         child_method: &CowGrpcMethod,
-        response: &mut Result<Response<R>, Status>,
+        response: &Result<Response<R>, Status>,
+        response_wire: &WireIn<'_>,
         child_ctx: &Self::Child,
     ) -> Result<(), Status> {
         self.head
-            .after_child_rpc(ctx, child_method, response, &child_ctx.0)?;
+            .after_child_rpc(ctx, child_method, response, response_wire, &child_ctx.0)?;
         self.tail
-            .after_child_rpc(ctx, child_method, response, &child_ctx.1)
+            .after_child_rpc(ctx, child_method, response, response_wire, &child_ctx.1)
     }
 
     #[inline]

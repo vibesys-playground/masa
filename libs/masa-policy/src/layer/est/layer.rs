@@ -180,7 +180,8 @@ impl Layer for EstimationLayer {
         &self,
         _ctx: &Context,
         _child_method: &CowGrpcMethod,
-        response: &mut Result<Response<T>, Status>,
+        response: &Result<Response<T>, Status>,
+        _response_wire: &WireIn<'_>,
         child_ctx: &EstimationChild,
     ) -> Result<(), Status> {
         if let Some(child_tracker) = child_ctx.child_tracker.as_ref() {

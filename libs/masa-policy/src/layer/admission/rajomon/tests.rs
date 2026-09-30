@@ -379,8 +379,15 @@ fn test_layer_records_child_price_response_and_updates_parent_max() {
         .metadata_mut()
         .insert("x-masa-rajomon-price", "13".parse().unwrap());
 
-    crate::layer::Layer::after_child_rpc(&layer, &ctx, &child, &mut response, &RajomonChild)
-        .unwrap();
+    crate::layer::Layer::after_child_rpc(
+        &layer,
+        &ctx,
+        &child,
+        &response,
+        &crate::wire::WireIn::default(),
+        &RajomonChild,
+    )
+    .unwrap();
 
     assert_eq!(RAJOMON_STATE.child_price(&child), 13);
     assert_eq!(
