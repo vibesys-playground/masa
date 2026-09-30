@@ -427,3 +427,43 @@ class TestCustomStack:
         )
         assert custom.display_name != builtin.display_name
         assert (custom.color, custom.marker) != (builtin.color, builtin.marker)
+
+
+class TestCustomScheduler:
+    """`sched_custom` runs the agent-owned run queue, so it must not be labeled
+    or drawn as the built-in scheduler its scheduling flag names."""
+
+    def test_parses_sched(self):
+        p = Policy.parse("sched_slo,sched_custom")
+        assert p.sched == "custom"
+        assert p.stack is None
+        assert p.prio == "e2e_slo"
+
+    def test_no_sched_by_default(self):
+        assert Policy.parse("sched_slo").sched is None
+
+    def test_display_name(self):
+        assert (
+            Policy.parse("sched_slo,sched_custom").display_name
+            == "Custom scheduler (SLO priority)"
+        )
+        assert (
+            Policy.parse(
+                "sched_pred,abort_slack,ac_pred,est_mean_var,sched_custom"
+            ).display_name
+            == "Custom scheduler (Masa priority)"
+        )
+
+    def test_both_custom_features_are_labeled(self):
+        p = Policy.parse("sched_slo,stack_custom,sched_custom")
+        assert p.stack == "custom"
+        assert p.sched == "custom"
+        assert p.display_name == "Custom stack + Custom scheduler (SLO priority)"
+
+    def test_style_differs_from_builtin_policy(self):
+        builtin = Policy.parse("sched_pred,abort_slack,ac_pred,est_mean_var")
+        custom = Policy.parse(
+            "sched_pred,abort_slack,ac_pred,est_mean_var,sched_custom"
+        )
+        assert custom.display_name != builtin.display_name
+        assert (custom.color, custom.marker) != (builtin.color, builtin.marker)

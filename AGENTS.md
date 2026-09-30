@@ -87,7 +87,10 @@ Key policy flags:
 **Policy stack override:**
 - `stack_custom`: Replaces the feature-selected `MasaStack` with the agent-owned `AgentStack` in `libs/masa-policy/src/agent/`, for every app. Requires a scheduling feature. Starts equal to `MasaStack`. See `docs/POLICY_MODULES.md`.
 
-`scripts/check.sh` checks: default (no features), `sched_fifo`, `sched_fifo,abort_slo`, `sched_slo`, `sched_slo,abort_slo`, `sched_tailclipper,abort_slo`, `sched_slo,ac_rajomon`, `sched_slo,ac_pred,est_mean_var`, `sched_pred,abort_slo,ac_pred,est_mean_var`, `sched_pred,abort_slack,est_mean_var`, `sched_pred,signal_slack,ac_pred,est_mean_var`, `sched_pred,abort_slack,ac_pred,est_mean_var,deadline_equals_slack`, `sched_mt`, `sched_mt,abort_slo`, `sched_mt,ac_rajomon`, `sched_mt_multiqueue`, `sched_mt_multiqueue,abort_slo`, `sched_slo,stack_custom`, `sched_pred,abort_slack,ac_pred,est_mean_var,stack_custom`.
+**Run queue override:**
+- `sched_custom`: Makes the current-thread Tokio runtime use `rpcstack_sched::custom::Queue` (`libs/rpcstack-sched/src/custom.rs`) instead of the queue the scheduling feature selects. Requires a scheduling feature (`compile_error!` otherwise) so that Hyper passes priorities; composes with `stack_custom` and all modifiers; ignored by `sched_mt*`. Starts as a copy of the priority-heap queue. See `docs/POLICY_MODULES.md`.
+
+`scripts/check.sh` checks: default (no features), `sched_fifo`, `sched_fifo,abort_slo`, `sched_slo`, `sched_slo,abort_slo`, `sched_tailclipper,abort_slo`, `sched_slo,ac_rajomon`, `sched_slo,ac_pred,est_mean_var`, `sched_pred,abort_slo,ac_pred,est_mean_var`, `sched_pred,abort_slack,est_mean_var`, `sched_pred,signal_slack,ac_pred,est_mean_var`, `sched_pred,abort_slack,ac_pred,est_mean_var,deadline_equals_slack`, `sched_mt`, `sched_mt,abort_slo`, `sched_mt,ac_rajomon`, `sched_mt_multiqueue`, `sched_mt_multiqueue,abort_slo`, `sched_slo,stack_custom`, `sched_pred,abort_slack,ac_pred,est_mean_var,stack_custom`, `sched_slo,sched_custom`, `sched_pred,abort_slack,ac_pred,est_mean_var,sched_custom`.
 
 ## Architecture
 

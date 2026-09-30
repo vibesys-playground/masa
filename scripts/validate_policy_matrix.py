@@ -259,6 +259,7 @@ def _validate_python_policy(
     drop = _as_str_map(expected["drop"], "python_policy.drop")
     ac = _as_str_map(expected["ac"], "python_policy.ac")
     stack = _as_str_map(expected["stack"], "python_policy.stack")
+    sched = _as_str_map(expected["sched"], "python_policy.sched")
     ignored = _as_str_list(expected["ignored"], "python_policy.ignored")
     precedence = _as_str_list(
         expected["prio_precedence"], "python_policy.prio_precedence"
@@ -282,6 +283,10 @@ def _validate_python_policy(
         errors.append(
             f"exp_runner/runner/policy.py _STACK_MAP drifted from {MATRIX_PATH}"
         )
+    if policy._SCHED_MAP != sched:
+        errors.append(
+            f"exp_runner/runner/policy.py _SCHED_MAP drifted from {MATRIX_PATH}"
+        )
     _compare_sequence(
         errors,
         "exp_runner/runner/policy.py _PRIO_PRIORITY",
@@ -296,7 +301,13 @@ def _validate_python_policy(
     )
 
     parser_flags = (
-        set(prio) | set(est) | set(drop) | set(ac) | set(stack) | set(ignored)
+        set(prio)
+        | set(est)
+        | set(drop)
+        | set(ac)
+        | set(stack)
+        | set(sched)
+        | set(ignored)
     )
     expected_parser_flags = set(_as_str_list(manifest["flags"]["known"], "flags.known"))
     if parser_flags != expected_parser_flags:
