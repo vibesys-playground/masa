@@ -11,6 +11,18 @@ pub use masa_policy::{
     WireError, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 
+#[cfg(feature = "trace_queue_latency")]
+pub use masa_policy::QueueLatencyWire;
+
+/// The queue latencies the call tree below a response reported, read from the
+/// response's (or error status's) metadata. `None` if the sender attached none.
+#[cfg(feature = "trace_queue_latency")]
+pub fn queue_latencies_from_metadata(
+    metadata: &tonic::metadata::MetadataMap,
+) -> Option<QueueLatencyWire> {
+    masa_policy::get_wire_from_metadata::<masa_policy::modules::QueueLatencyLayer>(metadata)
+}
+
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;

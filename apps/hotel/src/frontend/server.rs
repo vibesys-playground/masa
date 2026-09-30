@@ -37,9 +37,7 @@ use hotel::profile_layer::extract_latency_traces;
 
 #[cfg(feature = "trace_queue_latency")]
 fn queueing_latency<T>(response: &Response<T>) -> u64 {
-    response
-        .get_masa_context()
-        .and_then(|ctx| ctx.queue_latencies().cloned())
+    masa::queue_latencies_from_metadata(response.metadata())
         .map(|ql| ql.initial + ql.resume)
         .unwrap_or(0)
 }

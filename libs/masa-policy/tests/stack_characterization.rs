@@ -24,6 +24,8 @@ use std::time::Duration;
 use masa_core::{time_now, Context, ContextBuilder, PriorityHint};
 #[cfg(feature = "ac_rajomon")]
 use masa_policy::{header_string_with_wire, modules::RajomonLayer, RajomonWire};
+#[cfg(feature = "trace_queue_latency")]
+use masa_policy::{modules::QueueLatencyLayer, QueueLatencyWire};
 use masa_policy::{
     MasaRequestExt, MasaResponseExt, MasaStatusExt, PolicyHooks, MASA_CONTEXT_HEADER,
 };
@@ -427,7 +429,9 @@ mod generic {
             }
             #[cfg(feature = "trace_queue_latency")]
             {
-                let ql = rc.queue_latencies().expect("queue latencies on response");
+                let ql = resp
+                    .get_wire::<QueueLatencyLayer>()
+                    .expect("queue latencies on response");
                 assert_eq!(ql.queue_lengths.len(), 1);
                 assert!(ql.queue_lengths.contains_key("char-svc"));
             }
@@ -512,18 +516,16 @@ mod generic {
 
             let mut lens = std::collections::HashMap::new();
             lens.insert("down".to_string(), 5);
-            let child_ctx = fresh_builder("CharE4", SLO)
-                .queue_latencies(masa_core::QueueLatencies {
-                    initial: 11,
-                    resume: 22,
-                    queue_lengths: lens,
-                })
-                .build();
-            let resp = Response::new(()).with_masa_context(&child_ctx);
+            let child_ctx = fresh_builder("CharE4", SLO).build();
+            let mut resp = Response::new(()).with_masa_context(&child_ctx);
+            resp.set_wire::<QueueLatencyLayer>(&QueueLatencyWire {
+                initial: 11,
+                resume: 22,
+                queue_lengths: lens,
+            });
             child_done(&p, "CharE4", "Child", c, Ok(resp)).unwrap();
 
-            let rc = finalize_ok(&p).get_masa_context().unwrap();
-            let ql = rc.queue_latencies().unwrap();
+            let ql = finalize_ok(&p).get_wire::<QueueLatencyLayer>().unwrap();
             assert_eq!(ql.initial, 11);
             assert_eq!(ql.resume, 22);
             assert_eq!(ql.queue_lengths.get("down"), Some(&5));

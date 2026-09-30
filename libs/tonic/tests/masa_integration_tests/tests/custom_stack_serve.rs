@@ -77,11 +77,21 @@ impl Layer for RejectBlocked {
     const NAME: &'static str = "RejectBlocked";
     type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>, _ext: &mut Extensions) -> Self {
+    fn new(
+        _method: &CowGrpcMethod,
+        _server: &(),
+        _ctx: &mut Context,
+        _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
+    ) -> Self {
         Self
     }
 
-    fn before_poll<Ret>(&self, ctx: &Context, _ext: &mut Extensions) -> Result<(), Result<Response<Ret>, Status>> {
+    fn before_poll<Ret>(
+        &self,
+        ctx: &Context,
+        _ext: &mut Extensions,
+    ) -> Result<(), Result<Response<Ret>, Status>> {
         if ctx.request_id() == BLOCKED_REQUEST_ID {
             return Err(Err(Status::resource_exhausted("rejected by custom stack")));
         }
@@ -99,7 +109,13 @@ impl Layer for StampResponse {
     const NAME: &'static str = "StampResponse";
     type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context, _wire: &WireIn<'_>, _ext: &mut Extensions) -> Self {
+    fn new(
+        _method: &CowGrpcMethod,
+        _server: &(),
+        _ctx: &mut Context,
+        _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
+    ) -> Self {
         Self
     }
 

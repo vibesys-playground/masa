@@ -286,10 +286,11 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
 
     /// Called before the response is serialized and sent.
     ///
-    /// Modules should mutate `ctx` directly (e.g., set `response_meta` or
-    /// `queue_latencies`). The caller serializes the context once after all
-    /// modules have run. `wire` starts empty and becomes the response's wire
-    /// sections.
+    /// Modules report to the caller by `put`ting their own section into
+    /// `wire`, which starts empty and becomes the response's wire sections;
+    /// nothing from the request or from child responses is carried into it.
+    /// Modules that still use `ctx` mutate it directly, and the caller
+    /// serializes the context once after all modules have run.
     fn finalize<Ret>(
         &self,
         _ctx: &mut Context,
@@ -525,4 +526,4 @@ pub use est::EstimationLayer;
 #[cfg(feature = "sched_oracle")]
 pub use oracle::OracleLayer;
 #[cfg(feature = "trace_queue_latency")]
-pub use queue_latency::QueueLatencyLayer;
+pub use queue_latency::{QueueLatencyLayer, QueueLatencyWire};

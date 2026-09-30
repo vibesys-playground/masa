@@ -15,8 +15,6 @@ use std::sync::{
 
 #[cfg(any(feature = "abort_slo", feature = "trace_queue_latency"))]
 use masa::MasaRequestExt;
-#[cfg(feature = "trace_queue_latency")]
-use masa::MasaResponseExt;
 use masa_core::{time_now, ContextBuilder};
 use masa_integration_tests::pb::{
     child_service_client::ChildServiceClient,
@@ -125,12 +123,7 @@ async fn queue_latency_metadata_is_attached() {
     request.set_masa_context(&ctx);
 
     let response = client.rpc1(request).await.unwrap();
-    let masa_ctx = response
-        .get_masa_context()
-        .expect("response missing masa context");
-    let queue_latencies = masa_ctx
-        .queue_latencies()
-        .cloned()
+    let queue_latencies = masa::queue_latencies_from_metadata(response.metadata())
         .expect("queue latency metadata not injected");
     assert!(queue_latencies.initial < 5_000_000);
     assert!(queue_latencies.resume < 5_000_000);

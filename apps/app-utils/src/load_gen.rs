@@ -415,17 +415,14 @@ struct QueueLatencyTraceFields {
 
 #[cfg(feature = "trace_queue_latency")]
 fn queue_latency_from_metadata(metadata: &MetadataMap) -> QueueLatencyTraceFields {
-    if let Some(ctx_str) = metadata.get("ctx").and_then(|v| v.to_str().ok()) {
-        let ctx = Context::from_header_string(ctx_str);
-        if let Some(ql) = ctx.queue_latencies() {
-            return QueueLatencyTraceFields {
-                initial_us: ql.initial,
-                resume_us: ql.resume,
-                queue_lengths_json: format_queue_lengths(&ql.queue_lengths),
-            };
-        }
+    match masa::queue_latencies_from_metadata(metadata) {
+        Some(ql) => QueueLatencyTraceFields {
+            initial_us: ql.initial,
+            resume_us: ql.resume,
+            queue_lengths_json: format_queue_lengths(&ql.queue_lengths),
+        },
+        None => QueueLatencyTraceFields::default(),
     }
-    QueueLatencyTraceFields::default()
 }
 
 #[cfg(not(feature = "trace_queue_latency"))]

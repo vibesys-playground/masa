@@ -1,5 +1,3 @@
-#[cfg(feature = "trace_queue_latency")]
-use std::collections::HashMap;
 use std::fmt;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -62,26 +60,6 @@ pub struct RequestContext {
     pub frontend_elapse: Option<u64>,
 }
 
-#[cfg(feature = "trace_queue_latency")]
-#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
-pub struct QueueLatencies {
-    pub initial: u64,
-    pub resume: u64,
-    /// Queue length at each service when this request's task was first polled.
-    /// Populated only when `trace_queue_latency` feature is enabled.
-    // skip_serializing_if is intentionally omitted: bincode is positional and
-    // skipping a field on serialization causes UnexpectedEof on deserialization.
-    #[serde(default)]
-    pub queue_lengths: HashMap<String, u64>,
-}
-
-#[cfg(feature = "trace_queue_latency")]
-#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
-pub struct QueueContext {
-    #[serde(default)]
-    pub latencies: Option<QueueLatencies>,
-}
-
 #[cfg(feature = "estimator")]
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct EstimatorResponse {
@@ -135,10 +113,6 @@ pub struct EstimatorContext {
 pub struct Context {
     // Core request lifecycle data.
     request: RequestContext,
-    // Queue-latency telemetry.
-    #[cfg(feature = "trace_queue_latency")]
-    #[serde(default)]
-    pub queue: QueueContext,
     // Estimation propagation and response metadata.
     #[cfg(feature = "estimator")]
     #[serde(default)]
@@ -159,8 +133,6 @@ pub struct ContextBuilder {
     deadline: Timestamp,
     prio_hint: Option<PriorityHint>,
     frontend_elapse: Option<u64>,
-    #[cfg(feature = "trace_queue_latency")]
-    queue_latencies: Option<QueueLatencies>,
     #[cfg(feature = "estimator")]
     response: Option<EstimatorResponse>,
     #[cfg(feature = "estimator")]
@@ -179,8 +151,6 @@ impl ContextBuilder {
             deadline: 0,
             prio_hint: None,
             frontend_elapse: None,
-            #[cfg(feature = "trace_queue_latency")]
-            queue_latencies: None,
             #[cfg(feature = "estimator")]
             response: None,
             #[cfg(feature = "estimator")]
@@ -199,8 +169,6 @@ impl ContextBuilder {
             deadline: ctx.request.deadline,
             prio_hint: Some(ctx.request.prio_hint),
             frontend_elapse: ctx.request.frontend_elapse,
-            #[cfg(feature = "trace_queue_latency")]
-            queue_latencies: ctx.queue.latencies.clone(),
             #[cfg(feature = "estimator")]
             response: ctx.estimator.response.clone(),
             #[cfg(feature = "estimator")]
@@ -232,12 +200,6 @@ impl ContextBuilder {
 
     pub fn frontend_elapse(mut self, elapse: u64) -> Self {
         self.frontend_elapse = Some(elapse);
-        self
-    }
-
-    #[cfg(feature = "trace_queue_latency")]
-    pub fn queue_latencies(mut self, queue_latencies: QueueLatencies) -> Self {
-        self.queue_latencies = Some(queue_latencies);
         self
     }
 
@@ -285,10 +247,6 @@ impl ContextBuilder {
                     }
                 }),
                 frontend_elapse: self.frontend_elapse,
-            },
-            #[cfg(feature = "trace_queue_latency")]
-            queue: QueueContext {
-                latencies: self.queue_latencies,
             },
             #[cfg(feature = "estimator")]
             estimator: EstimatorContext {
@@ -348,18 +306,6 @@ impl Context {
     /// Get request lifecycle data.
     pub fn request(&self) -> &RequestContext {
         &self.request
-    }
-
-    /// Get queue latency telemetry.
-    #[cfg(feature = "trace_queue_latency")]
-    pub fn queue_latencies(&self) -> Option<&QueueLatencies> {
-        self.queue.latencies.as_ref()
-    }
-
-    /// Set queue latency telemetry.
-    #[cfg(feature = "trace_queue_latency")]
-    pub fn set_queue_latencies(&mut self, queue_latencies: QueueLatencies) {
-        self.queue.latencies = Some(queue_latencies);
     }
 
     /// Get the response metadata.

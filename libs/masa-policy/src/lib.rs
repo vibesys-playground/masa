@@ -55,6 +55,8 @@ pub mod modules {
     #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
     pub use crate::layer::RajomonLayer;
 }
+#[cfg(feature = "trace_queue_latency")]
+pub use layer::QueueLatencyWire;
 pub use registry::{MethodId, MethodRegistry};
 
 pub use policy_params::PolicyParams;
