@@ -150,12 +150,7 @@ impl InboundCtx for Context {
 impl InboundCtx for Inbound {
     #[cfg(feature = "ac_rajomon")]
     fn header_value(&self) -> String {
-        header_string_with_wire::<RajomonLayer>(
-            &self.ctx,
-            &RajomonWire {
-                tokens: self.tokens,
-            },
-        )
+        header_string_with_wire::<RajomonLayer>(&self.ctx, &RajomonWire::request(self.tokens))
     }
 
     #[cfg(not(feature = "ac_rajomon"))]
@@ -314,7 +309,7 @@ mod generic {
             #[cfg(feature = "ac_rajomon")]
             assert_eq!(
                 req.get_wire::<RajomonLayer>(),
-                Some(RajomonWire { tokens: 40 })
+                Some(RajomonWire::request(40))
             );
         });
     }
@@ -437,8 +432,8 @@ mod generic {
             }
             #[cfg(feature = "ac_rajomon")]
             assert_eq!(
-                resp.get_wire::<RajomonLayer>(),
-                Some(RajomonWire { tokens: 33 })
+                resp.get_wire::<RajomonLayer>().map(|wire| wire.tokens),
+                Some(33)
             );
         });
     }
@@ -642,9 +637,8 @@ mod generic {
         let p = begin(server, svc, parent, &ctx);
         let (r, _req, c) = issue_child(&p, svc, child);
         r.unwrap();
-        let mut resp = Response::new(());
-        resp.metadata_mut()
-            .insert("x-masa-rajomon-price", price.parse().unwrap());
+        let mut resp = Response::new(()).with_masa_context(&ctx.ctx);
+        resp.set_wire::<RajomonLayer>(&RajomonWire::response(100, price.parse().unwrap()));
         child_done(&p, svc, child, c, Ok(resp)).unwrap();
     }
 
@@ -691,7 +685,7 @@ mod generic {
                 r.unwrap();
                 assert_eq!(
                     req.get_wire::<RajomonLayer>(),
-                    Some(RajomonWire { tokens: tokens })
+                    Some(RajomonWire::request(tokens))
                 );
             }
 

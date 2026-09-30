@@ -312,21 +312,17 @@ pub struct TraceRecord {
     pub additional_metrics: Vec<String>,
 }
 
-/// Read the Rajomon `x-masa-rajomon-price` header from response metadata and
-/// update the client-side cached price for `api`. Shared between
+/// Read the price Rajomon propagated in the response's wire data and update
+/// the client-side cached price for `api`. Shared between
 /// `Handler::send_request` and bespoke loadgens (e.g. tracebench) so the same
 /// Ok+Err-aware parsing is applied everywhere. See
 /// `apps/app-utils/src/load_gen.rs:406-418` for the reasoning behind reading
 /// from error responses too.
 #[cfg(feature = "ac_rajomon")]
 pub fn update_rajomon_price_from_metadata(md: &tonic::metadata::MetadataMap, api: &str) {
-    if let Some(h) = md.get("x-masa-rajomon-price") {
-        if let Ok(s) = h.to_str() {
-            if let Ok(price) = s.parse::<u64>() {
-                let method = tonic::CowGrpcMethod::new("", api.to_string());
-                masa::update_rajomon_price(&method, price);
-            }
-        }
+    if let Some(price) = masa::rajomon_price_from_metadata(md) {
+        let method = tonic::CowGrpcMethod::new("", api.to_string());
+        masa::update_rajomon_price(&method, price);
     }
 }
 

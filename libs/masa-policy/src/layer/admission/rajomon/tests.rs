@@ -20,7 +20,7 @@ fn layer_with_tokens(method: &CowGrpcMethod, ctx: &mut Context, tokens: u64) -> 
     let mut headers = http::HeaderMap::new();
     headers.insert(
         masa_core::MASA_CONTEXT_HEADER,
-        crate::wire::header_value_with::<RajomonLayer>("Q1RY", &RajomonWire { tokens })
+        crate::wire::header_value_with::<RajomonLayer>("Q1RY", &RajomonWire::request(tokens))
             .unwrap()
             .parse()
             .unwrap(),
@@ -378,19 +378,23 @@ fn test_layer_records_child_price_response_and_updates_parent_max() {
 
     let mut ctx = masa_core::ContextBuilder::new("test", 0).build();
     let layer = layer_with_tokens(&parent, &mut ctx, 100);
-    let mut response: Result<Response<()>, Status> = Ok(Response::new(()));
-    response
-        .as_mut()
-        .unwrap()
-        .metadata_mut()
-        .insert("x-masa-rajomon-price", "13".parse().unwrap());
+    let response: Result<Response<()>, Status> = Ok(Response::new(()));
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        masa_core::MASA_CONTEXT_HEADER,
+        crate::wire::header_value_with::<RajomonLayer>("Q1RY", &RajomonWire::response(100, 13))
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    let response_wire = WireIn::from_headers(&headers).unwrap();
 
     crate::layer::Layer::after_child_rpc(
         &layer,
         &ctx,
         &child,
         &response,
-        &crate::wire::WireIn::default(),
+        &response_wire,
         &RajomonChild,
         &crate::layer::Extensions::new(),
     )

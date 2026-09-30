@@ -141,7 +141,7 @@ impl RootContext {
     #[cfg(feature = "ac_rajomon")]
     pub fn with_rajomon_tokens(mut self, tokens: u64) -> Self {
         self.wire
-            .put::<masa_policy::modules::RajomonLayer>(&masa_policy::RajomonWire { tokens })
+            .put::<masa_policy::modules::RajomonLayer>(&masa_policy::RajomonWire::request(tokens))
             .unwrap_or_else(|err| panic!("{err}"));
         self
     }
@@ -171,6 +171,14 @@ pub fn try_create_context(api: &str, slo: std::time::Duration) -> Option<RootCon
 pub fn attach_context<T>(req: &mut tonic::Request<T>, api: &str, slo: Duration) {
     let ctx = create_context(api, slo);
     req.set_masa_context(&ctx);
+}
+
+/// The price a response (or error status) propagated, read from its metadata.
+/// `None` if the responder did not propagate one.
+#[cfg(feature = "ac_rajomon")]
+pub fn rajomon_price_from_metadata(metadata: &tonic::metadata::MetadataMap) -> Option<u64> {
+    masa_policy::get_wire_from_metadata::<masa_policy::modules::RajomonLayer>(metadata)
+        .and_then(|wire| wire.price)
 }
 
 /// Update the cached Rajomon price for a method (called when a response header is received).

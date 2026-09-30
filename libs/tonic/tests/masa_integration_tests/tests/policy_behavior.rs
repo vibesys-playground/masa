@@ -257,11 +257,8 @@ async fn sufficient_tokens_executes_and_piggybacks_price() {
         .await
         .expect("request should have succeeded");
 
-    let header = response
-        .metadata()
-        .get("x-masa-rajomon-price")
-        .expect("price header should have been piggybacked");
-    let price = header.to_str().unwrap().parse::<u64>().unwrap();
+    let price = masa::rajomon_price_from_metadata(response.metadata())
+        .expect("price should have been piggybacked");
     assert!(price >= 1, "expected positive Rajomon price, got {price}");
 
     server.abort();

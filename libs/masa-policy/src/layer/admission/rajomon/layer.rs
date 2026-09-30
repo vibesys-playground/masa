@@ -18,11 +18,35 @@ use crate::wire::{WireIn, WireOut};
 /// wire data at all. Absence is Rajomon's to interpret; zero is a real budget.
 pub(super) const DEFAULT_TOKENS: u64 = 100;
 
-/// Rajomon's data on the wire: the token budget a request carries down the
-/// call tree.
+/// Rajomon's data on the wire. A request carries the token budget down the
+/// call tree; a response echoes the request's budget and, when lazy price
+/// propagation selects it, carries the price the responding service would
+/// charge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RajomonWire {
     pub tokens: u64,
+    /// Absent unless the responder chose to propagate its price; zero is a
+    /// real price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<u64>,
+}
+
+impl RajomonWire {
+    /// The wire data of a request with a budget of `tokens`.
+    pub fn request(tokens: u64) -> Self {
+        Self {
+            tokens,
+            price: None,
+        }
+    }
+
+    /// The wire data of a response that propagates `price`.
+    pub fn response(tokens: u64, price: u64) -> Self {
+        Self {
+            tokens,
+            price: Some(price),
+        }
+    }
 }
 
 // ── Layer Implementation ────────────────────────────────────────────────
@@ -42,7 +66,7 @@ pub struct RajomonLayer {
     pub(super) should_drop: bool,
     /// Remaining token budget for this request, shared across fan-out branches.
     pub(super) remaining_tokens: AtomicU64,
-    /// Inbound token count from the request context (for deterministic price propagation).
+    /// Inbound token count, echoed in the response.
     pub(super) inbound_tokens: AtomicU64,
 }
 
@@ -141,7 +165,7 @@ impl Layer for RajomonLayer {
         }
 
         child_wire
-            .put::<Self>(&RajomonWire { tokens: current })
+            .put::<Self>(&RajomonWire::request(current))
             .unwrap_or_else(|err| panic!("{err}"));
 
         Ok(())
@@ -167,37 +191,34 @@ impl Layer for RajomonLayer {
         &self,
         _ctx: &Context,
         child_method: &CowGrpcMethod,
-        response: &Result<Response<T>, Status>,
-        _response_wire: &WireIn<'_>,
+        _response: &Result<Response<T>, Status>,
+        response_wire: &WireIn<'_>,
         _child_ctx: &RajomonChild,
         _ext: &Extensions,
     ) -> Result<(), Status> {
-        // Extract and cache downstream prices from child response
-        let metadata = match response {
-            Ok(resp) => resp.metadata(),
-            Err(status) => status.metadata(),
-        };
+        // Extract and cache downstream prices from the child's response, which
+        // may be an error status: the price is read regardless of outcome.
+        let price = response_wire
+            .get::<Self>()
+            .unwrap_or_else(|err| panic!("{err}"))
+            .and_then(|wire| wire.price);
 
-        if let Some(price_header) = metadata.get("x-masa-rajomon-price") {
-            if let Ok(price_str) = price_header.to_str() {
-                if let Ok(price) = price_str.parse::<u64>() {
-                    // Store per-child price keyed by (parent, child)
-                    RAJOMON_STATE
-                        .downstream_prices
-                        .insert((self.rpc.clone(), child_method.clone()), price);
-                    // Recompute max for this parent method across all children
-                    let max_price = RAJOMON_STATE
-                        .downstream_prices
-                        .iter()
-                        .filter(|e| e.key().0 == self.rpc)
-                        .map(|e| *e.value())
-                        .max()
-                        .unwrap_or(0);
-                    RAJOMON_STATE
-                        .max_downstream_for_method
-                        .insert(self.rpc.clone(), max_price);
-                }
-            }
+        if let Some(price) = price {
+            // Store per-child price keyed by (parent, child)
+            RAJOMON_STATE
+                .downstream_prices
+                .insert((self.rpc.clone(), child_method.clone()), price);
+            // Recompute max for this parent method across all children
+            let max_price = RAJOMON_STATE
+                .downstream_prices
+                .iter()
+                .filter(|e| e.key().0 == self.rpc)
+                .map(|e| *e.value())
+                .max()
+                .unwrap_or(0);
+            RAJOMON_STATE
+                .max_downstream_for_method
+                .insert(self.rpc.clone(), max_price);
         }
 
         Ok(())
@@ -207,29 +228,20 @@ impl Layer for RajomonLayer {
     fn finalize<Ret>(
         &self,
         _ctx: &mut Context,
-        result: &mut Result<Response<Ret>, Status>,
+        _result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
         _ext: &Extensions,
     ) {
         let tokens = self.inbound_tokens.load(Ordering::Relaxed);
-        wire.put::<Self>(&RajomonWire { tokens })
-            .unwrap_or_else(|err| panic!("{err}"));
         // Paper §3.4 "Lazy Price Propagation": probabilistic per-response.
-        if !self.should_propagate_price() {
-            return;
-        }
         // Paper §3.4: propagate the raw accumulated price — no artificial floor.
-        let price = RAJOMON_STATE.accumulated_price(&self.rpc);
-        if let Ok(value) = tonic::metadata::MetadataValue::try_from(price.to_string()) {
-            match result {
-                Ok(resp) => {
-                    resp.metadata_mut().insert("x-masa-rajomon-price", value);
-                }
-                Err(status) => {
-                    status.metadata_mut().insert("x-masa-rajomon-price", value);
-                }
-            }
-        }
+        let response = if self.should_propagate_price() {
+            RajomonWire::response(tokens, RAJOMON_STATE.accumulated_price(&self.rpc))
+        } else {
+            RajomonWire::request(tokens)
+        };
+        wire.put::<Self>(&response)
+            .unwrap_or_else(|err| panic!("{err}"));
     }
 }
 
