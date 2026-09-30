@@ -60,6 +60,58 @@ scenario! {
 }
 
 scenario! {
+    /// A request that arrives naming a logical method is accounted under that
+    /// name: it becomes the root method its children see.
+    fn inbound_method_override_names_the_root(w) {
+        let svc = w.service("EstLogicalSvc");
+        let child = w.service("EstLogicalChild");
+        let req = w
+            .crafted("EstApi", dur_ms(100))
+            .logical_method("LogicalEntry")
+            .build();
+        let p = probe_request(&svc, "PhysicalEntry", &req, &child, "Next").unwrap();
+        assert_eq!(
+            p.outbound.root_method,
+            Some(("EstLogicalSvc".to_string(), "LogicalEntry".to_string()))
+        );
+    }
+}
+
+scenario! {
+    /// A child call that carries a logical method name is learned under that
+    /// name: two calls to the same real method with different logical names
+    /// keep separate estimates, and a call with neither has learned nothing.
+    #[cfg(not(any(feature = "sched_oracle")))]
+    fn child_method_override_separates_estimates(w) {
+        let svc = w.service("EstOverrideSvc");
+        let child = w.service("EstOverrideChild");
+        for (logical, after_us) in [("LogicalFast", 5_000), ("LogicalSlow", 20_000)] {
+            for _ in 0..2 {
+                let req = w.ingress("EstApi", Duration::from_secs(10));
+                svc.serve("Entry", &req, |h| {
+                    h.call(&child, "Real")
+                        .method_override(logical)
+                        .run_for(Duration::from_millis(1))?;
+                    h.work(Duration::from_micros(after_us))
+                });
+            }
+        }
+        let tighten = |logical: Option<&'static str>| {
+            let req = w.ingress("EstApi", Duration::from_secs(10));
+            let h = svc.accept("Entry", &req);
+            let mut call = h.call(&child, "Real");
+            if let Some(name) = logical {
+                call = call.method_override(name);
+            }
+            req.view().deadline - call.outbound().unwrap().view().deadline
+        };
+        assert_eq!(tighten(Some("LogicalFast")), 5_000);
+        assert_eq!(tighten(Some("LogicalSlow")), 20_000);
+        assert_eq!(tighten(None), 0);
+    }
+}
+
+scenario! {
     /// A request that already travelled keeps the root method it was given,
     /// and each hop adds exactly one to the hop count.
     fn inherited_root_method_is_never_replaced(w) {

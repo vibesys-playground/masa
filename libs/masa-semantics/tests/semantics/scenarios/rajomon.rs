@@ -55,6 +55,24 @@ scenario! {
 }
 
 scenario! {
+    /// Replies echo the token budget the request arrived with (not what was
+    /// left after its own price or its children), on success and on error.
+    fn replies_echo_the_inbound_tokens(w) {
+        let svc = w.service("RajEcho");
+        let req = request_with_tokens(w, 33);
+        let reply = svc.serve("Entry", &req, |h| {
+            h.call_remote("RajEchoDown", "Down")
+                .returns(Duration::from_millis(1), Reply::bare_ok())?;
+            Ok(())
+        });
+        assert_eq!(reply.view().unwrap().tokens, Some(33));
+        let req = request_with_tokens(w, 0);
+        let reply = svc.serve("Entry", &req, |_h| Err(tonic::Status::internal("boom")));
+        assert_eq!(reply.view().unwrap().tokens, Some(0));
+    }
+}
+
+scenario! {
     /// A method with no known downstream price costs nothing: even a request
     /// with zero tokens is admitted, and zero is forwarded as zero, not
     /// replaced by a default budget.

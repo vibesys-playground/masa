@@ -300,6 +300,49 @@ scenario! {
 }
 
 scenario! {
+    /// Stale estimates stop blocking: a child call the estimates called
+    /// infeasible is still rejected a second later (the estimate has barely
+    /// decayed), but admitted again after ten idle seconds, when the estimate
+    /// has shrunk to a seventh of its value. This breaks the lockout where
+    /// rejecting everything prevents the observations that would lift it.
+    #[cfg(not(any(feature = "est_rms", feature = "est_hist")))]
+    fn stale_estimates_stop_rejecting_child_calls(w) {
+        let svc = w.service("AcBcfStale");
+        let child = w.service("AcBcfStaleChild");
+        train(w, &svc, "Parent", &child, "Child", 40_000, 10_000);
+        let observed_at = w.now();
+        assert!(probe(w, &svc, "Parent", dur_ms(30), &child, "Child").is_err());
+        w.set_now(observed_at + 1_000_000);
+        assert!(probe(w, &svc, "Parent", dur_ms(30), &child, "Child").is_err());
+        w.set_now(observed_at + 10_000_000);
+        assert!(probe(w, &svc, "Parent", dur_ms(30), &child, "Child").is_ok());
+    }
+}
+
+scenario! {
+    /// The optimistic (floor) estimate is a hard backstop, not a coin flip: a
+    /// child call whose optimistic completion is even one microsecond past the
+    /// deadline is rejected every time, while one that fits exactly is admitted.
+    #[cfg(not(any(feature = "est_rms", feature = "est_hist")))]
+    fn optimistic_overshoot_is_always_rejected(w) {
+        let svc = w.service("AcBcfFloor");
+        let child = w.service("AcBcfFloorChild");
+        // Constant latencies: every estimate equals the observation.
+        for _ in 0..3 {
+            train(w, &svc, "Parent", &child, "Child", 20_000, 1_500);
+        }
+        for _ in 0..200 {
+            let p = probe(w, &svc, "Parent", Duration::from_micros(21_499), &child, "Child");
+            assert!(p.is_err(), "1 us short of the estimate must be rejected");
+        }
+        for _ in 0..200 {
+            let p = probe(w, &svc, "Parent", Duration::from_micros(21_500), &child, "Child");
+            assert!(p.is_ok(), "an exact fit must be admitted");
+        }
+    }
+}
+
+scenario! {
     /// Between "certainly too slow" and "fits on average" lies a probabilistic
     /// band: when the optimistic estimate fits the time left but the mean
     /// estimate overshoots by a fraction `r` of it, the call is shed with

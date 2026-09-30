@@ -53,6 +53,15 @@ scenario! {
         let no_slo = w.crafted("GuardApi", dur_ms(0)).entered_at(0).deadline(0).build();
         assert!(svc.serve("Ping", &no_slo, |h| h.work_ms(5)).is_ok());
 
+        let no_slo_but_hop_deadline = w
+            .crafted("GuardApi", dur_ms(0))
+            .entered_at(0)
+            .deadline(5)
+            .build();
+        assert!(svc
+            .serve("Ping", &no_slo_but_hop_deadline, |h| h.work_ms(5))
+            .is_ok());
+
         let no_hop_deadline = w
             .crafted("GuardApi", dur_ms(1))
             .entered_at(w.now() - ms(1000))

@@ -119,6 +119,34 @@ pub fn run_with<H: Hooks, R: Send + 'static>(
     }
 }
 
+/// Run an async scenario with tokio's clock paused, so the framework's
+/// background workers (Rajomon's price updater and client-bucket refiller)
+/// run, and run only as the scenario calls [`World::elapse`].
+pub fn run_timed<H, R, Fut>(params: Params, f: impl FnOnce(World<H>) -> Fut + Send + 'static) -> R
+where
+    H: Hooks,
+    R: Send + 'static,
+    Fut: std::future::Future<Output = R> + Send + 'static,
+{
+    init::<H>(params, false);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .build()
+        .expect("runtime");
+    let joined = rt.block_on(async move {
+        tokio::spawn(async move {
+            test_clock::set_now_us(test_clock::START_US);
+            f(World::new()).await
+        })
+        .await
+    });
+    match joined {
+        Ok(r) => r,
+        Err(e) => resume_unwind(e.into_panic()),
+    }
+}
+
 // ── The world: clock and services ───────────────────────────────────────
 
 /// The virtual environment of one scenario.
@@ -126,10 +154,48 @@ pub struct World<H: Hooks> {
     _hooks: PhantomData<fn() -> H>,
 }
 
+impl<H: Hooks> Clone for World<H> {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
 impl<H: Hooks> World<H> {
     fn new() -> Self {
         Self {
             _hooks: PhantomData,
+        }
+    }
+
+    /// Let `d` of time pass for background workers as well as for the virtual
+    /// clock, in 10 ms steps so a periodic worker ticks once per step. Only
+    /// valid in [`run_timed`] scenarios.
+    pub async fn elapse(&self, d: Duration) {
+        let step = Duration::from_millis(10);
+        let mut left = d;
+        while !left.is_zero() {
+            let s = left.min(step);
+            test_clock::advance_us(s.as_micros() as u64);
+            tokio::time::advance(s).await;
+            left -= s;
+        }
+    }
+
+    /// Run `f` as a task that waits in the runtime's queue for a real `delay`
+    /// before it first runs, so hooks that measure queueing delay see at least
+    /// `delay`. This is the one place real time enters the suite, and it only
+    /// ever produces a lower bound: a slower machine observes a longer delay,
+    /// never a shorter one.
+    pub async fn run_queued<R: Send + 'static>(
+        &self,
+        delay: Duration,
+        f: impl FnOnce() -> R + Send + 'static,
+    ) -> R {
+        let task = tokio::spawn(async move { f() });
+        std::thread::sleep(delay);
+        match task.await {
+            Ok(r) => r,
+            Err(e) => resume_unwind(e.into_panic()),
         }
     }
 
@@ -148,6 +214,19 @@ impl<H: Hooks> World<H> {
 
     pub fn advance_ms(&self, ms: u64) {
         self.advance(Duration::from_millis(ms));
+    }
+
+    /// A client asks the process-wide Rajomon client bucket for a token count
+    /// for a request to `api`; `None` means the client sheds the request.
+    #[cfg(feature = "ac_rajomon")]
+    pub fn client_acquires_tokens(&self, api: &str) -> Option<u64> {
+        masa::try_acquire_tokens(api)
+    }
+
+    /// A client learns from a response that `api` now costs `price`.
+    #[cfg(feature = "ac_rajomon")]
+    pub fn client_learns_price(&self, api: &str, price: u64) {
+        masa::update_rajomon_price(&tonic::CowGrpcMethod::new("", api.to_string()), price);
     }
 
     /// A service node with its own server-side hook state. Keep the handle to
@@ -176,6 +255,7 @@ impl<H: Hooks> World<H> {
             hop_count: None,
             root: None,
             tokens: None,
+            logical_method: None,
             now: self.now(),
         }
     }
@@ -379,10 +459,18 @@ pub struct Crafted {
     hop_count: Option<u8>,
     root: Option<(String, String)>,
     tokens: Option<u64>,
+    logical_method: Option<String>,
     now: u64,
 }
 
 impl Crafted {
+    /// The request arrives naming a logical method instead of the one it was
+    /// routed to.
+    pub fn logical_method(mut self, name: &str) -> Self {
+        self.logical_method = Some(name.to_string());
+        self
+    }
+
     /// The request entered the system at virtual time `t` (deadline = `t` + SLO
     /// unless set explicitly).
     pub fn entered_at(mut self, t: u64) -> Self {
@@ -442,7 +530,13 @@ impl Crafted {
         }
         #[cfg(not(feature = "ac_rajomon"))]
         let _ = self.tokens;
-        Inbound::from_root(root)
+        let logical = self.logical_method;
+        let mut inbound = Inbound::from_root(root);
+        if let Some(name) = logical {
+            masa::set_method_name_override_in_headers(&mut inbound.headers, &name)
+                .expect("ascii method name");
+        }
+        inbound
     }
 }
 

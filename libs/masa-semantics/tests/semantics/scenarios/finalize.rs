@@ -54,6 +54,31 @@ scenario! {
 }
 
 scenario! {
+    /// With slack-based scheduling (`sched_pred`) a failed child call surfaces
+    /// to the handler as an error from the call itself; in every other build
+    /// the handler receives the child's error reply and decides.
+    fn failed_child_is_surfaced_only_with_sched_pred(w) {
+        let svc = w.service("FinSurface");
+        let child = w.service("FinSurfaceChild");
+        let req = w.ingress("FinApi", dur_ms(500));
+        svc.serve("Entry", &req, |h| {
+            let outcome = h.call(&child, "Down").run(|_c| Err(Status::unavailable("down")));
+            match outcome {
+                Err(status) => {
+                    assert!(cfg!(feature = "sched_pred"), "unexpected call error: {status}");
+                    assert_eq!(status.code(), Code::Unavailable);
+                }
+                Ok(reply) => {
+                    assert!(!cfg!(feature = "sched_pred"));
+                    assert_eq!(reply.code(), Code::Unavailable);
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
+scenario! {
     /// A failed child does not stop the parent: the parent may handle the error
     /// and still answer successfully.
     fn parent_can_absorb_a_child_error(w) {
