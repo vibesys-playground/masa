@@ -1,5 +1,5 @@
+use masa_core::Instant;
 use std::sync::Mutex;
-use std::time::Instant;
 
 use masa_core::LatencyEstimator;
 use tonic::{CowGrpcMethod, Response, Status};

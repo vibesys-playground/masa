@@ -26,7 +26,9 @@ pub use latency_estimator::{
     LatencyDistribution, LatencyEstimator, LatencyEwma, LatencyMeanVar, LatencyRms,
 };
 pub use priority::{Prioritize, PriorityHint};
-pub use timing::{time_now, LatencyTracker};
+#[cfg(feature = "test_clock")]
+pub use timing::test_clock;
+pub use timing::{time_now, Instant, LatencyTracker};
 pub use typing::{Address, Api, Latency, MethodId, RequestId, ServiceId, Timestamp};
 
 /// Header key for MASA context.

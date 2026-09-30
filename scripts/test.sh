@@ -10,6 +10,7 @@ PYTHON_BIN="${PYTHON:-python3}"
 # Parse arguments
 PARALLEL_JOBS=1
 FEATURE_FLAG=""
+SEMANTICS_FEATURE=""
 IS_MATRIX=false
 
 while [[ $# -gt 0 ]]; do
@@ -21,6 +22,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         --feature)
             FEATURE_FLAG="$2"
+            IS_MATRIX=true
+            shift
+            shift
+            ;;
+        --semantics-feature)
+            SEMANTICS_FEATURE="$2"
             IS_MATRIX=true
             shift
             shift
@@ -95,6 +102,34 @@ feature_combos=(
     "sched_slo,stack_custom"
 )
 
+# Feature combinations for the server-free semantics suite (libs/masa-semantics).
+# Broader than feature_combos: the suite is cheap, and each combination
+# exercises a different module stack.
+semantics_combos=(
+    "sched_fifo"
+    "sched_slo"
+    "sched_tailclipper"
+    "sched_oracle"
+    "sched_slo,abort_slo"
+    "sched_slo,trace_queue_latency"
+    "sched_slo,ac_rajomon"
+    "sched_slo,ac_rajomon,abort_slo"
+    "sched_slo,ac_pred,est_mean_var"
+    "sched_slo,ac_pred,est_hist"
+    "sched_slo,ac_pred,est_rms"
+    "sched_slo,abort_slack,ac_rajomon,est_mean_var"
+    "sched_pred,abort_slo,ac_pred,est_mean_var"
+    "sched_pred,abort_slack,est_mean_var"
+    "sched_pred,signal_slack,ac_pred,est_mean_var"
+    "sched_pred,abort_slack,ac_pred,est_mean_var,deadline_equals_slack"
+    "sched_oracle,abort_slo,est_mean_var"
+    "sched_slo,stack_custom"
+)
+
+run_semantics_tests() {
+    execute_test "masa-semantics ($1)" cargo test -p masa-semantics --features "$1"
+}
+
 # Per-combo test dispatch: runs the hotel sched_policy test for every combo,
 # plus additional feature-specific tests where applicable.
 run_feature_tests() {
@@ -126,8 +161,12 @@ run_feature_tests() {
     esac
 }
 
+if [ -n "$SEMANTICS_FEATURE" ]; then
+    run_semantics_tests "$SEMANTICS_FEATURE"
+fi
+
 # Run scheduling policy test with no features
-if [ "$IS_MATRIX" = false ] || [ -z "$FEATURE_FLAG" ]; then
+if [ -z "$SEMANTICS_FEATURE" ] && { [ "$IS_MATRIX" = false ] || [ -z "$FEATURE_FLAG" ]; }; then
     execute_test "hotel (sched_policy no-op)" cargo test -p hotel --test sched_policy
 fi
 
@@ -136,6 +175,11 @@ if [ "$IS_MATRIX" = false ]; then
     for feat in "${feature_combos[@]}"; do
         run_feature_tests "$feat"
     done
+    for feat in "${semantics_combos[@]}"; do
+        run_semantics_tests "$feat"
+    done
+elif [ -n "$SEMANTICS_FEATURE" ]; then
+    :
 elif [[ " ${feature_combos[*]} " =~ " $FEATURE_FLAG " ]]; then
     run_feature_tests "$FEATURE_FLAG"
 elif [ -n "$FEATURE_FLAG" ]; then
@@ -153,6 +197,7 @@ packages=(
     "tonic"
     "tonic-build"
     "masa"
+    "masa-semantics"
     "tonic-health"
     #"tonic-reflection"
     "tonic-types"
@@ -175,7 +220,7 @@ packages=(
 )
 
 # Loop through each package and run tests
-if [ "$IS_MATRIX" = false ] || [ -z "$FEATURE_FLAG" ]; then
+if [ -z "$SEMANTICS_FEATURE" ] && { [ "$IS_MATRIX" = false ] || [ -z "$FEATURE_FLAG" ]; }; then
     for package in "${packages[@]}"; do
         case "$package" in
             tokio | tokio-util)

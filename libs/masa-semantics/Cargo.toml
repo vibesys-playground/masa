@@ -1,0 +1,36 @@
+[package]
+name = "masa-semantics"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Implementation-agnostic, server-free semantics tests for Masa policy behavior"
+
+[dependencies]
+
+[dev-dependencies]
+http = "0.2"
+rand = "0.8"
+masa = { path = "../masa" }
+masa-core = { path = "../masa-core", features = ["test_clock"] }
+tokio = { path = "../tokio/tokio", features = ["rt", "macros"] }
+tonic = { path = "../tonic/tonic" }
+
+[features]
+default = []
+sched_fifo = ["masa/sched_fifo"]
+sched_slo = ["masa/sched_slo"]
+sched_tailclipper = ["masa/sched_tailclipper"]
+sched_oracle = ["masa/sched_oracle"]
+sched_pred = ["sched_slo", "estimator", "masa/sched_pred"]
+abort_slo = ["masa/abort_slo"]
+abort_slack = ["estimator", "masa/abort_slack"]
+signal_slack = ["estimator", "ac_pred", "masa/signal_slack"]
+estimator = ["masa/estimator"]
+est_mean_var = ["estimator", "masa/est_mean_var"]
+est_rms = ["estimator", "masa/est_rms"]
+est_hist = ["estimator", "masa/est_hist"]
+ac_pred = ["estimator", "masa/ac_pred"]
+ac_rajomon = ["masa/ac_rajomon"]
+trace_queue_latency = ["masa/trace_queue_latency"]
+deadline_equals_slack = ["sched_pred", "masa/deadline_equals_slack"]
+stack_custom = ["masa/stack_custom"]

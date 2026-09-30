@@ -6,10 +6,10 @@
 // observed ER fraction exceeds a threshold and recovers additively when healthy.
 // Exponential idle decay opens admission naturally when traffic drops.
 
+use masa_core::Instant;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use masa_core::Context;
 use tonic::{Code, CowGrpcMethod, Response, Status};
