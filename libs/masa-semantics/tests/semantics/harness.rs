@@ -22,7 +22,7 @@ use std::sync::{Arc, Once};
 use std::task::Poll;
 use std::time::Duration;
 
-use masa::{MasaRequestExt, MasaResponseExt, MasaStatusExt, MASA_CONTEXT_HEADER};
+use masa::{MasaRequestExt, MasaResponseExt, RootContext, MASA_CONTEXT_HEADER};
 use masa_core::{test_clock, Context, ContextBuilder, PriorityHint};
 use tonic::masa::{ClientHooks, ParentHooks, ServerHooks};
 use tonic::{Code, GrpcMethod, Request, Response, Status};
@@ -162,7 +162,7 @@ impl<H: Hooks> World<H> {
     /// A client-created request for `api` with an end-to-end SLO, created the
     /// way a real client gateway does (`masa::create_context`).
     pub fn ingress(&self, api: &str, slo: Duration) -> Inbound {
-        Inbound::from_context(masa::create_context(api, slo))
+        Inbound::from_root(RootContext::from(masa::create_context(api, slo)))
     }
 
     /// Start building a hand-crafted client request.
@@ -267,8 +267,29 @@ pub struct QueueView {
     pub lengths: BTreeMap<String, u64>,
 }
 
+/// Tokens of the Rajomon wire section in `metadata`, if any.
+#[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
+fn rajomon_tokens(metadata: &tonic::metadata::MetadataMap) -> Option<u64> {
+    masa::WireIn::from_metadata(metadata)
+        .expect("well-formed wire sections")
+        .get::<masa_policy::modules::RajomonLayer>()
+        .expect("decodable rajomon section")
+        .map(|wire| wire.tokens)
+}
+
+#[cfg(not(all(feature = "ac_rajomon", not(feature = "ac_pred"))))]
+fn rajomon_tokens(_metadata: &tonic::metadata::MetadataMap) -> Option<u64> {
+    None
+}
+
 impl CtxView {
-    fn from_ctx(ctx: &Context) -> Self {
+    /// The view of whatever Masa data `metadata` carries.
+    fn of_metadata(metadata: &tonic::metadata::MetadataMap) -> Option<Self> {
+        masa::get_masa_context_from_metadata(metadata)
+            .map(|ctx| Self::from_parts(&ctx, rajomon_tokens(metadata)))
+    }
+
+    fn from_parts(ctx: &Context, tokens: Option<u64>) -> Self {
         Self {
             api: ctx.api().clone(),
             request_id: ctx.request_id(),
@@ -286,10 +307,7 @@ impl CtxView {
                 .map(|r| (r.service.clone(), r.method.clone())),
             #[cfg(not(feature = "estimator"))]
             root_method: None,
-            #[cfg(feature = "ac_rajomon")]
-            tokens: Some(ctx.tokens()),
-            #[cfg(not(feature = "ac_rajomon"))]
-            tokens: None,
+            tokens,
             #[cfg(feature = "estimator")]
             meta: ctx.response_meta().map(|m| RespMeta {
                 compute_time_us: m.compute_time_us,
@@ -330,15 +348,11 @@ pub struct Inbound {
 }
 
 impl Inbound {
-    fn from_context(ctx: Context) -> Self {
-        let mut headers = http::HeaderMap::new();
-        headers.insert(
-            MASA_CONTEXT_HEADER,
-            ctx.to_header_string().parse().expect("ascii header"),
-        );
+    fn from_root(root: RootContext) -> Self {
+        let request = root.attach(Request::new(()));
         Self {
-            headers,
-            view: CtxView::from_ctx(&ctx),
+            headers: request.metadata().clone().into_headers(),
+            view: CtxView::of_metadata(request.metadata()).expect("attached context"),
         }
     }
 
@@ -419,13 +433,15 @@ impl Crafted {
                 });
             }
         }
+        #[allow(unused_mut)]
+        let mut root = RootContext::from(b.build());
         #[cfg(feature = "ac_rajomon")]
         if let Some(t) = self.tokens {
-            b = b.tokens(t);
+            root = root.with_rajomon_tokens(t);
         }
         #[cfg(not(feature = "ac_rajomon"))]
         let _ = self.tokens;
-        Inbound::from_context(b.build())
+        Inbound::from_root(root)
     }
 }
 
@@ -512,11 +528,10 @@ impl Reply {
 
     /// The Masa context the callee's hooks attached, if any.
     pub fn view(&self) -> Option<CtxView> {
-        let ctx = match &self.result {
-            Ok(resp) => resp.get_masa_context(),
-            Err(status) => status.get_masa_context(),
-        };
-        ctx.as_ref().map(CtxView::from_ctx)
+        match &self.result {
+            Ok(resp) => CtxView::of_metadata(resp.metadata()),
+            Err(status) => CtxView::of_metadata(status.metadata()),
+        }
     }
 
     /// The Rajomon price the callee advertised, if any.
@@ -760,11 +775,7 @@ impl<H: Hooks> Outbound<H> {
     /// What the callee receives.
     pub fn inbound(&self) -> Inbound {
         let headers = self.request.metadata().clone().into_headers();
-        let view = self
-            .request
-            .get_masa_context()
-            .as_ref()
-            .map(CtxView::from_ctx)
+        let view = CtxView::of_metadata(self.request.metadata())
             .expect("outbound request carries a context");
         Inbound { headers, view }
     }

@@ -144,14 +144,16 @@ scenario! {
             assert_eq!(child.priority, parent.priority);
             #[cfg(feature = "estimator")]
             assert_eq!(child.hop_count.unwrap(), parent.hop_count.unwrap() + 1);
-            #[cfg(feature = "ac_rajomon")]
-            assert_eq!(child.tokens, parent.tokens);
+            if parent.tokens.is_some() {
+                assert_eq!(child.tokens, parent.tokens);
+            }
             if parent.root_method.is_some() {
                 assert_eq!(child.root_method, parent.root_method);
             }
         }
         // What the first hop receives straight from the client.
         assert_eq!(log[1].deadline, req.view().deadline);
+
         #[cfg(feature = "estimator")]
         {
             assert_eq!(log[1].hop_count, Some(0));
