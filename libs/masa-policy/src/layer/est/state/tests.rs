@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use masa_core::{Context, LatencyEwma};
+use masa_core::LatencyEwma;
 use tonic::{CowGrpcMethod, Response, Status};
 
 use super::latency_estimators::blend_toward_legacy;
@@ -108,7 +108,7 @@ fn estimation_tracker_issues_open_group_with_completed_prefix() {
 
     let first = tracker.begin_child(&child_a);
     let response: Result<Response<()>, Status> = Ok(Response::new(()));
-    tracker.record_child_complete(&first, &response);
+    tracker.record_child_complete(&first, &response, None);
 
     let second = tracker.begin_child(&child_b);
     assert_eq!(second.path_prefix, PathPrefix::root());
@@ -145,7 +145,7 @@ fn estimation_tracker_records_child_completion_and_flushes_parent_observations()
     let child_tracker = tracker.begin_child(&child);
     std::thread::sleep(Duration::from_millis(1));
     let response: Result<Response<()>, Status> = Ok(Response::new(()));
-    tracker.record_child_complete(&child_tracker, &response);
+    tracker.record_child_complete(&child_tracker, &response, None);
 
     let child_wallclock = est
         .est_child_wallclock(key)
@@ -342,14 +342,11 @@ fn fanout_lookup_ignores_single_child_groups() {
 }
 
 #[test]
-fn deadline_signal_propagates_to_response_meta() {
+fn deadline_signal_propagates_to_response_wire() {
     let tracker = RequestMetadataTracker::new();
     tracker.mark_deadline_signal();
 
-    let mut ctx = Context::default();
-    tracker.inject_response_meta(&mut ctx);
-
-    let meta = ctx.response_meta().expect("response_meta set");
+    let meta = tracker.response_wire();
     assert_eq!(meta.deadline_signal_count, 1);
     assert_eq!(meta.early_return_count, 0);
 }
@@ -357,10 +354,7 @@ fn deadline_signal_propagates_to_response_meta() {
 #[test]
 fn deadline_signal_default_is_zero_when_not_marked() {
     let tracker = RequestMetadataTracker::new();
-    let mut ctx = Context::default();
-    tracker.inject_response_meta(&mut ctx);
-
-    let meta = ctx.response_meta().expect("response_meta set");
+    let meta = tracker.response_wire();
     assert_eq!(meta.deadline_signal_count, 0);
 }
 
@@ -371,10 +365,7 @@ fn mark_deadline_signal_is_idempotent() {
     tracker.mark_deadline_signal();
     tracker.mark_deadline_signal();
 
-    let mut ctx = Context::default();
-    tracker.inject_response_meta(&mut ctx);
-
-    assert_eq!(ctx.response_meta().unwrap().deadline_signal_count, 1);
+    assert_eq!(tracker.response_wire().deadline_signal_count, 1);
 }
 
 #[test]
@@ -388,21 +379,15 @@ fn deadline_signal_saturates_across_children() {
         tracker.child_deadline_signal.store(true, Ordering::Relaxed);
     }
 
-    let mut ctx = Context::default();
-    tracker.inject_response_meta(&mut ctx);
-
-    assert_eq!(ctx.response_meta().unwrap().deadline_signal_count, 1);
+    assert_eq!(tracker.response_wire().deadline_signal_count, 1);
 }
 
 #[test]
 fn deadline_signal_propagates_from_child_only() {
     // Even if the local hop did not signal, a single descendant signal
-    // should still surface as 1 at this hop's response_meta.
+    // should still surface as 1 at this hop's response wire.
     let tracker = RequestMetadataTracker::new();
     tracker.child_deadline_signal.store(true, Ordering::Relaxed);
 
-    let mut ctx = Context::default();
-    tracker.inject_response_meta(&mut ctx);
-
-    assert_eq!(ctx.response_meta().unwrap().deadline_signal_count, 1);
+    assert_eq!(tracker.response_wire().deadline_signal_count, 1);
 }

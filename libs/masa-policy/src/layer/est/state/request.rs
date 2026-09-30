@@ -7,7 +7,8 @@ use tonic::{CowGrpcMethod, Response, Status};
 use super::super::fanout::{recover_path_groups, ChildRecord, PathPrefix};
 use super::super::latency_map::{ParentToChildKey, RootToLocalKey};
 use super::latency_estimators::{fanout_enabled_for_parent, LatencyEstimators};
-use super::metadata::{is_early_return_response, is_signaled_response};
+use super::metadata::{is_early_return_response, is_signaled_report};
+use crate::layer::est::wire::EstimationResponseWire;
 use crate::registry::MethodId;
 use crate::MethodRegistry;
 
@@ -154,11 +155,13 @@ impl<E: LatencyEstimator + Default + 'static> EstimationTracker<E> {
     }
 
     /// Record a completed child RPC: track child wallclock on success, or inject
-    /// ER feedback on deadline-exceeded.
+    /// ER feedback on deadline-exceeded. `report` is the child's estimation
+    /// report, if it succeeded and sent one.
     pub(crate) fn record_child_complete<T>(
         &self,
         tracker: &ChildRPCTracker,
         response: &Result<Response<T>, Status>,
+        report: Option<&EstimationResponseWire>,
     ) {
         if is_early_return_response(response) {
             self.est.track_er_feedback(tracker.key);
@@ -168,7 +171,7 @@ impl<E: LatencyEstimator + Default + 'static> EstimationTracker<E> {
                 // mark it terminal so later groups can advance the path prefix.
                 record.terminal = true;
             }
-        } else if is_signaled_response(response) {
+        } else if is_signaled_report(report) {
             // Child returned Ok but signaled at some hop in its subtree under
             // signal_slack — its wallclock includes signal-but-continue
             // runtime. Skip track_child_wallclock so the estimator doesn't

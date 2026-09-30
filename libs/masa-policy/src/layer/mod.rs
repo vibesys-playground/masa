@@ -162,19 +162,13 @@ impl ServerInit {
 pub struct ChildRpcContext {
     pub deadline: u64,
     pub prio_hint: PriorityHint,
-    #[cfg(feature = "estimator")]
-    pub hop_count: u8,
 }
 
 impl ChildRpcContext {
     pub(crate) fn from_parent(ctx: &Context) -> Self {
-        // hop_count is only incremented when estimation is active — it uses
-        // hop_count to distinguish ingress from internal hops.
         Self {
             deadline: ctx.deadline(),
             prio_hint: ctx.prio_hint(),
-            #[cfg(feature = "estimator")]
-            hop_count: ctx.hop_count().saturating_add(1),
         }
     }
 }
@@ -522,7 +516,10 @@ pub use admission::rajomon::RajomonLayer;
 #[cfg(feature = "abort_slo")]
 pub use e2e_deadline_guard::E2eDeadlineGuardLayer;
 #[cfg(feature = "estimator")]
-pub use est::EstimationLayer;
+pub use est::{
+    EstimationInfo, EstimationLayer, EstimationRequestWire, EstimationResponseWire, EstimationWire,
+    PublishesEstimationInfo, RootMethod,
+};
 #[cfg(feature = "sched_oracle")]
 pub use oracle::OracleLayer;
 #[cfg(feature = "trace_queue_latency")]
