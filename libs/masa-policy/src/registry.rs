@@ -9,8 +9,8 @@ use tonic::CowGrpcMethod;
 /// Opaque method identifier. Only handed out by [`MethodRegistry`].
 ///
 /// Process-local: two different processes may assign different `MethodId`s to
-/// the same (service, method) pair. Use [`RootMethod`](masa_core::RootMethod)
-/// for cross-process identity.
+/// the same (service, method) pair. Send the (service, method) pair itself, as
+/// estimation's `RootMethod` does, for cross-process identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MethodId(u64);
 

@@ -15,7 +15,7 @@ policy is a new module, composed into a new stack. It does not need edits to
 | `Layer` | Per-request state and lifecycle hooks. All hooks default to no-ops. |
 | `Layer::Server: LayerServer` | Per-service state, built once by `LayerServer::new(&mut ServerInit)`, which returns `Err(MissingDependency)` when a prerequisite module is missing or misordered. |
 | `Layer::Child: LayerChild` | Per-child-RPC state, created before `before_child_rpc` and passed back to `after_child_rpc`. |
-| `ChildRpcContext` | What the child will receive in the shared `Context`: `deadline`, `prio_hint`, plus feature-gated `hop_count`. Modules mutate it in `before_child_rpc`. |
+| `ChildRpcContext` | What the child will receive in the shared `Context`: `deadline` and `prio_hint`. Modules mutate it in `before_child_rpc`. |
 | `Layer::NAME`, `Layer::Wire` | The module's own wire data: a serde type and the unique name of its section in the `ctx` header. `()` means none. See "Wire data". |
 | `WireIn` / `WireOut` | Typed access to the wire sections: `wire.get::<Self>()` on an inbound message (a request, or a child's response), `out.put::<Self>(&value)` on an outbound one. |
 | `Extensions` | A per-request typed map (one value per type) that the hooks of all modules share; the framework never reads or fills it. |
@@ -131,7 +131,11 @@ wire sections the same way a successful response does.
 Each section travels in the `ctx` header as `.<NAME>:<base64 JSON>` after the
 unchanged `Context` blob (`libs/masa-policy/src/wire.rs` documents the layout).
 Sections are decoded independently, and `masa_policy::peek::<M>(&headers)`
-decodes one module's section without decoding the `Context`. `NAME` must be
+decodes one module's section without decoding the `Context`. Sections that are
+built and parsed on every RPC, like estimation's, encode their fields as JSON
+arrays instead of objects (`#[serde(from = ..., into = ...)]` on a tuple
+struct), which made them about a third the size and the per-RPC hook cost
+equal to what it was with the data in `Context`. `NAME` must be
 unique among modules with wire data and use only ASCII letters, digits, `_` or
 `-`; a stack that violates this panics when the server is constructed. Root
 clients attach wire data with `masa::RootContext` (for example
@@ -161,7 +165,41 @@ handles (`Arc`-backed) so producer and consumer share one instance.
 Per-request data that several modules share goes in `Extensions` instead: a
 module inserts a value in `new`, and modules later in the stack see it in `new`
 and every module sees it in later hooks. Its type is the key, so a module that
-wants private data defines a private type for it.
+wants private data defines a private type for it. The `after_*` hooks and
+`finalize` get `Extensions` shared, so a value that changes during the request
+is published as a handle with interior mutability (an `Arc` of atomics), not
+re-inserted.
+
+Estimation uses both mechanisms for predictive admission. Estimation's server
+publishes the marker `PublishesEstimationInfo`, which admission's server
+requires, so a stack that puts admission first fails at construction. In `new`,
+estimation inserts an `EstimationInfo` (hop count and ingress flag, root
+method and its registry id, and a live view of the subtree's early-return and
+deadline-signal state); admission reads it in `new` and uses it in place of
+any `Context` field.
+
+### Estimation's wire data
+
+`EstimationLayer`'s section (`EstimationWire`) has two halves, one per
+direction. A request carries `EstimationRequestWire { hop_count, root_method }`:
+estimation itself writes the child's section in `before_child_rpc` with the hop
+count incremented (saturating at 255) and the root passed on unchanged, and the
+framework does not touch either. A response carries
+`EstimationResponseWire { compute_time_us, accumulated_compute_us,
+utilization, max_downstream_util, early_return_count, deadline_signal_count }`,
+written in `finalize`; a parent reads each child's in `after_child_rpc` and
+sums or maximizes the fields into its own.
+
+What estimation decides when a section is absent:
+
+- **Request**: the sender runs no estimation (a load generator, for example),
+  so the request is at ingress: hop count 0, and this method is the root. A
+  present section with hop count 0 means the same. Nothing else distinguishes
+  the two, and the framework supplies no default for either.
+- **Response**: the child reported nothing, so it adds nothing to its parent's
+  totals. Only successful responses are read; a child that returned a
+  `DeadlineExceeded` status counts as one early return without reading its
+  section, and any other failed child adds nothing.
 
 ## Selecting a stack
 
@@ -208,8 +246,8 @@ Rules for the agent stack:
 - Never delay `PriorityHint::infra()` work: it is reserved for infrastructure
   tasks.
 - Built-in modules are reusable only when their feature is enabled (e.g.
-  `crate::modules::EstimationLayer` needs `estimator`). Features also change
-  the `Context` wire layout, so build every service with the same features.
+  `crate::modules::EstimationLayer` needs `estimator`). Modules' wire
+  sections depend on the stack, so build every service with the same features.
 - Validate with `./scripts/check.sh "sched_slo,stack_custom"` and
   `./scripts/test.sh --feature "sched_slo,stack_custom"`.
   `libs/tonic/tests/masa_integration_tests/tests/custom_stack_serve.rs`
@@ -238,8 +276,9 @@ These policy decisions are still selected by features outside `masa-policy`:
   `sched_fifo`, `tailclipper`, `sched_mt*`).
 - **Wire context schema**: `ChildRpcContext` and `Context` fields are fixed by
   `masa-core`. A module that needs new propagated metadata should use its own
-  wire section; estimation and predictive-admission data (response metadata,
-  hop count, root method) are still in `Context`.
+  wire section. Estimation and predictive admission no longer keep anything in
+  `Context`; what remains there is request identity, SLO, deadline and
+  priority.
 - **Behavior toggles inside built-in modules**: e.g., `abort_slack`,
   `signal_slack`, `deadline_equals_slack` and the `est_*` estimator choice are
   still `cfg`/`const` switches inside `EstimationLayer`.

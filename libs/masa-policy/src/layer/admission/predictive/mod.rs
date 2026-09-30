@@ -115,7 +115,7 @@ impl Layer for PredAdmissionLayer {
 
     /// Admission check at true ingress — runs once, before any handler work.
     ///
-    /// Fires on the first poll of the request future (hop_count == 0 only).
+    /// Fires on the first poll of the request future (at ingress only).
     /// The `admission_checked` flag ensures it runs exactly once per request
     /// regardless of how many times the future is polled.
     #[inline]

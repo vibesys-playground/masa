@@ -2,9 +2,9 @@
 //!
 //! Mirrors `abort_slack`'s deadline check, but instead of aborting the
 //! request we record a flag that propagates to the ingress admission
-//! controller via `ResponseMeta`. Also gates latency-estimator updates so
-//! a signal-but-continue request's inflated wallclock does not poison the
-//! parent->child estimate.
+//! controller via `EstimationResponseWire`. Also gates latency-estimator
+//! updates so a signal-but-continue request's inflated wallclock does not
+//! poison the parent->child estimate.
 //!
 //! All entry points compile out to no-ops when the `signal_slack` feature
 //! is disabled — the `SIGNAL_SLACK` const collapses the `if` guard.
