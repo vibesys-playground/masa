@@ -164,14 +164,25 @@ mod scenarios {
     /// learned for the API; the tokens a request carries are paid from the
     /// bucket.
     pub async fn client_bucket_refills_with_time<H: Hooks>(w: &World<H>) {
-        // Free API: every acquisition succeeds, and what is handed out never
-        // exceeds the initial 10 tokens while no time passes.
         let mut handed_out = 0;
+
+        // Every token count handed out for a priced API covers the price.
+        w.client_learns_price("RwClientCheap", 3);
+        for _ in 0..200 {
+            if let Some(t) = w.client_acquires_tokens("RwClientCheap") {
+                assert!(t >= 3);
+                handed_out += t;
+            }
+        }
+
+        // Free API: every acquisition succeeds, even with an empty bucket.
         for _ in 0..200 {
             handed_out += w
                 .client_acquires_tokens("RwClientFree")
                 .expect("free API is never shed");
         }
+        // Tokens are paid from the initial 10-token bucket; none appear while
+        // no time passes.
         assert!(
             handed_out <= 10,
             "handed out {handed_out} of a 10-token bucket"
@@ -181,13 +192,6 @@ mod scenarios {
         w.client_learns_price("RwClientCostly", 200);
         for _ in 0..50 {
             assert_eq!(w.client_acquires_tokens("RwClientCostly"), None);
-        }
-        // Every token count actually handed out covers the price.
-        w.client_learns_price("RwClientCheap", 3);
-        for _ in 0..200 {
-            if let Some(t) = w.client_acquires_tokens("RwClientCheap") {
-                assert!(t >= 3);
-            }
         }
 
         // A second of refilling (about 100 refills of 5 tokens) reopens the
