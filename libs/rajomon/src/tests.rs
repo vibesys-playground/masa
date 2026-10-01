@@ -5,7 +5,7 @@ use tonic::{CowGrpcMethod, Response, Status};
 use rpcstack::{ChildOutcome, ChildState, Extensions, Module, WireIn, HEADER_NAME};
 
 use crate::module::{RajomonModule, RajomonServer, RajomonWire};
-use crate::{ClientTokenBucket, RajomonSharedState, CLIENT_TOKEN_BUCKET, RAJOMON_STATE};
+use crate::{ClientTokenBucket, RajomonSharedState, RAJOMON_STATE};
 
 // Default parameter values matching PolicyParams defaults.
 // Tests verify algorithmic behaviour with these specific values.
