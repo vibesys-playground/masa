@@ -4551,8 +4551,8 @@ name = "rpcstack-wire"
 version = "0.1.0"
 dependencies = [
  "base64 0.21.7",
+ "bincode",
  "serde",
- "serde_json",
 ]
 
 [[package]]
