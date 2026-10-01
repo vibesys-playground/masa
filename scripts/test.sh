@@ -125,6 +125,7 @@ semantics_combos=(
     "sched_pred,abort_slack,ac_pred,est_mean_var,deadline_equals_slack"
     "sched_oracle,abort_slo,est_mean_var"
     "sched_slo,stack_custom"
+    "sched_slo,sched_custom"
 )
 
 run_semantics_tests() {
