@@ -16,7 +16,7 @@
 //! `rajomon:eyJ0b2tlbnMiOjB9` for `{"tokens":0}`. Neither `.` nor `:` is in
 //! the base64 alphabet, and module names may not contain them, so the value is
 //! split with plain string searches. The primitives live in
-//! [`masa_core::wire`], because Hyper reads the budget section's priority
+//! [`rpcstack_wire`], because Hyper reads the budget section's priority
 //! before any module runs.
 //!
 //! The layout was chosen so that each section is independently addressable:
@@ -41,7 +41,8 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use masa_core::{wire as codec, MASA_CONTEXT_HEADER};
+use rpcstack_wire as codec;
+use rpcstack_wire::HEADER_NAME as MASA_CONTEXT_HEADER;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tonic::metadata::{Ascii, MetadataMap, MetadataValue};

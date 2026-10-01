@@ -1,18 +1,21 @@
-//! Layout of the `ctx` header value, shared by the crates that read it.
+//! Layout of the header value that carries a request's or response's module
+//! wire data, and the primitives to read and write it.
 //!
 //! ```text
 //! ctx: <name> : <base64 JSON> [ . <name> : <base64 JSON> ]*
 //! ```
 //!
-//! Each section carries one policy module's wire data. Neither `.` nor `:` is
-//! in the base64 alphabet, and section names may not contain them, so the
-//! value is split with plain string searches and one section is found
-//! without decoding any other.
+//! Each section carries one module's wire data. Neither `.` nor `:` is in the
+//! base64 alphabet, and section names may not contain them, so the value is
+//! split with plain string searches and one section is found without decoding
+//! any other.
 //!
-//! These are the primitives only. `masa-policy` builds the typed module API
-//! (`WireIn`, `WireOut`) on top of them; Hyper reaches them through
-//! [`read_priority_from_headers`](crate::read_priority_from_headers) to
-//! schedule a stream before any module runs.
+//! This crate knows nothing about HTTP or gRPC types, so a crate that cannot
+//! depend on them can still read one section selectively. `rpcstack` builds the
+//! typed module API (`WireIn`, `WireOut`) on top of these primitives.
+
+/// Name of the header that carries the sections.
+pub const HEADER_NAME: &str = "ctx";
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::de::DeserializeOwned;
@@ -25,6 +28,7 @@ pub const SECTION_SEPARATOR: char = '.';
 pub const NAME_SEPARATOR: char = ':';
 
 /// The `(name, payload)` pairs of a header value, undecoded.
+#[inline]
 pub fn sections(header: &str) -> impl Iterator<Item = (&str, &str)> {
     header
         .split(SECTION_SEPARATOR)
@@ -33,6 +37,7 @@ pub fn sections(header: &str) -> impl Iterator<Item = (&str, &str)> {
 }
 
 /// The undecoded payload of the section called `name`.
+#[inline]
 pub fn find_section<'a>(header: &'a str, name: &str) -> Option<&'a str> {
     sections(header).find_map(|(section, payload)| (section == name).then_some(payload))
 }
@@ -52,6 +57,7 @@ pub fn encode_payload<W: Serialize>(wire: &W) -> Result<String, String> {
 }
 
 /// Append `name:payload` to `header`.
+#[inline]
 pub fn push_section(header: &mut String, name: &str, payload: &str) {
     if !header.is_empty() {
         header.push(SECTION_SEPARATOR);

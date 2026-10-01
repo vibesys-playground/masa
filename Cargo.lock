@@ -3008,9 +3008,9 @@ dependencies = [
 name = "masa-core"
 version = "0.1.0"
 dependencies = [
- "base64 0.21.7",
  "http",
  "log",
+ "rpcstack-wire",
  "serde",
  "serde_json",
  "tower-service",
@@ -3045,6 +3045,7 @@ dependencies = [
  "once_cell",
  "rand 0.8.5",
  "rand_distr 0.4.3",
+ "rpcstack-wire",
  "serde",
  "serde_json",
  "smallvec",
@@ -4503,6 +4504,15 @@ dependencies = [
 [[package]]
 name = "rpcstack-sched"
 version = "0.1.0"
+
+[[package]]
+name = "rpcstack-wire"
+version = "0.1.0"
+dependencies = [
+ "base64 0.21.7",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "rstar"
