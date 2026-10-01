@@ -4533,6 +4533,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpcstack-probe"
+version = "0.2.0"
+dependencies = [
+ "http",
+ "masa-core",
+ "masa-policy",
+ "rpcstack",
+ "rpcstack-sched",
+ "rpcstack-tonic",
+ "serde",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "rpcstack-sched"
 version = "0.1.0"
 

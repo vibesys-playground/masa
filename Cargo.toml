@@ -39,6 +39,7 @@ members = [
   "libs/rpcstack-tonic",
   "libs/rpcstack-wire",
   "libs/rajomon",
+  "libs/rpcstack-probe",
 
   # evaluation applications
   "apps/hotel",

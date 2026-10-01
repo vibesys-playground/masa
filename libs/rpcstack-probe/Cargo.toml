@@ -1,0 +1,19 @@
+[package]
+name = "rpcstack-probe"
+version = "0.2.0"
+edition = "2021"
+publish = false
+description = "THROWAWAY expressiveness probe (round 2) for the final rpcstack framework"
+
+[dependencies]
+masa-core = { path = "../masa-core", features = ["test_clock"] }
+masa-policy = { path = "../masa-policy" }
+rpcstack = { path = "../rpcstack" }
+rpcstack-tonic = { path = "../rpcstack-tonic" }
+# sched_custom + lifecycle_trace: the real runtime then records the calls
+# custom::Queue receives (queue selection is compile-time).
+rpcstack-sched = { path = "../rpcstack-sched", features = ["sched_prio", "sched_custom", "lifecycle_trace"] }
+tonic = { path = "../tonic/tonic", default-features = false, features = ["transport"] }
+tokio = { path = "../tokio/tokio", features = ["rt", "macros", "sync", "time", "sched_prio", "sched_custom", "lifecycle_trace"] }
+http = "0.2"
+serde = { version = "1", features = ["derive"] }
