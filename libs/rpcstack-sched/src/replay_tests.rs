@@ -24,7 +24,7 @@ fn replay<Q: RunQueue<u64>>(cap: usize, script: &[Op]) -> (Vec<i64>, Vec<usize>)
     let mut lens = Vec::new();
     for op in script {
         match *op {
-            Push(id, prio) => q.push(id, &TaskView::new(id, &Meta::new(prio))),
+            Push(id, prio) => q.push(id, &TaskView::new(id, &Meta::new(prio), 0, 0, 0)),
             Pop => popped.push(q.pop().map_or(-1, |id| id as i64)),
         }
         lens.push(q.len());

@@ -328,8 +328,8 @@ policy.
 To try a queue:
 
 1. Edit `custom::Queue` in `libs/rpcstack-sched/src/custom.rs`: implement
-   `RunQueue` and read each task's `Meta` from the `TaskView` passed to
-   `push`. Edit only that file.
+   `RunQueue` and read each task's `Meta` and timing facts from the `TaskView`
+   passed to `push`. Edit only that file.
 2. Update the expected pop orders in `custom_replay_scripts` (in
    `libs/rpcstack-sched/src/replay_tests.rs`) if the new ordering is
    intentional, and run them with
@@ -350,6 +350,35 @@ To try a queue:
    `libs/tonic/tests/masa_integration_tests/tests/custom_sched_serve.rs`
    checks that the runtime selects `custom::Queue` and that generated stubs
    serve through it.
+
+### What a queue is told
+
+The runtime gives a queue facts and events and attaches no meaning to them.
+`TaskView` carries `task_id`, `meta`, `enqueued_at_ns` (when this enqueue
+happened), `first_enqueued_at_ns` (when the task first entered any queue) and
+`polls` (polls started so far). Times are nanoseconds on one process-wide
+clock with an arbitrary zero, so only differences matter and tests can pass any
+values. A re-pushed task keeps its id, first enqueue time and poll count.
+
+Besides `push` and `pop`, `RunQueue` has callbacks that default to doing
+nothing and that the current-thread run loop calls:
+
+- `on_poll_start(view)` just before a task is polled, and
+  `on_poll_end(view, PollOutcome::{Pending, Ready})` right after. `Ready`
+  means the task is finished for good (it completed, panicked, or its
+  cancellation was observed at the poll).
+- `on_idle()` when nothing is runnable, just before the thread parks or yields
+  to the driver.
+- `on_task_exit(task_id)` once per task, after the `on_poll_end(.., Ready)` of
+  the poll it ended in, so a queue that keeps per-task state can free it. A
+  task cancelled while queued during runtime shutdown gets it with no poll
+  around it.
+
+Tasks taken from the cross-thread injection queue never pass through `push`,
+but they do get the poll and exit callbacks. The multi-thread runtime
+(`sched_mt*`) does not make any of these calls yet. Tests of the call order use
+`custom::Queue` built with the `lifecycle_trace` feature, which records the
+calls it receives; it has no other effect.
 
 ## Not yet modular
 

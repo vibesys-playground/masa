@@ -25,6 +25,7 @@ use std::task::{Context, Poll, Waker};
 
 use super::poll_hook::PollHook;
 
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// The task cell. Contains the components of the task.
@@ -190,31 +191,70 @@ pub(crate) struct Header {
     pub(super) tracing_id: Option<tracing::Id>,
 }
 
+/// Nanoseconds since a process-wide epoch fixed at the first call.
+///
+/// This is the clock behind the times a run queue sees in its `TaskView`.
+fn clock_ns() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let epoch = *EPOCH.get_or_init(Instant::now);
+    let since = Instant::now().duration_since(epoch);
+    since.as_secs() * 1_000_000_000 + u64::from(since.subsec_nanos())
+}
+
+/// Per-task timing facts the scheduler records for run queues.
 #[derive(Clone)]
 pub(crate) struct TraceTimer {
-    q_lat: Duration,
-    last_enqueue: Option<Instant>,
+    q_lat_ns: u64,
+    last_enqueue_ns: u64,
+    first_enqueue_ns: u64,
+    polls: u32,
+    enqueued: bool,
 }
 
 impl TraceTimer {
     pub(crate) fn new() -> Self {
         TraceTimer {
-            q_lat: Duration::ZERO,
-            last_enqueue: None,
+            q_lat_ns: 0,
+            last_enqueue_ns: 0,
+            first_enqueue_ns: 0,
+            polls: 0,
+            enqueued: false,
         }
     }
 
     pub(crate) fn set_enqueue_time(&mut self) {
-        self.last_enqueue = Some(Instant::now());
-        self.q_lat = Duration::ZERO;
+        let now = clock_ns();
+        self.last_enqueue_ns = now;
+        if !self.enqueued {
+            self.first_enqueue_ns = now;
+            self.enqueued = true;
+        }
+        self.q_lat_ns = 0;
     }
 
     pub(crate) fn record_queue_lat(&mut self) {
-        self.q_lat = Instant::now().duration_since(self.last_enqueue.unwrap());
+        self.q_lat_ns = clock_ns().saturating_sub(self.last_enqueue_ns);
+    }
+
+    /// Count a poll that is about to start.
+    pub(crate) fn begin_poll(&mut self) {
+        self.polls = self.polls.wrapping_add(1);
     }
 
     pub(crate) fn q_lat(&self) -> Duration {
-        self.q_lat
+        Duration::from_nanos(self.q_lat_ns)
+    }
+
+    pub(crate) fn last_enqueue_ns(&self) -> u64 {
+        self.last_enqueue_ns
+    }
+
+    pub(crate) fn first_enqueue_ns(&self) -> u64 {
+        self.first_enqueue_ns
+    }
+
+    pub(crate) fn polls(&self) -> u32 {
+        self.polls
     }
 }
 

@@ -23,12 +23,16 @@ pub mod custom;
 pub mod default_policy;
 mod meta;
 mod queue;
+#[cfg(feature = "lifecycle_trace")]
+pub mod trace;
 
+#[cfg(test)]
+mod lifecycle_tests;
 #[cfg(test)]
 mod replay_tests;
 
 pub use meta::Meta;
-pub use queue::{RunQueue, SchedFlavor, TaskView};
+pub use queue::{PollOutcome, RunQueue, SchedFlavor, TaskView};
 
 /// The run queue selected by Cargo features.
 ///
