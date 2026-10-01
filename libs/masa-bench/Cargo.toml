@@ -1,0 +1,67 @@
+[package]
+name = "masa-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Dev-only benchmark suite for the Masa RPC stack: per-RPC hook cost, wire codec, priority read, spawn+poll and run-queue costs"
+
+# Not a production crate: nothing depends on it. Each benchmark is a plain
+# `harness = false` binary that prints `key value` lines; see README.md and
+# `scripts/bench.sh`.
+#
+# Lines between `BEGIN rpcstack-only` and `END rpcstack-only` need crates that
+# older refs do not have; `scripts/bench.sh` deletes them for such refs.
+[dependencies]
+masa = { path = "../masa" }
+tonic = { path = "../tonic/tonic" }
+tokio = { path = "../tokio/tokio", features = ["rt", "macros", "time"] }
+http = "0.2"
+# BEGIN rpcstack-only
+rpcstack-sched = { path = "../rpcstack-sched" }
+# END rpcstack-only
+
+[features]
+# Selects the `compat` layer for refs that predate the rpcstack refactor (root
+# contexts built with `masa_core::ContextBuilder`). `scripts/bench.sh` turns it
+# on automatically for such refs.
+legacy-main = []
+
+# Masa policy features, forwarded so one benchmark binary measures one stack.
+sched_slo = ["masa/sched_slo"]
+sched_pred = ["masa/sched_pred"]
+abort_slo = ["masa/abort_slo"]
+abort_slack = ["masa/abort_slack"]
+ac_pred = ["masa/ac_pred"]
+ac_rajomon = ["masa/ac_rajomon"]
+est_mean_var = ["masa/est_mean_var"]
+estimator = ["masa/estimator"]
+trace_queue_latency = ["masa/trace_queue_latency"]
+
+# Tokio run queue that `spawn_poll` measures (none selected: FIFO).
+queue_prio = ["tokio/sched_prio"]
+queue_tailclipper = ["tokio/tailclipper"]
+# BEGIN rpcstack-only
+queue_custom = ["tokio/sched_custom"]
+# END rpcstack-only
+
+[[bench]]
+name = "hook_cost"
+harness = false
+
+[[bench]]
+name = "priority_read"
+harness = false
+
+[[bench]]
+name = "wire_codec"
+harness = false
+
+[[bench]]
+name = "spawn_poll"
+harness = false
+
+# BEGIN rpcstack-only
+[[bench]]
+name = "run_queue"
+harness = false
+# END rpcstack-only

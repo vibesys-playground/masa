@@ -2988,6 +2988,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "masa-bench"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "masa",
+ "rpcstack-sched",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "masa-benchmark"
 version = "0.1.0"
 dependencies = [
