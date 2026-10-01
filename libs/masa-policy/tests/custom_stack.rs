@@ -66,40 +66,55 @@ fn send_child<S: ModuleStack>(parent: &Parent<S>) -> Result<Context, Status> {
 
 // ── Modules ─────────────────────────────────────────────────────────────
 
-/// Assigns every child RPC a fixed priority.
-#[derive(Debug)]
-struct FixedChildPriority<const P: u64>;
+/// Defines a module that assigns every child RPC a fixed priority. A stack
+/// holds one module per name, so each instance needs its own type.
+macro_rules! fixed_child_priority {
+    ($(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        #[derive(Debug)]
+        struct $name<const P: u64>;
 
-impl<const P: u64> Module for FixedChildPriority<P> {
-    type Server = ();
-    const NAME: &'static str = "FixedChildPriority";
-    type Wire = ();
+        impl<const P: u64> Module for $name<P> {
+            type Server = ();
+            const NAME: &'static str = stringify!($name);
+            type Wire = ();
 
-    fn requires(requires: &mut Requires) {
-        requires.module::<BudgetModule>();
-    }
+            fn requires(requires: &mut Requires) {
+                requires.module::<BudgetModule>();
+            }
 
-    fn new(
-        _method: &CowGrpcMethod,
-        _server: &(),
-        _wire: &WireIn<'_>,
-        _ext: &mut Extensions,
-    ) -> Self {
-        Self
-    }
+            fn new(
+                _method: &CowGrpcMethod,
+                _server: &(),
+                _wire: &WireIn<'_>,
+                _ext: &mut Extensions,
+            ) -> Self {
+                Self
+            }
 
-    fn before_child_rpc<T>(
-        &self,
-        _child_method: &CowGrpcMethod,
-        child: &mut ChildState,
-        _request: &mut Request<T>,
-        _child_wire: &mut WireOut,
-        _ext: &mut Extensions,
-    ) -> Result<(), Status> {
-        child.propose(ChildPriority(PriorityHint::new(P)))?;
-        Ok(())
-    }
+            fn before_child_rpc<T>(
+                &self,
+                _child_method: &CowGrpcMethod,
+                child: &mut ChildState,
+                _request: &mut Request<T>,
+                _child_wire: &mut WireOut,
+                _ext: &mut Extensions,
+            ) -> Result<(), Status> {
+                child.propose(ChildPriority(PriorityHint::new(P)))?;
+                Ok(())
+            }
+        }
+    };
 }
+
+fixed_child_priority!(
+    /// Assigns every child RPC a fixed priority.
+    FixedChildPriority
+);
+fixed_child_priority!(
+    /// Assigns every child RPC a fixed priority, after `FixedChildPriority`.
+    LaterChildPriority
+);
 
 /// Rejects every child RPC.
 #[derive(Debug)]
@@ -344,7 +359,7 @@ fn custom_module_sets_child_priority() {
 
 #[test]
 fn later_module_overrides_earlier_module() {
-    type S = budgeted![FixedChildPriority<7>, FixedChildPriority<9>];
+    type S = budgeted![FixedChildPriority<7>, LaterChildPriority<9>];
     let parent = begin::<S>("custom-order", time_now() + 1_000);
 
     let child = send_child(&parent).unwrap();

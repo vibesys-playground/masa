@@ -17,8 +17,6 @@ pub(crate) mod module;
 pub mod policy_params;
 /// Method registry for mapping service/method strings to IDs.
 pub mod registry;
-/// Codec for per-module wire data carried in the context header.
-pub mod wire;
 
 #[cfg(feature = "stack_custom")]
 pub use agent::AgentStack;
@@ -39,7 +37,8 @@ pub use module::{
     ModuleServer, ModuleStack, Outcome, Proposal, Proposals, Rejection, Requires, ServerInit,
     Stack,
 };
-pub use wire::{peek, WireError, WireIn, WireOut};
+pub use rpcstack::wire;
+pub use rpcstack::{peek, policy_stack, WireError, WireIn, WireOut};
 
 /// Masa's built-in policy modules, for reuse in custom stacks. Each is
 /// available only when its feature is enabled.

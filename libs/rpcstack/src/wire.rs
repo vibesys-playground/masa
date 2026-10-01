@@ -15,9 +15,9 @@
 //! Each module with wire data is one section, for example
 //! `rajomon:eyJ0b2tlbnMiOjB9` for `{"tokens":0}`. Neither `.` nor `:` is in
 //! the base64 alphabet, and module names may not contain them, so the value is
-//! split with plain string searches. The primitives live in
-//! [`rpcstack_wire`], because Hyper reads the budget section's priority
-//! before any module runs.
+//! split with plain string searches. The primitives live in [`rpcstack_wire`],
+//! which has no HTTP or gRPC dependencies, so a crate that cannot depend on
+//! this one can still read a single section.
 //!
 //! The layout was chosen so that each section is independently addressable:
 //! finding one section scans section names only and decodes nothing, and
@@ -42,7 +42,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 use rpcstack_wire as codec;
-use rpcstack_wire::HEADER_NAME as MASA_CONTEXT_HEADER;
+use rpcstack_wire::HEADER_NAME;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tonic::metadata::{Ascii, MetadataMap, MetadataValue};
@@ -67,8 +67,8 @@ impl fmt::Display for WireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "invalid MASA module wire data in header `{MASA_CONTEXT_HEADER}`; MASA-enabled \
-             services require all binaries to be built from the same policy stack: {}",
+            "invalid module wire data in header `{HEADER_NAME}`; all binaries of a deployment \
+             must be built from the same policy stack: {}",
             self.detail
         )
     }
@@ -98,7 +98,7 @@ impl<'a> WireIn<'a> {
     /// Split the `ctx` header of `headers` into sections. Decodes nothing; a
     /// missing header yields no sections.
     pub fn from_headers(headers: &'a http::HeaderMap) -> Result<Self, WireError> {
-        match headers.get(MASA_CONTEXT_HEADER) {
+        match headers.get(HEADER_NAME) {
             None => Ok(Self::default()),
             Some(value) => Self::from_header_bytes(value.as_bytes()),
         }
@@ -107,7 +107,7 @@ impl<'a> WireIn<'a> {
     /// Split the `ctx` header of `metadata` into sections. Decodes nothing; a
     /// missing header yields no sections.
     pub fn from_metadata(metadata: &'a MetadataMap) -> Result<Self, WireError> {
-        match metadata.get(MASA_CONTEXT_HEADER) {
+        match metadata.get(HEADER_NAME) {
             None => Ok(Self::default()),
             Some(value) => Self::from_header_bytes(value.as_encoded_bytes()),
         }
@@ -197,7 +197,8 @@ impl WireOut {
         }
     }
 
-    pub(crate) fn header_value(&self) -> String {
+    /// The `ctx` header value these sections make.
+    pub fn header_value(&self) -> String {
         let len = self
             .sections
             .iter()
@@ -214,14 +215,14 @@ impl WireOut {
     /// it carried; with no sections the header is removed.
     pub fn install(&self, metadata: &mut MetadataMap) {
         if self.sections.is_empty() {
-            metadata.remove(MASA_CONTEXT_HEADER);
+            metadata.remove(HEADER_NAME);
             return;
         }
         let value: MetadataValue<Ascii> = self
             .header_value()
             .parse()
             .expect("base64, `.`, `:` and names are ASCII");
-        metadata.insert(MASA_CONTEXT_HEADER, value);
+        metadata.insert(HEADER_NAME, value);
     }
 }
 
@@ -265,7 +266,7 @@ mod tests {
             codec::push_section(&mut value, name, payload);
         }
         let mut headers = http::HeaderMap::new();
-        headers.insert(MASA_CONTEXT_HEADER, value.parse().unwrap());
+        headers.insert(HEADER_NAME, value.parse().unwrap());
         headers
     }
 
@@ -273,9 +274,9 @@ mod tests {
     fn no_sections_is_an_empty_header() {
         assert_eq!(WireOut::new().header_value(), "");
         let mut metadata = MetadataMap::new();
-        metadata.insert(MASA_CONTEXT_HEADER, "a:NQ==".parse().unwrap());
+        metadata.insert(HEADER_NAME, "a:NQ==".parse().unwrap());
         WireOut::new().install(&mut metadata);
-        assert!(metadata.get(MASA_CONTEXT_HEADER).is_none());
+        assert!(metadata.get(HEADER_NAME).is_none());
     }
 
     #[test]
@@ -298,11 +299,11 @@ mod tests {
     #[test]
     fn install_replaces_the_previous_header() {
         let mut metadata = MetadataMap::new();
-        metadata.insert(MASA_CONTEXT_HEADER, "old:NQ==".parse().unwrap());
+        metadata.insert(HEADER_NAME, "old:NQ==".parse().unwrap());
         let mut out = WireOut::new();
         out.put_named("new", &1u32).unwrap();
         out.install(&mut metadata);
-        let value = metadata.get(MASA_CONTEXT_HEADER).unwrap().to_str().unwrap();
+        let value = metadata.get(HEADER_NAME).unwrap().to_str().unwrap();
         assert!(value.starts_with("new:") && !value.contains("old"));
     }
 

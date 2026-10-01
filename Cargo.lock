@@ -3045,7 +3045,7 @@ dependencies = [
  "once_cell",
  "rand 0.8.5",
  "rand_distr 0.4.3",
- "rpcstack-wire",
+ "rpcstack",
  "serde",
  "serde_json",
  "smallvec",
@@ -4499,6 +4499,17 @@ dependencies = [
  "prost",
  "tonic",
  "tonic-build",
+]
+
+[[package]]
+name = "rpcstack"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "rpcstack-wire",
+ "serde",
+ "smallvec",
+ "tonic",
 ]
 
 [[package]]

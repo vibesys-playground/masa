@@ -22,11 +22,10 @@ use crate::context_ext::{
     get_service_name_override_from_headers, get_service_name_override_from_metadata,
 };
 use crate::masa_stack::MasaStack;
-use crate::module::{
-    validate_stack, ChildOutcome, ChildState, Early, Extensions, MissingDependency, ModuleServer,
-    ModuleStack, Outcome, ServerInit,
+use rpcstack::{
+    build_server, ChildOutcome, ChildState, Early, Extensions, MissingDependency, ModuleStack,
+    Outcome, WireIn, WireOut,
 };
-use crate::wire::{WireIn, WireOut};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
 use tonic::{CowGrpcMethod, GrpcMethod, Request, Response, Status};
 
@@ -87,9 +86,8 @@ impl<S: ModuleStack> ServerContext<S> {
     ///
     /// Panics if two modules share a wire name.
     pub fn try_new(service_name: &'static str) -> Result<Self, MissingDependency> {
-        validate_stack::<S>()?;
         Ok(Self {
-            modules: S::Server::new(&mut ServerInit::new(service_name))?,
+            modules: build_server::<S>(service_name)?,
         })
     }
 }

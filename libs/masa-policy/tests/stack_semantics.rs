@@ -159,6 +159,7 @@ macro_rules! recorder {
 recorder!(A, "a");
 recorder!(B, "b");
 recorder!(C, "c");
+recorder!(D, "d");
 recorder!(RejectsChild, "rejects_child", reject_child);
 recorder!(RejectsSeal, "rejects_seal", reject_seal);
 recorder!(RejectsPoll, "rejects_poll", reject_poll);
@@ -593,7 +594,7 @@ fn numbers_seen<S: ModuleStack>(service: &'static str) -> Vec<String> {
 fn per_child_state_does_not_depend_on_where_modules_sit() {
     let plain = numbers_seen::<policy_stack![Numbers, ReadsNumbers]>("child-state-plain");
     let padded =
-        numbers_seen::<policy_stack![A, Numbers, B, C, ReadsNumbers, A]>("child-state-padded");
+        numbers_seen::<policy_stack![A, Numbers, B, C, ReadsNumbers, D]>("child-state-padded");
     let numbers = |log: &[String]| -> Vec<String> {
         log.iter()
             .filter(|line| line.starts_with("child number"))

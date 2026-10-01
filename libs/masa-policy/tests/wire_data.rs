@@ -334,7 +334,7 @@ impl Module for AlphaTwin {
 }
 
 #[test]
-#[should_panic(expected = "wire name `alpha`")]
+#[should_panic(expected = "share the name `alpha`")]
 fn duplicate_wire_names_are_rejected() {
     let _ = Server::<policy_stack![Alpha, AlphaTwin]>::new("wire.Service");
 }
