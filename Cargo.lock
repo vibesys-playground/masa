@@ -3008,6 +3008,7 @@ dependencies = [
 name = "masa-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.21.7",
  "http",
  "log",
  "rpcstack-wire",
@@ -3047,6 +3048,7 @@ dependencies = [
  "rand_distr 0.4.3",
  "rpcstack",
  "rpcstack-tonic",
+ "rpcstack-wire",
  "serde",
  "serde_json",
  "tokio",

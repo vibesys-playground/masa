@@ -210,7 +210,7 @@ Masa modifies `hyper` to be priority-aware on the server side.
 ### Server-Side Request Handling
 In `libs/hyper/src/proto/h2/server.rs`, when `hyper` receives a new HTTP/2 stream (request):
 1.  It checks for the `ctx` header.
-2.  **If present**: It calls `masa_core::read_priority_from_headers`, which finds the `budget` section of the header and decodes only its priority. Note: these `.unwrap()` calls will **panic** on malformed input (see `docs/MASA_IMPROVEMENTS.md`).
+2.  **If present**: It calls `masa_core::read_priority_from_headers`, which finds the `budget` section of the header and reads only its priority: it decodes the section into a stack buffer and scans the JSON array for its last element, without allocating, and falls back to the general decoder for anything the scan does not recognize, so values and errors are those of a full decode. This runs for every stream (about 230 ns, against about 470 ns for deserializing the section; `libs/masa-policy/tests/wire_bench.rs`). Note: these `.unwrap()` calls will **panic** on malformed input (see `docs/MASA_IMPROVEMENTS.md`).
 3.  It calls `exec.execute_h2stream_with_prio(future, prio)`.
 4.  **If absent**: It calls `exec.execute_h2stream(future)`, which defaults to `PriorityHint::infra()` (highest priority, value 0). This means requests without a `ctx` header are treated as infrastructure and always execute first.
 

@@ -21,6 +21,7 @@ serde_json = "1"
 
 [dev-dependencies]
 tokio = { path = "../tokio/tokio", features = ["rt", "macros"] }
+rpcstack-wire = { path = "../rpcstack-wire" }
 
 [features]
 default = []
