@@ -428,6 +428,7 @@ fn generate_named(
             M: tonic::masa::Hooks
         > tonic::server::NamedService for #server_service<T, M> {
             const NAME: &'static str = #service_name;
+            const INGRESS: Option<tonic::masa::IngressFn> = Some(<M as tonic::masa::Hooks>::ingress);
         }
     }
 }

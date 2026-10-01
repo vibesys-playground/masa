@@ -188,6 +188,7 @@ where
     S: NamedService,
 {
     const NAME: &'static str = S::NAME;
+    const INGRESS: Option<tonic::masa::IngressFn> = S::INGRESS;
 }
 
 pub(crate) mod util {

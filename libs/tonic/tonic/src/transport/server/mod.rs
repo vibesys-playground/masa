@@ -131,6 +131,7 @@ pub struct Router<L = Identity> {
 
 impl<S: NamedService, T> NamedService for Either<S, T> {
     const NAME: &'static str = S::NAME;
+    const INGRESS: Option<crate::masa::IngressFn> = S::INGRESS;
 }
 
 impl Server {
@@ -624,12 +625,13 @@ impl<L> Router<L> {
     {
         let incoming = TcpIncoming::new(addr, self.server.tcp_nodelay, self.server.tcp_keepalive)
             .map_err(super::Error::from_source)?;
+        let exec = self.routes.exec();
         self.server
             .serve_with_shutdown::<_, _, future::Ready<()>, _, _, ResBody>(
                 self.routes.prepare(),
                 incoming,
                 None,
-                Exec::Default,
+                exec,
             )
             .await
     }
@@ -685,8 +687,9 @@ impl<L> Router<L> {
     {
         let incoming = TcpIncoming::new(addr, self.server.tcp_nodelay, self.server.tcp_keepalive)
             .map_err(super::Error::from_source)?;
+        let exec = self.routes.exec();
         self.server
-            .serve_with_shutdown(self.routes.prepare(), incoming, Some(signal), Exec::Default)
+            .serve_with_shutdown(self.routes.prepare(), incoming, Some(signal), exec)
             .await
     }
 
@@ -712,12 +715,13 @@ impl<L> Router<L> {
         ResBody: http_body::Body<Data = Bytes> + Send + 'static,
         ResBody::Error: Into<crate::Error>,
     {
+        let exec = self.routes.exec();
         self.server
             .serve_with_shutdown::<_, _, future::Ready<()>, _, _, ResBody>(
                 self.routes.prepare(),
                 incoming,
                 None,
-                Exec::Default,
+                exec,
             )
             .await
     }
@@ -748,8 +752,9 @@ impl<L> Router<L> {
         ResBody: http_body::Body<Data = Bytes> + Send + 'static,
         ResBody::Error: Into<crate::Error>,
     {
+        let exec = self.routes.exec();
         self.server
-            .serve_with_shutdown(self.routes.prepare(), incoming, Some(signal), Exec::Default)
+            .serve_with_shutdown(self.routes.prepare(), incoming, Some(signal), exec)
             .await
     }
 

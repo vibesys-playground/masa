@@ -2373,7 +2373,6 @@ dependencies = [
  "itoa",
  "libc",
  "log",
- "masa-core",
  "matches",
  "num_cpus",
  "pin-project-lite",
@@ -3008,6 +3007,7 @@ dependencies = [
 name = "masa-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.21.7",
  "http",
  "log",
  "rpcstack-wire",
@@ -5809,6 +5809,7 @@ dependencies = [
  "quickcheck_macros",
  "rand 0.8.5",
  "rand_distr 0.4.3",
+ "rpcstack-sched",
  "rustls-native-certs 0.7.3",
  "rustls-pemfile 2.2.0",
  "rustls-pki-types",

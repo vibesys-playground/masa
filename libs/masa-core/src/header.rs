@@ -1,5 +1,4 @@
-use crate::context::{PriorityPeek, BUDGET_SECTION};
-use crate::{wire, Context, PriorityHint, MASA_CONTEXT_HEADER};
+use crate::{Context, MASA_CONTEXT_HEADER};
 
 fn header_value(headers: &http::HeaderMap) -> &str {
     let ctx = headers
@@ -19,21 +18,10 @@ pub fn read_context<B>(req: &http::Request<B>) -> Context {
     read_context_from_headers(req.headers())
 }
 
-/// Read the priority hint from MASA context HTTP headers.
-///
-/// Decodes the priority of the budget section only; Hyper calls this for every
-/// stream, before any policy module has run.
-pub fn read_priority_from_headers(headers: &http::HeaderMap) -> PriorityHint {
-    let payload = wire::find_section(header_value(headers), BUDGET_SECTION)
-        .unwrap_or_else(|| panic!("{}", crate::missing_budget_section_message()));
-    wire::decode_payload::<PriorityPeek>(payload)
-        .unwrap_or_else(|err| panic!("{}", crate::invalid_budget_section_message(err)))
-        .5
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PriorityHint;
     use http::HeaderValue;
 
     #[test]
@@ -111,17 +99,5 @@ mod tests {
         );
 
         let _ = read_context_from_headers(&headers);
-    }
-
-    #[test]
-    fn read_priority_from_headers_preserves_priority_hint() {
-        let ctx = Context::new("test.Service", 9, 100, 10, 110, PriorityHint::new(42));
-        let mut headers = http::HeaderMap::new();
-        headers.insert(
-            MASA_CONTEXT_HEADER,
-            HeaderValue::from_str(&ctx.to_header_string()).unwrap(),
-        );
-
-        assert_eq!(read_priority_from_headers(&headers), PriorityHint::new(42));
     }
 }

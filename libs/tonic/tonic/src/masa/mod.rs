@@ -14,5 +14,8 @@ pub mod noop;
 #[cfg(feature = "transport")]
 pub mod runtime;
 
-pub use hooks::{ClientHooks, Hooks, ParentHooks, ServerHooks};
+pub use hooks::{ClientHooks, Hooks, IngressFn, ParentHooks, ServerHooks};
+
+/// The per-task scheduling metadata that [`Hooks::ingress`] decides.
+pub use rpcstack_sched::Meta;
 pub use thread_local::{client, server};

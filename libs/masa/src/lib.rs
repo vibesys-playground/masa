@@ -6,7 +6,7 @@ pub use masa_policy::{
     get_masa_context_from_metadata, get_method_name_override_from_headers,
     get_method_name_override_from_metadata, get_service_name_override_from_headers,
     get_service_name_override_from_metadata, read_context, read_context_from_headers,
-    read_priority_from_headers, set_masa_context_in_metadata, set_method_name_override_in_headers,
+    set_masa_context_in_metadata, set_method_name_override_in_headers,
     set_service_name_override_in_headers, ContextBuilder, MasaRequestExt, MasaResponseExt,
     MasaStatusExt, WireError, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };

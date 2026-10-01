@@ -11,13 +11,21 @@
 // in `before_child_rpc`; `BudgetModule`, the owner of both decisions, resolves
 // them in `seal_child_rpc`, which the framework runs after all of them. Its
 // rule is that the last proposal wins; the framework has no rule.
+//
+// The module also owns the ingress decision, the `Meta` of the task that serves
+// the request: its own proposal is the sender's priority, which it reads
+// without decoding the rest of the section, and the last proposal wins.
 
 use std::sync::Arc;
 
 use masa_core::{Api, Context, Latency, PriorityHint, RequestId, Timestamp, BUDGET_SECTION};
+use tonic::masa::Meta;
 use tonic::{CowGrpcMethod, Response, Status};
 
-use super::{ChildState, Extensions, MissingDependency, Module, ModuleServer, Outcome, ServerInit};
+use super::{
+    ChildState, Extensions, Ingress, MissingDependency, Module, ModuleServer, Outcome, Proposal,
+    ServerInit,
+};
 use crate::wire::{WireIn, WireOut};
 
 // ── Root priority ───────────────────────────────────────────────────────
@@ -223,6 +231,24 @@ impl Module for BudgetModule {
     type Server = BudgetServer;
     const NAME: &'static str = BUDGET_SECTION;
     type Wire = Context;
+
+    const OWNS_INGRESS: bool = true;
+
+    /// Proposes the priority the sender wrote, reading only that field.
+    fn ingress(wire: &WireIn<'_>, ingress: &mut Ingress) {
+        let payload = wire
+            .get_encoded::<Self>()
+            .unwrap_or_else(|| panic!("{}", masa_core::missing_budget_section_message()));
+        let priority = masa_core::peek_priority(payload)
+            .unwrap_or_else(|err| panic!("{}", masa_core::invalid_budget_section_message(err)));
+        ingress.propose(Meta::new(priority.value()));
+    }
+
+    /// The last proposal wins, as for the child's priority; the budget module
+    /// proposes first, so with no other proposer the sender's priority stands.
+    fn resolve_ingress(proposals: &[Proposal<Meta>]) -> Option<Meta> {
+        proposals.last().map(|proposal| proposal.value)
+    }
 
     fn new(
         _method: &CowGrpcMethod,

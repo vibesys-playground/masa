@@ -5,8 +5,13 @@
 
 use std::{sync::Arc, task::Poll};
 
+use rpcstack_sched::Meta;
+
 use crate::body::BoxBody;
 use crate::{http, GrpcMethod, Request, Response, Status};
+
+/// The shape of [`Hooks::ingress`], for code that holds one as a value.
+pub type IngressFn = fn(&http::HeaderMap) -> Option<Meta>;
 
 // TODO: add notes on trait bounds
 /// Trait for specifying the set of hooks to apply.
@@ -17,6 +22,23 @@ pub trait Hooks: Send + Sync + 'static {
     type ChildContext: ClientHooks;
     /// The state and hook implementations maintained per in the server-side request handlers.
     type ParentContext: ParentHooks<Self::ChildContext, Self::ServerContext>;
+
+    /// Decide the scheduling [`Meta`] of the task that will serve a request,
+    /// from the request's headers, before the task is queued.
+    ///
+    /// The transport calls this once per HTTP/2 stream, before any
+    /// [`ParentHooks`] exist: it is a function of the headers alone, with no
+    /// per-request or per-service state, and it runs on the connection's hot
+    /// path, so it should read only what it needs. `None` means no decision,
+    /// and the task gets the runtime's default for unannotated spawns.
+    ///
+    /// A service's hooks type supplies the function (see
+    /// [`NamedService::INGRESS`](crate::server::NamedService::INGRESS)); a
+    /// server uses the first one among its services, so all services of a
+    /// server must use one hooks type.
+    fn ingress(_headers: &http::HeaderMap) -> Option<Meta> {
+        None
+    }
 }
 
 /// Lifecycle hooks of a Masa server.
@@ -167,6 +189,13 @@ mod tests {
         parent
             .before_poll::<()>()
             .expect("noop before_poll should not fail");
+    }
+
+    #[test]
+    fn noop_hooks_make_no_ingress_decision() {
+        use super::Hooks;
+
+        assert_eq!(noop::NoopHooks::ingress(&http::HeaderMap::new()), None);
     }
 
     #[test]

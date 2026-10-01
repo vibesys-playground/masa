@@ -34,9 +34,9 @@ mod oracle;
 mod queue_latency;
 
 pub use rpcstack::{
-    ChildOutcome, ChildState, DecisionClosed, Early, Extensions, MissingDependency, Module,
-    ModuleServer, ModuleStack, Outcome, Proposal, Proposals, Rejection, Requires, ServerInit,
-    Stack,
+    ChildOutcome, ChildState, DecisionClosed, Early, Extensions, Ingress, MissingDependency,
+    Module, ModuleServer, ModuleStack, Outcome, Proposal, Proposals, Rejection, Requires,
+    ServerInit, Stack,
 };
 
 #[cfg(feature = "ac_pred")]

@@ -183,6 +183,7 @@ where
 
 impl<S: NamedService> NamedService for GrpcWebService<S> {
     const NAME: &'static str = S::NAME;
+    const INGRESS: Option<tonic::masa::IngressFn> = S::INGRESS;
 }
 
 impl<'a> RequestKind<'a> {

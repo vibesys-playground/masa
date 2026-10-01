@@ -23,4 +23,11 @@ pub trait NamedService {
     ///
     /// [here]: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
     const NAME: &'static str;
+
+    /// How a server decides the scheduling `Meta` of the task serving each
+    /// HTTP/2 stream, before it is queued; see
+    /// [`Hooks::ingress`](crate::masa::Hooks::ingress). Generated services
+    /// supply their hooks type's function. A service that wraps another
+    /// forwards it; the default is no decision.
+    const INGRESS: Option<crate::masa::IngressFn> = None;
 }

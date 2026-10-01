@@ -31,9 +31,11 @@ use std::task::Poll;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use tonic::masa::Meta;
 use tonic::{CowGrpcMethod, Response, Status};
 
-use crate::extensions::{ChildState, Extensions};
+use crate::extensions::{ChildState, Extensions, Proposal};
+use crate::ingress::Ingress;
 use crate::wire::{assert_valid_name, WireIn, WireOut};
 
 // ── Server state and dependencies ───────────────────────────────────────
@@ -194,6 +196,7 @@ pub struct ModuleDecl {
     name: &'static str,
     has_wire: bool,
     is_empty: bool,
+    owns_ingress: bool,
     requires: Requires,
 }
 
@@ -207,6 +210,7 @@ impl ModuleDecl {
             name: M::NAME,
             has_wire: TypeId::of::<M::Wire>() != TypeId::of::<()>(),
             is_empty: TypeId::of::<M>() == TypeId::of::<()>(),
+            owns_ingress: M::OWNS_INGRESS,
             requires,
         }
     }
@@ -230,6 +234,15 @@ pub fn build_server<S: ModuleStack>(
 fn validate_stack<S: ModuleStack>() -> Result<(), MissingDependency> {
     let mut modules = Vec::new();
     S::describe(&mut modules);
+
+    let mut owners = modules.iter().filter(|module| module.owns_ingress);
+    if let (Some(first), Some(second)) = (owners.next(), owners.next()) {
+        panic!(
+            "modules `{}` and `{}` in the policy stack both own the ingress decision \
+             (`Module::OWNS_INGRESS`); exactly one module may settle it",
+            first.type_name, second.type_name
+        );
+    }
 
     for (at, module) in modules.iter().enumerate().filter(|(_, m)| !m.is_empty) {
         if module.has_wire {
@@ -378,6 +391,37 @@ pub trait Module: Send + Sync + std::fmt::Debug + 'static {
     /// [`ChildState`]: a module that does so unconditionally would otherwise
     /// fail at its first request.
     fn requires(_requires: &mut Requires) {}
+
+    /// Whether this module owns the ingress decision: it settles, in
+    /// [`Module::resolve_ingress`], the `Meta` of the task that serves a
+    /// request from the proposals of every module's [`Module::ingress`]. At most
+    /// one module of a stack may own it (checked when the server state is
+    /// built). Without an owner, no request gets a `Meta` from the stack.
+    const OWNS_INGRESS: bool = false;
+
+    /// Propose the `Meta` of the task that will serve a request, before the
+    /// task is queued.
+    ///
+    /// Runs for every module, in stack order, once per request stream, before
+    /// any per-request state exists: it is a function of the inbound `wire`
+    /// alone, which is why it takes no `self` and has no server state, and it
+    /// is on the connection's hot path. Read only what is needed (a module's own
+    /// section is decoded by `wire.get::<Self>()`, and nothing else is) and
+    /// panic on malformed wire data as [`Module::new`] does. A request that
+    /// needs stateful treatment, such as admission, gets it at its first
+    /// `before_poll`.
+    ///
+    /// Propose with [`Ingress::propose`]; the owner decides which proposal
+    /// counts.
+    fn ingress(_wire: &WireIn<'_>, _ingress: &mut Ingress) {}
+
+    /// Settle the ingress decision by this module's own rule. Called only on
+    /// the module that sets [`Module::OWNS_INGRESS`], with every module's
+    /// proposals in stack order. `None` means no decision: the task gets the
+    /// runtime's default.
+    fn resolve_ingress(_proposals: &[Proposal<Meta>]) -> Option<Meta> {
+        None
+    }
 
     /// Construct per-request module state.
     ///
@@ -578,6 +622,12 @@ pub trait ModuleStack: Send + Sync + std::fmt::Debug + 'static {
     fn describe(modules: &mut Vec<ModuleDecl>);
 
     #[doc(hidden)]
+    fn ingress(wire: &WireIn<'_>, ingress: &mut Ingress);
+
+    #[doc(hidden)]
+    fn resolve_ingress(proposals: &[Proposal<Meta>]) -> Option<Meta>;
+
+    #[doc(hidden)]
     fn new(
         method: &CowGrpcMethod,
         server: &Self::Server,
@@ -651,6 +701,12 @@ impl ModuleStack for () {
     type Server = ();
 
     fn describe(_modules: &mut Vec<ModuleDecl>) {}
+
+    fn ingress(_wire: &WireIn<'_>, _ingress: &mut Ingress) {}
+
+    fn resolve_ingress(_proposals: &[Proposal<Meta>]) -> Option<Meta> {
+        None
+    }
 
     fn new(
         _method: &CowGrpcMethod,
@@ -742,6 +798,22 @@ impl<H: Module, T: ModuleStack> ModuleStack for Stack<H, T> {
     fn describe(modules: &mut Vec<ModuleDecl>) {
         modules.push(ModuleDecl::of::<H>());
         T::describe(modules);
+    }
+
+    #[inline]
+    fn ingress(wire: &WireIn<'_>, ingress: &mut Ingress) {
+        ingress.set_module(H::NAME);
+        H::ingress(wire, ingress);
+        T::ingress(wire, ingress);
+    }
+
+    #[inline]
+    fn resolve_ingress(proposals: &[Proposal<Meta>]) -> Option<Meta> {
+        if H::OWNS_INGRESS {
+            H::resolve_ingress(proposals)
+        } else {
+            T::resolve_ingress(proposals)
+        }
     }
 
     fn new(

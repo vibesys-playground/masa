@@ -18,10 +18,12 @@
 //! tonic's request hooks.
 
 mod extensions;
+mod ingress;
 mod module;
 pub mod wire;
 
 pub use extensions::{ChildState, DecisionClosed, Extensions, Proposal, Proposals};
+pub use ingress::Ingress;
 pub use module::{
     build_server, ChildOutcome, Early, MissingDependency, Module, ModuleDecl, ModuleServer,
     ModuleStack, Outcome, Rejection, Requires, ServerInit, Stack,

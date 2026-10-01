@@ -17,10 +17,10 @@ use crate::metadata::{
     get_service_name_override_from_headers, get_service_name_override_from_metadata,
 };
 use rpcstack::{
-    build_server, ChildOutcome, ChildState, Early, Extensions, MissingDependency, ModuleStack,
-    Outcome, WireIn, WireOut,
+    build_server, ChildOutcome, ChildState, Early, Extensions, Ingress, MissingDependency,
+    ModuleStack, Outcome, WireIn, WireOut,
 };
-use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
+use tonic::masa::{ClientHooks, Hooks, Meta, ParentHooks, ServerHooks};
 use tonic::{CowGrpcMethod, GrpcMethod, Request, Response, Status};
 
 /// `Hooks` implementation that runs the policy module stack `S`.
@@ -67,6 +67,13 @@ impl<S: ModuleStack> Hooks for PolicyHooks<S> {
     type ServerContext = ServerContext<S>;
     type ChildContext = ChildContext<S>;
     type ParentContext = ParentContext<S>;
+
+    fn ingress(headers: &http::HeaderMap) -> Option<Meta> {
+        let wire = WireIn::from_headers(headers).unwrap_or_else(|err| panic!("{err}"));
+        let mut ingress = Ingress::default();
+        S::ingress(&wire, &mut ingress);
+        S::resolve_ingress(ingress.proposals())
+    }
 }
 
 #[derive(Debug)]

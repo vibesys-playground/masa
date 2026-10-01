@@ -15,7 +15,15 @@ use crate::server::server::{new_svc::NewSvcTask, Watcher};
 #[cfg(all(feature = "server", any(feature = "http1", feature = "http2")))]
 use crate::service::HttpService;
 use http::HeaderMap;
+#[cfg(feature = "masa")]
+use tokio::task::Meta;
 use tokio::task::{meta_for_unannotated_spawn, TaskPriority};
+
+/// Decides the [`Meta`] of the task that serves an HTTP/2 stream from the
+/// stream's request headers, before the task is queued. `None` means no
+/// decision, and the task gets the runtime's default for unannotated spawns.
+#[cfg(feature = "masa")]
+pub type IngressFn = fn(&HeaderMap) -> Option<Meta>;
 
 #[cfg(feature = "server")]
 pub trait ConnStreamExec<F, B: HttpBody>: Clone {
@@ -42,6 +50,10 @@ pub enum Exec {
     Default,
     /// Use custom executor.
     Executor(Arc<dyn Executor<BoxSendFuture> + Send + Sync>),
+    /// Use tokio, queueing each HTTP/2 stream's task with the `Meta` that the
+    /// function decides from the stream's request headers.
+    #[cfg(feature = "masa")]
+    Ingress(IngressFn),
 }
 
 // ===== impl Exec =====
@@ -52,7 +64,10 @@ impl Exec {
         F: Future<Output = ()> + Send + 'static,
     {
         match *self {
-            Exec::Default => {
+            Exec::Executor(ref e) => {
+                e.execute(Box::pin(fut));
+            }
+            _ => {
                 #[cfg(feature = "tcp")]
                 {
                     tokio::task::spawn(fut);
@@ -62,9 +77,6 @@ impl Exec {
                     // If no runtime, we need an executor!
                     panic!("executor must be set")
                 }
-            }
-            Exec::Executor(ref e) => {
-                e.execute(Box::pin(fut));
             }
         }
     }
@@ -96,16 +108,16 @@ where
 {
     fn h2_stream_priority(&self, headers: &HeaderMap) -> TaskPriority {
         match self {
-            Exec::Default => {
-                TaskPriority::new(masa_core::read_priority_from_headers(headers).value())
+            Exec::Ingress(ingress) => {
+                ingress(headers).unwrap_or_else(|| meta_for_unannotated_spawn(None))
             }
-            Exec::Executor(_) => meta_for_unannotated_spawn(None),
+            Exec::Default | Exec::Executor(_) => meta_for_unannotated_spawn(None),
         }
     }
 
     fn execute_h2stream_with_prio(&mut self, fut: H2Stream<F, B>, prio: TaskPriority) {
         match self {
-            Exec::Default => {
+            Exec::Default | Exec::Ingress(_) => {
                 tokio::task::spawn_with_prio(fut, prio);
             }
             Exec::Executor(_) => self.execute(fut),
@@ -159,43 +171,44 @@ mod h2_priority_tests {
 
     type TestFuture = std::future::Ready<Result<http::Response<Body>, crate::Error>>;
 
-    fn default_priority(headers: &HeaderMap) -> TaskPriority {
-        <Exec as ConnStreamExec<TestFuture, Body>>::h2_stream_priority(&Exec::Default, headers)
+    fn priority(exec: &Exec, headers: &HeaderMap) -> TaskPriority {
+        <Exec as ConnStreamExec<TestFuture, Body>>::h2_stream_priority(exec, headers)
     }
 
     #[test]
-    #[cfg(not(feature = "masa"))]
     fn default_executor_uses_infra_priority() {
         let headers = HeaderMap::new();
 
-        assert_eq!(default_priority(&headers), meta_for_unannotated_spawn(None));
+        assert_eq!(
+            priority(&Exec::Default, &headers),
+            meta_for_unannotated_spawn(None)
+        );
     }
 
     #[test]
     #[cfg(feature = "masa")]
-    fn default_executor_reads_context_priority_header() {
+    fn ingress_executor_uses_the_decided_meta() {
+        fn ingress(headers: &HeaderMap) -> Option<Meta> {
+            headers
+                .get("x-prio")
+                .map(|value| Meta::new(value.to_str().unwrap().parse().unwrap()))
+        }
         let mut headers = HeaderMap::new();
-        let ctx = masa_core::Context::new(
-            "test.Service/Rpc",
-            7,
-            0,
-            0,
-            0,
-            masa_core::PriorityHint::new(42),
-        );
-        headers.insert(
-            masa_core::MASA_CONTEXT_HEADER,
-            ctx.to_header_string().parse().unwrap(),
-        );
+        headers.insert("x-prio", "42".parse().unwrap());
 
-        assert_eq!(default_priority(&headers), TaskPriority::new(42));
+        assert_eq!(
+            priority(&Exec::Ingress(ingress), &headers),
+            TaskPriority::new(42)
+        );
     }
 
     #[test]
-    #[should_panic(expected = "missing MASA context header `ctx`")]
     #[cfg(feature = "masa")]
-    fn default_executor_preserves_missing_context_panic_behavior() {
-        let _ = default_priority(&HeaderMap::new());
+    fn ingress_executor_without_a_decision_uses_the_unannotated_default() {
+        assert_eq!(
+            priority(&Exec::Ingress(|_| None), &HeaderMap::new()),
+            meta_for_unannotated_spawn(None)
+        );
     }
 }
 

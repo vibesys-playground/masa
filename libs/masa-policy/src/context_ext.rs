@@ -40,7 +40,7 @@ pub fn header_string_with_wire<M: Module>(ctx: &Context, data: &M::Wire) -> Stri
     out.header_value()
 }
 
-pub use masa_core::{read_context, read_context_from_headers, read_priority_from_headers};
+pub use masa_core::{read_context, read_context_from_headers};
 
 /// Extension trait for `Request<T>` to set the method name override header.
 pub trait MasaRequestExt<T> {

@@ -24,10 +24,9 @@ pub use context_ext::{
     get_masa_context_from_metadata, get_method_name_override_from_headers,
     get_method_name_override_from_metadata, get_service_name_override_from_headers,
     get_service_name_override_from_metadata, get_wire_from_metadata, header_string_with_wire,
-    read_context, read_context_from_headers, read_priority_from_headers,
-    set_masa_context_in_metadata, set_method_name_override_in_headers,
-    set_service_name_override_in_headers, set_wire_in_metadata, MasaRequestExt, MasaResponseExt,
-    MasaStatusExt, MASA_CONTEXT_HEADER,
+    read_context, read_context_from_headers, set_masa_context_in_metadata,
+    set_method_name_override_in_headers, set_service_name_override_in_headers,
+    set_wire_in_metadata, MasaRequestExt, MasaResponseExt, MasaStatusExt, MASA_CONTEXT_HEADER,
 };
 pub use hooks::{ChildContext, ParentContext, PolicyHooks, ServerContext};
 pub use masa_stack::MasaStack;

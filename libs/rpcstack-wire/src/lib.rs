@@ -50,6 +50,27 @@ pub fn decode_payload<W: DeserializeOwned>(payload: &str) -> Result<W, String> {
     serde_json::from_slice(&bytes).map_err(|err| format!("json: {err}"))
 }
 
+/// Decode the last bytes of a section payload into `buf`, without decoding the
+/// rest and without allocating: the tail of the decoded bytes, at most
+/// `buf.len()` of them (the whole payload if it is that short).
+///
+/// For a reader that needs only a value at the end of a payload's encoding.
+/// It sees a suffix of the encoded bytes, so it cannot tell whether the rest of
+/// the payload is valid; a caller that must know decodes the payload.
+pub fn decode_payload_tail<'b>(payload: &str, buf: &'b mut [u8]) -> Result<&'b [u8], String> {
+    // Padded base64 encodes each 3 bytes as a group of 4 characters, so a
+    // suffix that starts on a group boundary decodes by itself.
+    if payload.len() % 4 != 0 {
+        return Err("base64: invalid length".to_owned());
+    }
+    let groups = (payload.len() / 4).min(buf.len() / 3);
+    let tail = &payload[payload.len() - groups * 4..];
+    let len = BASE64
+        .decode_slice(tail, buf)
+        .map_err(|err| format!("base64: {err}"))?;
+    Ok(&buf[..len])
+}
+
 /// Encode `wire` as a section payload.
 pub fn encode_payload<W: Serialize>(wire: &W) -> Result<String, String> {
     let json = serde_json::to_vec(wire).map_err(|err| format!("json: {err}"))?;
@@ -86,6 +107,21 @@ mod tests {
             Ok("x".to_owned())
         );
         assert_eq!(find_section(&header, "c"), None);
+    }
+
+    #[test]
+    fn tail_decodes_only_the_last_bytes() {
+        let payload = encode_payload(&"0123456789abcdefghij").unwrap();
+        let mut buf = [0u8; 6];
+        assert_eq!(decode_payload_tail(&payload, &mut buf).unwrap(), b"hij\"");
+        let mut big = [0u8; 64];
+        assert_eq!(
+            decode_payload_tail(&payload, &mut big).unwrap(),
+            b"\"0123456789abcdefghij\""
+        );
+        assert!(decode_payload_tail("abc", &mut buf).is_err());
+        assert!(decode_payload_tail("!!!!", &mut buf).is_err());
+        assert_eq!(decode_payload_tail("", &mut buf).unwrap(), b"");
     }
 
     #[test]

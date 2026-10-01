@@ -98,18 +98,49 @@ impl From<ContextCompact> for Context {
     }
 }
 
-/// The priority alone, for readers that run before any module and must not
-/// decode the rest (see [`read_priority_from_headers`](crate::read_priority_from_headers)).
-/// Mirrors the layout of [`ContextCompact`].
+/// The priority alone, for the slow path of [`peek_priority`]. Mirrors the
+/// layout of [`ContextCompact`].
 #[derive(Deserialize)]
-pub(crate) struct PriorityPeek(
+struct PriorityPeek(
     IgnoredAny,
     IgnoredAny,
     IgnoredAny,
     IgnoredAny,
     IgnoredAny,
-    pub(crate) PriorityHint,
+    PriorityHint,
 );
+
+/// The priority of a budget section's `payload` (an encoded [`Context`]),
+/// decoding nothing else and allocating nothing: it runs for every request
+/// stream, before any module.
+///
+/// The priority is the last element of the context's JSON array
+/// ([`ContextCompact`]), so only the last bytes of the payload are decoded. A
+/// payload whose end is not of that shape takes the slow path, which decodes
+/// the first five elements without keeping them and reports why it failed.
+pub fn peek_priority(payload: &str) -> Result<PriorityHint, String> {
+    // The longest priority is 20 digits, then `]`.
+    let mut buf = [0u8; 24];
+    if let Ok(tail) = wire::decode_payload_tail(payload, &mut buf) {
+        if let Some(priority) = priority_at_end_of_array(tail) {
+            return Ok(PriorityHint::new(priority));
+        }
+    }
+    wire::decode_payload::<PriorityPeek>(payload).map(|peek| peek.5)
+}
+
+/// The number after the last `,` of `tail`, which must end with `]`.
+fn priority_at_end_of_array(tail: &[u8]) -> Option<u64> {
+    let digits = tail.strip_suffix(b"]")?;
+    let digits = &digits[digits.iter().rposition(|&b| b == b',')? + 1..];
+    if digits.is_empty() || (digits.len() > 1 && digits[0] == b'0') {
+        return None;
+    }
+    digits.iter().try_fold(0u64, |acc, &b| {
+        let digit = b.is_ascii_digit().then(|| u64::from(b - b'0'))?;
+        acc.checked_mul(10)?.checked_add(digit)
+    })
+}
 
 impl Default for Context {
     fn default() -> Self {
@@ -186,5 +217,69 @@ impl Context {
         let mut header = String::new();
         wire::push_section(&mut header, BUDGET_SECTION, &payload);
         header
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn payload(ctx: &Context) -> String {
+        wire::encode_payload(ctx).unwrap()
+    }
+
+    #[test]
+    fn peek_priority_reads_the_last_element() {
+        for prio in [0, 7, 42, 1_700_000_000_123_456, u64::MAX] {
+            let ctx = Context::new("test.Service/Rpc", 9, 100, 10, 110, PriorityHint::new(prio));
+            assert_eq!(peek_priority(&payload(&ctx)), Ok(PriorityHint::new(prio)));
+        }
+    }
+
+    #[test]
+    fn peek_priority_ignores_what_the_other_elements_hold() {
+        let long_api = "a, \"b\" ,]".repeat(40);
+        let ctx = Context::new(
+            long_api,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            PriorityHint::new(5),
+        );
+        assert_eq!(peek_priority(&payload(&ctx)), Ok(PriorityHint::new(5)));
+    }
+
+    #[test]
+    fn peek_priority_of_a_short_payload() {
+        let ctx = Context::new("", 0, 0, 0, 0, PriorityHint::new(1));
+        assert_eq!(peek_priority(&payload(&ctx)), Ok(PriorityHint::new(1)));
+    }
+
+    #[test]
+    fn peek_priority_falls_back_for_a_payload_that_does_not_end_like_a_context() {
+        // Whitespace is valid JSON, but the encoder never emits it.
+        let spaced = wire::encode_payload(&serde_json::json!(["a", 1, 2, 3, 4, 5])).unwrap();
+        assert_eq!(peek_priority(&spaced), Ok(PriorityHint::new(5)));
+        let spaced = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(br#"["a",1,2,3,4, 5 ]"#)
+        };
+        assert_eq!(peek_priority(&spaced), Ok(PriorityHint::new(5)));
+    }
+
+    #[test]
+    fn peek_priority_reports_malformed_payloads() {
+        assert!(peek_priority("not-base64")
+            .unwrap_err()
+            .starts_with("base64"));
+        let short = wire::encode_payload(&"not a context").unwrap();
+        assert!(peek_priority(&short).unwrap_err().starts_with("json"));
+        let overflow = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .encode(br#"["a",1,2,3,4,18446744073709551616]"#)
+        };
+        assert!(peek_priority(&overflow).unwrap_err().starts_with("json"));
     }
 }

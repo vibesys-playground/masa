@@ -19,6 +19,9 @@ use tower_service::Service;
 #[derive(Debug, Default, Clone)]
 pub struct Routes {
     router: axum::Router,
+    /// The ingress decision of the first added service that supplies one.
+    #[cfg(feature = "masa")]
+    ingress: Option<crate::masa::IngressFn>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -62,7 +65,12 @@ impl Routes {
         S::Error: Into<crate::Error> + Send,
     {
         let router = axum::Router::new().fallback(unimplemented);
-        Self { router }.add_service(svc)
+        Self {
+            router,
+            #[cfg(feature = "masa")]
+            ingress: None,
+        }
+        .add_service(svc)
     }
 
     /// Add a new service.
@@ -80,7 +88,21 @@ impl Routes {
         self.router = self
             .router
             .route_service(&format!("/{}/*rest", S::NAME), svc);
+        #[cfg(feature = "masa")]
+        {
+            self.ingress = self.ingress.or(S::INGRESS);
+        }
         self
+    }
+
+    /// The executor that queues each HTTP/2 stream's task with the `Meta` the
+    /// services' hooks decide at ingress; tokio's default when none does.
+    pub(crate) fn exec(&self) -> hyper::rt::Exec {
+        #[cfg(feature = "masa")]
+        if let Some(ingress) = self.ingress {
+            return hyper::rt::Exec::Ingress(ingress);
+        }
+        hyper::rt::Exec::Default
     }
 
     pub(crate) fn prepare(self) -> Self {
@@ -88,6 +110,7 @@ impl Routes {
             // this makes axum perform update some internals of the router that improves perf
             // see https://docs.rs/axum/latest/axum/routing/struct.Router.html#a-note-about-performance
             router: self.router.with_state(()),
+            ..self
         }
     }
 

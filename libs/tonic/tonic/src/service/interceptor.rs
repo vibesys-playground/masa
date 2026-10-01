@@ -170,6 +170,7 @@ where
     S: crate::server::NamedService,
 {
     const NAME: &'static str = S::NAME;
+    const INGRESS: Option<crate::masa::IngressFn> = S::INGRESS;
 }
 
 /// Response future for [`InterceptedService`].

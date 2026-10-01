@@ -90,6 +90,7 @@ hyper = { path = "../../hyper", features = ["full"], optional = true }
 hyper-timeout = { version = "0.4.1", optional = true }
 tokio = { path = "../../tokio/tokio", optional = true }
 tokio-stream = "=0.1.15"
+rpcstack-sched = { path = "../../rpcstack-sched" }
 tower = { version = "0.4", default-features = false, features = [
   "balance",
   "buffer",
