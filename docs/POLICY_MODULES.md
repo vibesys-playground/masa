@@ -46,6 +46,7 @@ surface.
 | `Outcome`, `ChildOutcome` | How the request, or one child RPC, ended; passed to `finalize` and `after_child_rpc`. |
 | `BudgetModule` | Masa's budget module: the request's facts and time budget, and the child's. Owns the `ChildDeadline` and `ChildPriority` decisions. See "Budget module". |
 | `Module::NAME`, `Module::Wire` | The module's name (in `Outcome` and the wire envelope) and its own wire data: a serde type whose section is named `NAME` in the `ctx` header. `()` means none. See "Wire data". |
+| `Module::POLL_HOOKS` | `true` by default. A module that overrides neither `before_poll` nor `after_poll` sets it to `false`; a stack where no module has poll hooks skips them, and the per-request lock that calling them takes, on every poll. Debug builds still call the hooks of such modules and panic if one was overridden, so a wrong `false` is caught by any test that polls. |
 | `WireIn` / `WireOut` | Typed access to the wire sections: `wire.get::<Self>()` on an inbound message (a request, or a child's response), `out.put::<Self>(&value)` on an outbound one. |
 | `Extensions` | A per-request typed map (one value per type) that the hooks of all modules share; the framework never reads or fills it. |
 | `ServerInit` | Service name plus a typed store: `provide::<T>()` publishes server state, `get::<T>()` and `require::<T>()` read state from an earlier module. |
