@@ -223,6 +223,7 @@ impl Module for BudgetModule {
     type Server = BudgetServer;
     const NAME: &'static str = BUDGET_SECTION;
     type Wire = Context;
+    const POLL_HOOKS: bool = false;
 
     fn new(
         _method: &CowGrpcMethod,

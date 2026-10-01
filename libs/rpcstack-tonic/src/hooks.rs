@@ -152,7 +152,13 @@ impl<S: ModuleStack> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentCo
         }
     }
 
+    #[inline]
     fn before_poll<Ret>(&self) -> Result<(), Result<Response<Ret>, Status>> {
+        // Debug builds walk the stack anyway, to check its `POLL_HOOKS`
+        // declarations.
+        if !S::POLL_HOOKS && !cfg!(debug_assertions) {
+            return Ok(());
+        }
         let mut state = self.state();
         match self.modules.before_poll(&mut state.ext) {
             Ok(()) => Ok(()),
@@ -232,10 +238,14 @@ impl<S: ModuleStack> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentCo
         Ok(())
     }
 
+    #[inline]
     fn after_poll<Ret>(
         &self,
         poll: &Poll<Result<Response<Ret>, Status>>,
     ) -> Result<(), Result<Response<Ret>, Status>> {
+        if !S::POLL_HOOKS && !cfg!(debug_assertions) {
+            return Ok(());
+        }
         let mut state = self.state();
         match self.modules.after_poll(poll, &state.ext) {
             Ok(()) => Ok(()),

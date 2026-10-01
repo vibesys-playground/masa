@@ -32,6 +32,7 @@ impl Module for OracleModule {
     type Server = OracleServer;
     const NAME: &'static str = "oracle";
     type Wire = ();
+    const POLL_HOOKS: bool = false;
 
     fn requires(requires: &mut Requires) {
         requires.module::<BudgetModule>();

@@ -371,6 +371,16 @@ pub trait Module: Send + Sync + std::fmt::Debug + 'static {
     /// apart from any value, such as zero.
     type Wire: Serialize + DeserializeOwned + Send + Sync + 'static;
 
+    /// Whether this module overrides [`Module::before_poll`] or
+    /// [`Module::after_poll`]. A stack in which no module does skips the poll
+    /// hooks entirely: they run on every poll of every request, and the
+    /// framework takes a lock around the request's state to call them. Leave it
+    /// at `true` unless the module keeps both defaults; a module that sets it
+    /// to `false` and overrides a poll hook is a bug that debug builds report
+    /// with a panic at the first poll, because release builds would never call
+    /// the hook.
+    const POLL_HOOKS: bool = true;
+
     /// Declare the modules that must appear earlier in the stack than this
     /// one, with [`Requires::module`]. A stack that omits one or puts it later
     /// fails when the server state is built, with an error naming both
@@ -404,6 +414,8 @@ pub trait Module: Send + Sync + std::fmt::Debug + 'static {
     /// do not run. No `after_poll` follows; every module still learns about
     /// the rejection in [`Module::finalize`].
     fn before_poll<Ret>(&self, _ext: &mut Extensions) -> Result<(), Result<Response<Ret>, Status>> {
+        #[cfg(debug_assertions)]
+        default_poll_hook_ran();
         Ok(())
     }
 
@@ -495,6 +507,8 @@ pub trait Module: Send + Sync + std::fmt::Debug + 'static {
         _poll: &Poll<Result<Response<Ret>, Status>>,
         _ext: &Extensions,
     ) -> Result<(), Result<Response<Ret>, Status>> {
+        #[cfg(debug_assertions)]
+        default_poll_hook_ran();
         Ok(())
     }
 
@@ -520,6 +534,35 @@ pub trait Module: Send + Sync + std::fmt::Debug + 'static {
     }
 }
 
+// ── Checking `Module::POLL_HOOKS` ───────────────────────────────────────
+
+#[cfg(debug_assertions)]
+thread_local! {
+    /// How many default poll hooks have run on this thread. The defaults count
+    /// themselves, so a module that declares `POLL_HOOKS = false` can be caught
+    /// running its own override.
+    static DEFAULT_POLL_HOOKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(debug_assertions)]
+fn default_poll_hook_ran() {
+    DEFAULT_POLL_HOOKS.with(|count| count.set(count.get() + 1));
+}
+
+/// Runs a poll hook of a module that declares `POLL_HOOKS = false`, which a
+/// release build skips, and panics unless it was the default.
+#[cfg(debug_assertions)]
+fn assert_default_poll_hook<M: Module>(hook: &str, run: impl FnOnce()) {
+    let before = DEFAULT_POLL_HOOKS.with(std::cell::Cell::get);
+    run();
+    assert!(
+        DEFAULT_POLL_HOOKS.with(std::cell::Cell::get) == before + 1,
+        "module `{}` overrides `{hook}` but declares `Module::POLL_HOOKS = false`, so release \
+         builds never call it; remove the declaration",
+        M::NAME
+    );
+}
+
 // ── The empty module and stacks ─────────────────────────────────────────
 
 impl ModuleServer for () {
@@ -533,6 +576,7 @@ impl Module for () {
     type Server = ();
     const NAME: &'static str = "";
     type Wire = ();
+    const POLL_HOOKS: bool = false;
 
     fn new(
         _method: &CowGrpcMethod,
@@ -573,6 +617,12 @@ pub struct Rejection {
 pub trait ModuleStack: Send + Sync + std::fmt::Debug + 'static {
     #[doc(hidden)]
     type Server: ModuleServer;
+
+    /// Whether any module of the stack has poll hooks
+    /// ([`Module::POLL_HOOKS`]); if none does, the adapter need not call
+    /// `before_poll` or `after_poll`.
+    #[doc(hidden)]
+    const POLL_HOOKS: bool;
 
     #[doc(hidden)]
     fn describe(modules: &mut Vec<ModuleDecl>);
@@ -649,6 +699,7 @@ pub trait ModuleStack: Send + Sync + std::fmt::Debug + 'static {
 
 impl ModuleStack for () {
     type Server = ();
+    const POLL_HOOKS: bool = false;
 
     fn describe(_modules: &mut Vec<ModuleDecl>) {}
 
@@ -738,6 +789,7 @@ pub struct Stack<H, T> {
 
 impl<H: Module, T: ModuleStack> ModuleStack for Stack<H, T> {
     type Server = (H::Server, T::Server);
+    const POLL_HOOKS: bool = H::POLL_HOOKS || T::POLL_HOOKS;
 
     fn describe(modules: &mut Vec<ModuleDecl>) {
         modules.push(ModuleDecl::of::<H>());
@@ -759,10 +811,17 @@ impl<H: Module, T: ModuleStack> ModuleStack for Stack<H, T> {
 
     #[inline]
     fn before_poll<Ret>(&self, ext: &mut Extensions) -> Result<(), Early<Ret>> {
-        ext.set_module(H::NAME);
-        self.head
-            .before_poll(ext)
-            .map_err(|reply| Early { by: H::NAME, reply })?;
+        if H::POLL_HOOKS {
+            ext.set_module(H::NAME);
+            self.head
+                .before_poll(ext)
+                .map_err(|reply| Early { by: H::NAME, reply })?;
+        } else {
+            #[cfg(debug_assertions)]
+            assert_default_poll_hook::<H>("before_poll", || {
+                let _ = self.head.before_poll::<Ret>(ext);
+            });
+        }
         self.tail.before_poll(ext)
     }
 
@@ -772,9 +831,16 @@ impl<H: Module, T: ModuleStack> ModuleStack for Stack<H, T> {
         poll: &Poll<Result<Response<Ret>, Status>>,
         ext: &Extensions,
     ) -> Result<(), Early<Ret>> {
-        self.head
-            .after_poll(poll, ext)
-            .map_err(|reply| Early { by: H::NAME, reply })?;
+        if H::POLL_HOOKS {
+            self.head
+                .after_poll(poll, ext)
+                .map_err(|reply| Early { by: H::NAME, reply })?;
+        } else {
+            #[cfg(debug_assertions)]
+            assert_default_poll_hook::<H>("after_poll", || {
+                let _ = self.head.after_poll(poll, ext);
+            });
+        }
         self.tail.after_poll(poll, ext)
     }
 
