@@ -257,6 +257,54 @@ jobs:
       - run: rustc --version && cargo --version && protoc --version
       - run: ./scripts/test.sh --feature "${{ matrix.features }}"
 
+  test-semantics:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    name: semantics (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: "4"
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - "sched_fifo"
+          - "sched_slo"
+          - "sched_tailclipper"
+          - "sched_oracle"
+          - "sched_slo,abort_slo"
+          - "sched_slo,trace_queue_latency"
+          - "sched_slo,ac_rajomon"
+          - "sched_slo,ac_rajomon,abort_slo"
+          - "sched_slo,ac_pred,est_mean_var"
+          - "sched_slo,ac_pred,est_hist"
+          - "sched_slo,ac_pred,est_rms"
+          - "sched_slo,abort_slack,ac_rajomon,est_mean_var"
+          - "sched_pred,abort_slo,ac_pred,est_mean_var"
+          - "sched_pred,abort_slack,est_mean_var"
+          - "sched_pred,signal_slack,ac_pred,est_mean_var"
+          - "sched_pred,abort_slack,ac_pred,est_mean_var,deadline_equals_slack"
+          - "sched_oracle,abort_slo,est_mean_var"
+          - "sched_slo,stack_custom"
+          - "sched_slo,sched_custom"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-01-07
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: semantics
+          cache-on-failure: true
+      - name: Install protoc
+        run: |
+          ulimit -n 4096 || true
+          ./scripts/install_protoc.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "PROTOC=$HOME/.local/bin/protoc" >> "$GITHUB_ENV"
+      - run: rustc --version && cargo --version && protoc --version
+      - run: ./scripts/test.sh --semantics-feature "${{ matrix.features }}"
+
   ci-required:
     name: ci-required
     runs-on: ubuntu-latest
@@ -268,6 +316,7 @@ jobs:
       - lint-python
       - pytest
       - test-cargo
+      - test-semantics
     if: always()
     steps:
       - name: Check CI result

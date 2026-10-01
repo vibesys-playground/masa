@@ -3053,6 +3053,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "masa-semantics"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "masa",
+ "masa-core",
+ "masa-policy",
+ "rand 0.8.5",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

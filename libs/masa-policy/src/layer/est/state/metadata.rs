@@ -1,8 +1,8 @@
+use masa_core::Instant;
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     Mutex,
 };
-use std::time::Instant;
 
 use tonic::{Code, Response, Status};
 

@@ -17,10 +17,10 @@
 // falling back to a signature-only aggregate when the prefix-specific pattern
 // is cold.
 
+use masa_core::Instant;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
-use std::time::Instant;
 
 use masa_core::LatencyEstimator;
 

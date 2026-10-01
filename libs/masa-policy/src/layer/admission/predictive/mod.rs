@@ -10,9 +10,8 @@ use crate::wire::{WireIn, WireOut};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
-use masa_core::Context;
+use masa_core::{Context, Instant};
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
 use super::super::{

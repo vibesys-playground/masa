@@ -84,6 +84,7 @@ check_tests() {
         "masa"
         "masa-core"
         "masa-policy"
+        "masa-semantics"
         "masa-integration-tests"
         "hotel"
         "socialnet"
@@ -118,6 +119,17 @@ check_tests() {
         local featured_cmd="cargo check --tests --quiet -p masa-policy --features $flags"
         echo "Running: $featured_cmd"
         cargo check --tests --quiet -p masa-policy --features "$flags" || return $?
+    done
+
+    echo "========================================================="
+    echo "Checking masa-semantics tests for every flag combination"
+    for flags in "${flag_combos[@]}"; do
+        case "$flags" in
+            *sched_mt*) continue ;;
+        esac
+
+        echo "Running: cargo check --tests --quiet -p masa-semantics --features $flags"
+        cargo check --tests --quiet -p masa-semantics --features "$flags" || return $?
     done
 
     return 0
