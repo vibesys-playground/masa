@@ -21,7 +21,8 @@ use std::sync::{Arc, Once};
 use std::task::Poll;
 use std::time::Duration;
 
-use masa_core::{time_now, Context, ContextBuilder, PriorityHint};
+use masa_core::{time_now, Context, PriorityHint};
+use masa_policy::ContextBuilder;
 #[cfg(feature = "estimator")]
 use masa_policy::{
     modules::EstimationLayer, EstimationRequestWire, EstimationResponseWire, EstimationWire,

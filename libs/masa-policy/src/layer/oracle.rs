@@ -6,26 +6,28 @@
 // into a child completion deadline and priority hint.
 
 use crate::wire::{WireIn, WireOut};
-use masa_core::{
-    Context, PriorityHint, ORACLE_CHILD_WORK_US_HEADER, ORACLE_REMAINING_AFTER_US_HEADER,
-};
+use masa_core::{PriorityHint, ORACLE_CHILD_WORK_US_HEADER, ORACLE_REMAINING_AFTER_US_HEADER};
 use tonic::{CowGrpcMethod, Request, Status};
 
 use super::{
-    ChildRpcContext, Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit,
+    require_budget, BudgetInfo, ChildBudget, Extensions, Layer, LayerChild, LayerServer,
+    MissingDependency, ServerInit,
 };
 
 #[derive(Debug)]
 pub struct OracleServer;
 
 impl LayerServer for OracleServer {
-    fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
+    fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
+        require_budget(init)?;
         Ok(Self)
     }
 }
 
 #[derive(Debug)]
-pub struct OracleLayer;
+pub struct OracleLayer {
+    budget: BudgetInfo,
+}
 
 impl Layer for OracleLayer {
     type Server = OracleServer;
@@ -36,29 +38,32 @@ impl Layer for OracleLayer {
     fn new(
         _method: &CowGrpcMethod,
         _server: &OracleServer,
-        _ctx: &mut Context,
         _wire: &WireIn<'_>,
-        _ext: &mut Extensions,
+        ext: &mut Extensions,
     ) -> Self {
-        Self
+        Self {
+            budget: BudgetInfo::of(ext),
+        }
     }
 
     fn before_child_rpc<T>(
         &self,
-        ctx: &Context,
         child_method: &CowGrpcMethod,
         _child_ctx: &mut OracleChild,
         request: &mut Request<T>,
-        child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
-        _ext: &mut Extensions,
+        ext: &mut Extensions,
     ) -> Result<(), Status> {
         let hint = OracleHint::from_request(request, child_method)?;
-        let completion_deadline = ctx.e2e_deadline().saturating_sub(hint.remaining_after_us);
+        let completion_deadline = self
+            .budget
+            .e2e_deadline()
+            .saturating_sub(hint.remaining_after_us);
         let latest_start = completion_deadline.saturating_sub(hint.child_work_us);
 
-        child_rpc.deadline = completion_deadline;
-        child_rpc.prio_hint = PriorityHint::new(latest_start);
+        let child = ChildBudget::of(ext);
+        child.deadline = completion_deadline;
+        child.prio_hint = PriorityHint::new(latest_start);
 
         Ok(())
     }

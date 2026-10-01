@@ -12,11 +12,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use masa_core::Context;
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
 use super::super::{
-    ChildRpcContext, Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit,
+    require_budget, BudgetInfo, Extensions, Layer, LayerChild, LayerServer, MissingDependency,
+    ServerInit,
 };
 use crate::layer::est::default_estimator::DefaultLatencyEstimator;
 use crate::layer::est::latency_map::{MethodKey, ParentToChildKey};
@@ -57,6 +57,7 @@ impl LayerServer for PredAdmissionServer {
         // The per-request `EstimationInfo` exists only if estimation runs
         // first, so fail here rather than on the first request.
         init.require::<PublishesEstimationInfo>()?;
+        require_budget(init)?;
         Ok(Self {
             pred_admission: Arc::new(PredictiveAdmission::new()),
             est,
@@ -73,6 +74,7 @@ pub struct PredAdmissionLayer {
     est: LatencyEstimators<DefaultLatencyEstimator>,
     /// What estimation published about this request.
     info: EstimationInfo,
+    budget: BudgetInfo,
     rpc: CowGrpcMethod,
     /// Set when this layer rejects a request. Prevents the rejection
     /// from feeding back into the admission controller via `finalize`.
@@ -90,7 +92,6 @@ impl Layer for PredAdmissionLayer {
     fn new(
         method: &CowGrpcMethod,
         server: &PredAdmissionServer,
-        _ctx: &mut Context,
         _wire: &WireIn<'_>,
         ext: &mut Extensions,
     ) -> Self {
@@ -107,6 +108,7 @@ impl Layer for PredAdmissionLayer {
             pred_admission: server.pred_admission.clone(),
             est: server.est.clone(),
             info,
+            budget: BudgetInfo::of(ext),
             rpc: method.clone(),
             self_rejected: AtomicBool::new(false),
             admission_checked: AtomicBool::new(false),
@@ -121,7 +123,6 @@ impl Layer for PredAdmissionLayer {
     #[inline]
     fn before_poll<Ret>(
         &self,
-        _ctx: &Context,
         _ext: &mut Extensions,
     ) -> Result<(), Result<tonic::Response<Ret>, Status>> {
         if !self.info.is_ingress() || self.admission_checked.swap(true, Ordering::Relaxed) {
@@ -160,11 +161,9 @@ impl Layer for PredAdmissionLayer {
     #[inline]
     fn before_child_rpc<T>(
         &self,
-        ctx: &Context,
         child_method_name: &CowGrpcMethod,
         _child_ctx: &mut PredAdmissionChild,
         _request: &mut tonic::Request<T>,
-        _child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
         _ext: &mut Extensions,
     ) -> Result<(), Status> {
@@ -178,7 +177,7 @@ impl Layer for PredAdmissionLayer {
             .child_rpc_method(child_id);
 
         let now = time_now();
-        let deadline = ctx.e2e_deadline();
+        let deadline = self.budget.e2e_deadline();
         let time_left = deadline.saturating_sub(now);
         if time_left == 0 {
             return Err(Self::bcf_error(&self.rpc, child_method_name));
@@ -249,7 +248,6 @@ impl Layer for PredAdmissionLayer {
     #[inline]
     fn after_child_rpc<T>(
         &self,
-        _ctx: &Context,
         _child_method: &CowGrpcMethod,
         response: &Result<Response<T>, Status>,
         response_wire: &WireIn<'_>,
@@ -278,7 +276,6 @@ impl Layer for PredAdmissionLayer {
     #[inline]
     fn finalize<Ret>(
         &self,
-        _ctx: &mut Context,
         result: &mut Result<Response<Ret>, Status>,
         _wire: &mut WireOut,
         _ext: &Extensions,
@@ -530,6 +527,7 @@ impl PredictiveAdmission {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use masa_core::Context;
 
     fn test_root(service: &'static str) -> MethodId {
         crate::MethodRegistry::global().get_or_register(CowGrpcMethod::new(service, "Root"))
@@ -648,6 +646,7 @@ mod tests {
             pred_admission: ac.clone(),
             est: LatencyEstimators::new(),
             info,
+            budget: BudgetInfo::from(Context::default()),
             rpc: CowGrpcMethod::new("svc", "method"),
             self_rejected: AtomicBool::new(false),
             admission_checked: AtomicBool::new(false),
@@ -656,7 +655,6 @@ mod tests {
 
     fn finalize_ok(layer: &PredAdmissionLayer) {
         layer.finalize(
-            &mut Context::default(),
             &mut Ok(Response::new(())),
             &mut crate::wire::WireOut::new(),
             &crate::layer::Extensions::new(),
@@ -722,7 +720,6 @@ mod tests {
         let root = test_root("test_child_report_feeds_subtree_compute");
         let child = CowGrpcMethod::new("svc", "child");
         let mut resp = Response::new(());
-        resp.set_masa_context(&Context::default());
         resp.set_wire::<EstimationLayer>(&EstimationWire::response(EstimationResponseWire {
             accumulated_compute_us: 7_000,
             ..Default::default()
@@ -737,7 +734,6 @@ mod tests {
             for _ in 0..2_000 {
                 layer
                     .after_child_rpc(
-                        &Context::default(),
                         &child,
                         &response,
                         &wire,
@@ -761,7 +757,6 @@ mod tests {
             PredAdmissionLayer::new(
                 &CowGrpcMethod::new("svc", "method"),
                 &server,
-                &mut Context::default(),
                 &WireIn::default(),
                 &mut Extensions::new(),
             )

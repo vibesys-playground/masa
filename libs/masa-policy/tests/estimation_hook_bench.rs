@@ -14,8 +14,9 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
 
-use masa_core::{time_now, ContextBuilder};
+use masa_core::time_now;
 use masa_policy::modules::EstimationLayer;
+use masa_policy::ContextBuilder;
 use masa_policy::{
     EstimationResponseWire, EstimationWire, MasaResponseExt, PolicyHooks, MASA_CONTEXT_HEADER,
 };

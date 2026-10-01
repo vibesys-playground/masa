@@ -1,14 +1,17 @@
-use crate::{Context, PriorityHint, MASA_CONTEXT_HEADER};
+use crate::context::{PriorityPeek, BUDGET_SECTION};
+use crate::{wire, Context, PriorityHint, MASA_CONTEXT_HEADER};
 
-/// Read the MASA context from HTTP headers.
-pub fn read_context_from_headers(headers: &http::HeaderMap) -> Context {
+fn header_value(headers: &http::HeaderMap) -> &str {
     let ctx = headers
         .get(MASA_CONTEXT_HEADER)
         .unwrap_or_else(|| panic!("{}", crate::MISSING_CONTEXT_HEADER_MESSAGE));
-    let ctx_str = ctx
-        .to_str()
-        .unwrap_or_else(|err| panic!("{}", crate::invalid_context_header_metadata_message(err)));
-    Context::from_header_string(ctx_str)
+    ctx.to_str()
+        .unwrap_or_else(|err| panic!("{}", crate::invalid_context_header_metadata_message(err)))
+}
+
+/// Read the MASA context from HTTP headers.
+pub fn read_context_from_headers(headers: &http::HeaderMap) -> Context {
+    Context::from_header_string(header_value(headers))
 }
 
 /// Read the MASA context from HTTP request headers.
@@ -17,14 +20,20 @@ pub fn read_context<B>(req: &http::Request<B>) -> Context {
 }
 
 /// Read the priority hint from MASA context HTTP headers.
+///
+/// Decodes the priority of the budget section only; Hyper calls this for every
+/// stream, before any policy module has run.
 pub fn read_priority_from_headers(headers: &http::HeaderMap) -> PriorityHint {
-    read_context_from_headers(headers).prio_hint()
+    let payload = wire::find_section(header_value(headers), BUDGET_SECTION)
+        .unwrap_or_else(|| panic!("{}", crate::missing_budget_section_message()));
+    wire::decode_payload::<PriorityPeek>(payload)
+        .unwrap_or_else(|err| panic!("{}", crate::invalid_budget_section_message(err)))
+        .5
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ContextBuilder;
     use http::HeaderValue;
 
     #[test]
@@ -48,22 +57,30 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invalid MASA context header `ctx`: invalid base64")]
-    fn read_context_panics_with_explicit_message_for_invalid_base64() {
+    #[should_panic(expected = "invalid `budget` section")]
+    fn read_context_panics_with_explicit_message_for_invalid_section() {
+        let mut req = http::Request::new(());
+        req.headers_mut().insert(
+            MASA_CONTEXT_HEADER,
+            HeaderValue::from_static("budget:not-base64"),
+        );
+
+        let _ = read_context(&req);
+    }
+
+    #[test]
+    #[should_panic(expected = "has no `budget` section")]
+    fn read_context_panics_with_explicit_message_when_budget_section_is_missing() {
         let mut req = http::Request::new(());
         req.headers_mut()
-            .insert(MASA_CONTEXT_HEADER, HeaderValue::from_static("not-base64"));
+            .insert(MASA_CONTEXT_HEADER, HeaderValue::from_static("other:AA=="));
 
         let _ = read_context(&req);
     }
 
     #[test]
     fn read_context_preserves_valid_context() {
-        let ctx = ContextBuilder::new("test.Service", 7)
-            .slo(100)
-            .gateway_entry(10)
-            .deadline(110)
-            .build();
+        let ctx = Context::new("test.Service", 7, 100, 10, 110, PriorityHint::new(110));
         let req = http::Request::builder()
             .header(MASA_CONTEXT_HEADER, ctx.to_header_string())
             .body(())
@@ -98,12 +115,7 @@ mod tests {
 
     #[test]
     fn read_priority_from_headers_preserves_priority_hint() {
-        let ctx = ContextBuilder::new("test.Service", 9)
-            .slo(100)
-            .gateway_entry(10)
-            .deadline(110)
-            .prio_hint(PriorityHint::new(42))
-            .build();
+        let ctx = Context::new("test.Service", 9, 100, 10, 110, PriorityHint::new(42));
         let mut headers = http::HeaderMap::new();
         headers.insert(
             MASA_CONTEXT_HEADER,

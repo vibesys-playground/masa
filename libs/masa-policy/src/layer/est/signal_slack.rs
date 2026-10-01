@@ -9,7 +9,9 @@
 //! All entry points compile out to no-ops when the `signal_slack` feature
 //! is disabled — the `SIGNAL_SLACK` const collapses the `if` guard.
 
-use masa_core::{Context, SIGNAL_SLACK};
+use masa_core::SIGNAL_SLACK;
+
+use crate::layer::BudgetInfo;
 
 use super::state::RequestMetadataTracker;
 
@@ -17,11 +19,11 @@ use super::state::RequestMetadataTracker;
 /// current hop is past its local deadline. Called from
 /// `EstimationLayer::{before_poll, after_poll}`.
 #[inline]
-pub(crate) fn mark_if_late(ctx: &Context, meta: &RequestMetadataTracker) {
+pub(crate) fn mark_if_late(budget: &BudgetInfo, meta: &RequestMetadataTracker) {
     if !SIGNAL_SLACK {
         return;
     }
-    let local_deadline = ctx.deadline();
+    let local_deadline = budget.deadline();
     if local_deadline != 0 && masa_core::time_now() > local_deadline {
         meta.mark_deadline_signal();
     }

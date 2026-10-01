@@ -15,12 +15,13 @@ use std::sync::{
 
 #[cfg(any(feature = "abort_slo", feature = "trace_queue_latency"))]
 use masa::MasaRequestExt;
-use masa_core::{time_now, ContextBuilder};
+use masa_core::time_now;
 use masa_integration_tests::pb::{
     child_service_client::ChildServiceClient,
     child_service_server::{ChildService, ChildServiceServer},
     Input1, Input2, Output1, Output2,
 };
+use masa_policy::ContextBuilder;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 

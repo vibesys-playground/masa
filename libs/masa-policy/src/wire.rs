@@ -9,13 +9,15 @@
 //! # Layout
 //!
 //! ```text
-//! ctx: <base64 bincode Context> [ . <name> : <base64 JSON> ]*
+//! ctx: <name> : <base64 JSON> [ . <name> : <base64 JSON> ]*
 //! ```
 //!
-//! The `Context` blob is unchanged. Each module with wire data adds one
-//! section, for example `.rajomon:eyJ0b2tlbnMiOjB9` for `{"tokens":0}`.
-//! Neither `.` nor `:` is in the base64 alphabet, and module names may not
-//! contain them, so the envelope is split with plain string searches.
+//! Each module with wire data is one section, for example
+//! `rajomon:eyJ0b2tlbnMiOjB9` for `{"tokens":0}`. Neither `.` nor `:` is in
+//! the base64 alphabet, and module names may not contain them, so the value is
+//! split with plain string searches. The primitives live in
+//! [`masa_core::wire`], because Hyper reads the budget section's priority
+//! before any module runs.
 //!
 //! The layout was chosen so that each section is independently addressable:
 //! finding one section scans section names only and decodes nothing, and
@@ -25,29 +27,25 @@
 //! separately (33% overhead on small payloads, versus one base64 pass over a
 //! combined object) and the header is not human-readable without decoding.
 //!
-//! `masa_core::Context::from_header_string` ignores everything after the
-//! first `.`, so code that reads only the context is unaffected.
+//! There is nothing besides sections: every message carries exactly the
+//! sections its sender's modules `put`.
 //!
 //! # Failure
 //!
 //! All binaries are assumed to be built from the same module stack, like
-//! protobuf stubs. A missing section decodes to `Wire::default()`; a section
+//! protobuf stubs. A missing section is `None`, and what that means is up to the module; a section
 //! that does not match its module's type is a [`WireError`], which the hooks
-//! turn into a panic, as for a malformed `Context`. Sections for modules not
+//! turn into a panic, as for a malformed header. Sections for modules not
 //! in the stack are ignored.
 
 use std::fmt;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use masa_core::{MASA_CONTEXT_HEADER, WIRE_SEPARATOR};
+use masa_core::{wire as codec, MASA_CONTEXT_HEADER};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tonic::metadata::{Ascii, MetadataMap, MetadataValue};
 
 use crate::layer::Layer;
-
-/// Separates a section's module name from its payload.
-const NAME_SEPARATOR: char = ':';
 
 /// A wire section could not be read or written.
 #[derive(Debug)]
@@ -95,14 +93,6 @@ pub struct WireIn<'a> {
 }
 
 impl<'a> WireIn<'a> {
-    fn from_header_value(value: &'a str) -> Self {
-        Self {
-            sections: value
-                .split_once(WIRE_SEPARATOR)
-                .map_or("", |(_, sections)| sections),
-        }
-    }
-
     /// Split the `ctx` header of `headers` into sections. Decodes nothing; a
     /// missing header yields no sections.
     pub fn from_headers(headers: &'a http::HeaderMap) -> Result<Self, WireError> {
@@ -125,7 +115,7 @@ impl<'a> WireIn<'a> {
     // visible ASCII, which costs more than the split itself.
     fn from_header_bytes(value: &'a [u8]) -> Result<Self, WireError> {
         std::str::from_utf8(value)
-            .map(Self::from_header_value)
+            .map(|sections| Self { sections })
             .map_err(WireError::new)
     }
 
@@ -135,28 +125,13 @@ impl<'a> WireIn<'a> {
         self.decode_present(M::NAME)
     }
 
-    fn raw_section(&self, name: &str) -> Option<&'a str> {
-        self.raw_sections()
-            .find_map(|(section, payload)| (section == name).then_some(payload))
-    }
-
-    fn raw_sections(&self) -> impl Iterator<Item = (&'a str, &'a str)> {
-        self.sections
-            .split(WIRE_SEPARATOR)
-            .filter(|section| !section.is_empty())
-            .map(|section| section.split_once(NAME_SEPARATOR).unwrap_or((section, "")))
-    }
-
     fn decode_present<W: DeserializeOwned>(&self, name: &str) -> Result<Option<W>, WireError> {
-        let Some(payload) = self.raw_section(name) else {
+        let Some(payload) = codec::find_section(self.sections, name) else {
             return Ok(None);
         };
-        let bytes = BASE64
-            .decode(payload)
-            .map_err(|err| WireError::new(format_args!("{name}: base64: {err}")))?;
-        serde_json::from_slice(&bytes)
+        codec::decode_payload(payload)
             .map(Some)
-            .map_err(|err| WireError::new(format_args!("{name}: json: {err}")))
+            .map_err(|err| WireError::new(format_args!("{name}: {err}")))
     }
 }
 
@@ -176,8 +151,7 @@ impl WireOut {
     fn from_metadata(metadata: &MetadataMap) -> Result<Self, WireError> {
         let input = WireIn::from_metadata(metadata)?;
         Ok(Self {
-            sections: input
-                .raw_sections()
+            sections: codec::sections(input.sections)
                 .map(|(name, payload)| (name.to_owned(), payload.to_owned()))
                 .collect(),
         })
@@ -189,66 +163,38 @@ impl WireOut {
     }
 
     fn put_named<W: Serialize>(&mut self, name: &str, wire: &W) -> Result<(), WireError> {
-        let value = serde_json::to_vec(wire)
-            .map_err(|err| WireError::new(format_args!("{name}: json: {err}")))?;
+        let payload = codec::encode_payload(wire)
+            .map_err(|err| WireError::new(format_args!("{name}: {err}")))?;
         self.sections.retain(|(existing, _)| existing != name);
-        self.sections.push((name.to_owned(), BASE64.encode(value)));
+        self.sections.push((name.to_owned(), payload));
         Ok(())
     }
 
-    fn header_value(&self, context: &str) -> String {
-        let mut value = context.to_owned();
+    pub(crate) fn header_value(&self) -> String {
+        let mut value = String::new();
         for (name, payload) in &self.sections {
-            value.push(WIRE_SEPARATOR);
-            value.push_str(name);
-            value.push(NAME_SEPARATOR);
-            value.push_str(payload);
+            codec::push_section(&mut value, name, payload);
         }
         value
     }
 
-    /// Replace the sections in `metadata`'s `ctx` header with these, keeping
-    /// the context blob. Panics if the header is missing: wire data travels
-    /// inside it, so the context must be attached first.
+    /// Make these sections the `ctx` header of `metadata`, replacing whatever
+    /// it carried; with no sections the header is removed.
     pub fn install(&self, metadata: &mut MetadataMap) {
-        replace_header(metadata, |context| self.header_value(context));
+        if self.sections.is_empty() {
+            metadata.remove(MASA_CONTEXT_HEADER);
+            return;
+        }
+        let value: MetadataValue<Ascii> = self
+            .header_value()
+            .parse()
+            .expect("base64, `.`, `:` and names are ASCII");
+        metadata.insert(MASA_CONTEXT_HEADER, value);
     }
 }
 
-/// Rewrite the `ctx` header of `metadata` from its context blob.
-fn replace_header(metadata: &mut MetadataMap, build: impl FnOnce(&str) -> String) {
-    let current = metadata
-        .get(MASA_CONTEXT_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_else(|| panic!("{}", masa_core::MISSING_CONTEXT_HEADER_MESSAGE));
-    let context = current
-        .split_once(WIRE_SEPARATOR)
-        .map_or(current, |(context, _)| context);
-    let value: MetadataValue<Ascii> = build(context)
-        .parse()
-        .expect("base64, `.`, `:` and names are ASCII");
-    metadata.insert(MASA_CONTEXT_HEADER, value);
-}
-
-/// Set the context blob of `metadata`'s `ctx` header to `context` (the output
-/// of `Context::to_header_string`), keeping the wire sections already there.
-pub(crate) fn set_context_part(metadata: &mut MetadataMap, context: String) {
-    let sections = metadata
-        .get(MASA_CONTEXT_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split_once(WIRE_SEPARATOR))
-        .map(|(_, sections)| sections.to_owned());
-    let value = match sections {
-        Some(sections) => format!("{context}{WIRE_SEPARATOR}{sections}"),
-        None => context,
-    };
-    let value: MetadataValue<Ascii> = value.parse().expect("base64 and `.` are ASCII");
-    metadata.insert(MASA_CONTEXT_HEADER, value);
-}
-
-/// Decode only module `M`'s section from `headers`, without decoding the
-/// `Context` or any other module's data. `Ok(None)` if the header or the
-/// section is absent.
+/// Decode only module `M`'s section from `headers`, without decoding any
+/// other module's data. `Ok(None)` if the header or the section is absent.
 pub fn peek<M: Layer>(headers: &http::HeaderMap) -> Result<Option<M::Wire>, WireError> {
     WireIn::from_headers(headers)?.get::<M>()
 }
@@ -259,7 +205,6 @@ pub fn get_from_metadata<M: Layer>(metadata: &MetadataMap) -> Result<Option<M::W
 }
 
 /// Set module `M`'s wire data in `metadata`, keeping other modules' data.
-/// The context must already be attached.
 pub fn set_in_metadata<M: Layer>(
     metadata: &mut MetadataMap,
     wire: &M::Wire,
@@ -270,13 +215,12 @@ pub fn set_in_metadata<M: Layer>(
     Ok(())
 }
 
-/// A `ctx` header value for `context` (the output of
-/// `Context::to_header_string`) carrying module `M`'s wire data, for building
-/// inbound requests by hand (tests, tools).
-pub fn header_value_with<M: Layer>(context: &str, wire: &M::Wire) -> Result<String, WireError> {
+/// A `ctx` header value carrying module `M`'s wire data, for building inbound
+/// requests by hand (tests, tools).
+pub fn header_value_with<M: Layer>(wire: &M::Wire) -> Result<String, WireError> {
     let mut out = WireOut::new();
     out.put::<M>(wire)?;
-    Ok(out.header_value(context))
+    Ok(out.header_value())
 }
 
 #[cfg(test)]
@@ -284,9 +228,9 @@ mod tests {
     use super::*;
 
     fn map_with(pairs: &[(&str, &str)]) -> http::HeaderMap {
-        let mut value = "Q1RY".to_owned();
+        let mut value = String::new();
         for (name, payload) in pairs {
-            value.push_str(&format!(".{name}:{payload}"));
+            codec::push_section(&mut value, name, payload);
         }
         let mut headers = http::HeaderMap::new();
         headers.insert(MASA_CONTEXT_HEADER, value.parse().unwrap());
@@ -294,8 +238,12 @@ mod tests {
     }
 
     #[test]
-    fn no_sections_leaves_context_unchanged() {
-        assert_eq!(WireOut::new().header_value("Q1RY"), "Q1RY");
+    fn no_sections_is_an_empty_header() {
+        assert_eq!(WireOut::new().header_value(), "");
+        let mut metadata = MetadataMap::new();
+        metadata.insert(MASA_CONTEXT_HEADER, "a:NQ==".parse().unwrap());
+        WireOut::new().install(&mut metadata);
+        assert!(metadata.get(MASA_CONTEXT_HEADER).is_none());
     }
 
     #[test]
@@ -304,15 +252,26 @@ mod tests {
         out.put_named("a", &7u32).unwrap();
         out.put_named("b", &"x".to_string()).unwrap();
         out.put_named("a", &8u32).unwrap();
-        let value = out.header_value("Q1RY");
-        assert_eq!(value.matches('.').count(), 2);
+        let value = out.header_value();
+        assert_eq!(value.matches('.').count(), 1);
 
-        let input = WireIn::from_header_value(&value);
+        let input = WireIn { sections: &value };
         assert_eq!(input.decode_present::<u32>("a").unwrap(), Some(8));
         assert_eq!(
             input.decode_present::<String>("b").unwrap().as_deref(),
             Some("x")
         );
+    }
+
+    #[test]
+    fn install_replaces_the_previous_header() {
+        let mut metadata = MetadataMap::new();
+        metadata.insert(MASA_CONTEXT_HEADER, "old:NQ==".parse().unwrap());
+        let mut out = WireOut::new();
+        out.put_named("new", &1u32).unwrap();
+        out.install(&mut metadata);
+        let value = metadata.get(MASA_CONTEXT_HEADER).unwrap().to_str().unwrap();
+        assert!(value.starts_with("new:") && !value.contains("old"));
     }
 
     #[test]

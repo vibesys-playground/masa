@@ -1,13 +1,14 @@
 use std::fmt;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
+use crate::wire;
 use crate::{Api, Latency, PriorityHint, RequestId, Timestamp};
 
-/// Separates the base64 bincode `Context` from the module-wire suffix in the
-/// context header value. Not part of the base64 alphabet.
-pub const WIRE_SEPARATOR: char = '.';
+/// Name of the budget section in the `ctx` header: the wire data of Masa's
+/// budget module, which is the [`Context`].
+pub const BUDGET_SECTION: &str = "budget";
 
 pub const MISSING_CONTEXT_HEADER_MESSAGE: &str =
     "missing MASA context header `ctx`; MASA-enabled services require clients to attach context via MASA context helpers";
@@ -20,17 +21,16 @@ pub fn invalid_context_header_metadata_message(error: impl fmt::Display) -> Stri
     )
 }
 
-fn invalid_context_header_base64_message(error: impl fmt::Display) -> String {
+pub fn missing_budget_section_message() -> String {
     format!(
-        "invalid MASA context header `{}`: invalid base64; MASA-enabled services require clients to attach context via MASA context helpers: {}",
-        crate::MASA_CONTEXT_HEADER,
-        error
+        "MASA context header `{}` has no `{BUDGET_SECTION}` section; MASA-enabled services require clients to attach context via MASA context helpers",
+        crate::MASA_CONTEXT_HEADER
     )
 }
 
-fn invalid_context_header_bincode_message(error: impl fmt::Display) -> String {
+pub fn invalid_budget_section_message(error: impl fmt::Display) -> String {
     format!(
-        "invalid MASA context header `{}`: invalid bincode payload; MASA-enabled services require clients to attach context via MASA context helpers: {}",
+        "invalid MASA context header `{}`: invalid `{BUDGET_SECTION}` section; MASA-enabled services require clients to attach context via MASA context helpers: {}",
         crate::MASA_CONTEXT_HEADER,
         error
     )
@@ -49,200 +49,142 @@ pub enum FutureSpan {
     Queueing(u64),
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct RequestContext {
-    pub api: Api,
-    pub request_id: RequestId,
-    pub slo: Latency,
-    pub gateway_entry: Timestamp,
-    pub deadline: Timestamp,
-    pub prio_hint: PriorityHint,
-    pub frontend_elapse: Option<u64>,
-}
-
-/// Represent a Masa context.
+/// A request's time-budget facts: who asked for what, when it entered the
+/// system, how long it may take, and the deadline and priority this hop's
+/// scheduler uses.
 ///
-/// Header serialization uses bincode. Masa deployments assume all binaries are
-/// built from the same code; invalid decodes panic immediately.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+/// This is the wire data of Masa's budget module (the `budget` section of the
+/// `ctx` header). It is encoded as a JSON array, because it is built and
+/// parsed on every RPC. Clients create one for a root request (see
+/// `masa_policy::ContextBuilder`); after that, the budget module derives each
+/// child's from its parent's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ContextCompact", into = "ContextCompact")]
 pub struct Context {
-    request: RequestContext,
-}
-
-impl Default for Context {
-    fn default() -> Self {
-        ContextBuilder::new(Api::default(), 0).build()
-    }
-}
-
-pub struct ContextBuilder {
     api: Api,
     request_id: RequestId,
     slo: Latency,
     gateway_entry: Timestamp,
     deadline: Timestamp,
-    prio_hint: Option<PriorityHint>,
-    frontend_elapse: Option<u64>,
+    prio_hint: PriorityHint,
 }
 
-impl ContextBuilder {
-    pub fn new(api: impl Into<Api>, request_id: RequestId) -> Self {
+#[derive(Serialize, Deserialize)]
+struct ContextCompact(Api, RequestId, Latency, Timestamp, Timestamp, PriorityHint);
+
+impl From<Context> for ContextCompact {
+    fn from(ctx: Context) -> Self {
+        Self(
+            ctx.api,
+            ctx.request_id,
+            ctx.slo,
+            ctx.gateway_entry,
+            ctx.deadline,
+            ctx.prio_hint,
+        )
+    }
+}
+
+impl From<ContextCompact> for Context {
+    fn from(compact: ContextCompact) -> Self {
         Self {
-            api: api.into(),
-            request_id,
-            slo: 0,
-            gateway_entry: 0,
-            deadline: 0,
-            prio_hint: None,
-            frontend_elapse: None,
+            api: compact.0,
+            request_id: compact.1,
+            slo: compact.2,
+            gateway_entry: compact.3,
+            deadline: compact.4,
+            prio_hint: compact.5,
         }
     }
+}
 
-    pub fn from(ctx: &Context) -> Self {
-        Self {
-            api: ctx.request.api.clone(),
-            request_id: ctx.request.request_id,
-            slo: ctx.request.slo,
-            gateway_entry: ctx.request.gateway_entry,
-            deadline: ctx.request.deadline,
-            prio_hint: Some(ctx.request.prio_hint),
-            frontend_elapse: ctx.request.frontend_elapse,
-        }
-    }
+/// The priority alone, for readers that run before any module and must not
+/// decode the rest (see [`read_priority_from_headers`](crate::read_priority_from_headers)).
+/// Mirrors the layout of [`ContextCompact`].
+#[derive(Deserialize)]
+pub(crate) struct PriorityPeek(
+    IgnoredAny,
+    IgnoredAny,
+    IgnoredAny,
+    IgnoredAny,
+    IgnoredAny,
+    pub(crate) PriorityHint,
+);
 
-    pub fn slo(mut self, slo: Latency) -> Self {
-        self.slo = slo;
-        self
-    }
-
-    pub fn gateway_entry(mut self, gateway_entry: Timestamp) -> Self {
-        self.gateway_entry = gateway_entry;
-        self
-    }
-
-    pub fn deadline(mut self, deadline: Timestamp) -> Self {
-        self.deadline = deadline;
-        self
-    }
-
-    pub fn prio_hint(mut self, prio_hint: PriorityHint) -> Self {
-        self.prio_hint = Some(prio_hint);
-        self
-    }
-
-    pub fn frontend_elapse(mut self, elapse: u64) -> Self {
-        self.frontend_elapse = Some(elapse);
-        self
-    }
-
-    pub fn build(self) -> Context {
-        Context {
-            request: RequestContext {
-                api: self.api,
-                request_id: self.request_id,
-                slo: self.slo,
-                gateway_entry: self.gateway_entry,
-                deadline: self.deadline,
-                prio_hint: self.prio_hint.unwrap_or_else(|| {
-                    #[cfg(feature = "sched_tailclipper")]
-                    {
-                        PriorityHint::new(self.gateway_entry)
-                    }
-                    #[cfg(not(feature = "sched_tailclipper"))]
-                    {
-                        #[cfg(feature = "sched_pred")]
-                        {
-                            PriorityHint::new(self.deadline.saturating_sub(crate::time_now()))
-                        }
-                        #[cfg(not(feature = "sched_pred"))]
-                        {
-                            PriorityHint::new(self.deadline)
-                        }
-                    }
-                }),
-                frontend_elapse: self.frontend_elapse,
-            },
-        }
+impl Default for Context {
+    fn default() -> Self {
+        Self::new(Api::default(), 0, 0, 0, 0, PriorityHint::infra())
     }
 }
 
 impl Context {
+    pub fn new(
+        api: impl Into<Api>,
+        request_id: RequestId,
+        slo: Latency,
+        gateway_entry: Timestamp,
+        deadline: Timestamp,
+        prio_hint: PriorityHint,
+    ) -> Self {
+        Self {
+            api: api.into(),
+            request_id,
+            slo,
+            gateway_entry,
+            deadline,
+            prio_hint,
+        }
+    }
+
     /// Get the API.
     pub fn api(&self) -> &Api {
-        &self.request.api
+        &self.api
     }
 
     /// Get the request ID.
     pub fn request_id(&self) -> RequestId {
-        self.request.request_id
+        self.request_id
     }
 
     /// Get the SLO.
     pub fn slo(&self) -> Latency {
-        self.request.slo
+        self.slo
     }
 
     /// Get the start timestamp.
     pub fn gateway_entry(&self) -> Timestamp {
-        self.request.gateway_entry
+        self.gateway_entry
     }
 
     /// Get the deadline.
     pub fn deadline(&self) -> Timestamp {
-        self.request.deadline
+        self.deadline
     }
 
     /// Get the e2e deadline.
     pub fn e2e_deadline(&self) -> Timestamp {
-        self.request.gateway_entry + self.request.slo
+        self.gateway_entry + self.slo
     }
 
     pub fn prio_hint(&self) -> PriorityHint {
-        self.request.prio_hint
+        self.prio_hint
     }
 
-    /// Get the frontend elapse time.
-    pub fn frontend_elapse(&self) -> Option<u64> {
-        self.request.frontend_elapse
-    }
-
-    /// Set the frontend elapse time.
-    pub fn set_frontend_elapse(&mut self, elapse: u64) {
-        self.request.frontend_elapse = Some(elapse);
-    }
-
-    /// Get request lifecycle data.
-    pub fn request(&self) -> &RequestContext {
-        &self.request
-    }
-
-    /// Create a new Masa context from JSON.
-    pub fn from_json(json: &str) -> Self {
-        serde_json::from_str(json).unwrap()
-    }
-
-    /// Convert a Masa context to JSON.
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(&self).unwrap()
-    }
-
-    /// Create a new Masa context from Base64 encoded bincode.
-    ///
-    /// The header value may carry a module-wire suffix after a `.` (see
-    /// `masa_policy::wire`); the base64 alphabet has no `.`, so the context is
-    /// everything before it and the suffix is ignored here.
+    /// Decode a context from a `ctx` header value, reading only its budget
+    /// section. Panics if it is missing or malformed: Masa deployments assume
+    /// all binaries are built from the same code.
     pub fn from_header_string(s: &str) -> Self {
-        let s = s.split_once(WIRE_SEPARATOR).map_or(s, |(ctx, _)| ctx);
-        let bytes = BASE64
-            .decode(s)
-            .unwrap_or_else(|err| panic!("{}", invalid_context_header_base64_message(err)));
-        bincode::deserialize(&bytes)
-            .unwrap_or_else(|err| panic!("{}", invalid_context_header_bincode_message(err)))
+        let payload = wire::find_section(s, BUDGET_SECTION)
+            .unwrap_or_else(|| panic!("{}", missing_budget_section_message()));
+        wire::decode_payload(payload)
+            .unwrap_or_else(|err| panic!("{}", invalid_budget_section_message(err)))
     }
 
-    /// Convert a Masa context to Base64 encoded bincode.
+    /// A `ctx` header value carrying this context as its budget section.
     pub fn to_header_string(&self) -> String {
-        let bytes = bincode::serialize(&self).unwrap();
-        BASE64.encode(bytes)
+        let payload = wire::encode_payload(self).expect("a context always encodes");
+        let mut header = String::new();
+        wire::push_section(&mut header, BUDGET_SECTION, &payload);
+        header
     }
 }

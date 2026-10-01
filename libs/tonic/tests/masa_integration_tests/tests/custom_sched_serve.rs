@@ -15,12 +15,13 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use masa::MasaRequestExt;
-use masa_core::{time_now, ContextBuilder};
+use masa_core::time_now;
 use masa_integration_tests::pb::{
     child_service_client::ChildServiceClient,
     child_service_server::{ChildService, ChildServiceServer},
     Input1, Input2, Output1, Output2,
 };
+use masa_policy::ContextBuilder;
 use rpcstack_sched::{custom, SchedFlavor, SelectedQueue};
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};

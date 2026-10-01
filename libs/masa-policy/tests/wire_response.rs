@@ -7,10 +7,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use masa_core::{time_now, Context, ContextBuilder};
+use masa_core::time_now;
+use masa_policy::ContextBuilder;
 use masa_policy::{
-    policy_stack, Extensions, Layer, MasaResponseExt, MasaStatusExt, PolicyHooks, WireIn, WireOut,
-    MASA_CONTEXT_HEADER,
+    policy_stack, BudgetChildWriter, BudgetLayer, Extensions, Layer, MasaResponseExt,
+    MasaStatusExt, PolicyHooks, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
@@ -42,13 +43,7 @@ impl Layer for Sum {
     const NAME: &'static str = "sum";
     type Wire = SumWire;
 
-    fn new(
-        method: &CowGrpcMethod,
-        _s: &(),
-        _c: &mut Context,
-        _wire: &WireIn<'_>,
-        _ext: &mut Extensions,
-    ) -> Self {
+    fn new(method: &CowGrpcMethod, _s: &(), _wire: &WireIn<'_>, _ext: &mut Extensions) -> Self {
         let own = match method.method() {
             "Root" => 100,
             "Mid" => 10,
@@ -63,7 +58,6 @@ impl Layer for Sum {
 
     fn after_child_rpc<T>(
         &self,
-        _ctx: &Context,
         _child_method: &CowGrpcMethod,
         _response: &Result<Response<T>, Status>,
         response_wire: &WireIn<'_>,
@@ -79,7 +73,6 @@ impl Layer for Sum {
 
     fn finalize<Ret>(
         &self,
-        _ctx: &mut Context,
         _result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
         _ext: &Extensions,
@@ -102,18 +95,12 @@ impl Layer for Mute {
     const NAME: &'static str = "mute";
     type Wire = u8;
 
-    fn new(
-        _m: &CowGrpcMethod,
-        _s: &(),
-        _c: &mut Context,
-        _wire: &WireIn<'_>,
-        _ext: &mut Extensions,
-    ) -> Self {
+    fn new(_m: &CowGrpcMethod, _s: &(), _wire: &WireIn<'_>, _ext: &mut Extensions) -> Self {
         Self
     }
 }
 
-type Stack = policy_stack![Sum, Mute];
+type Stack = policy_stack![BudgetLayer, Sum, Mute, BudgetChildWriter];
 
 fn root_request() -> http::Request<()> {
     let now = time_now();

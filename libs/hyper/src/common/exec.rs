@@ -175,9 +175,14 @@ mod h2_priority_tests {
     #[cfg(feature = "masa")]
     fn default_executor_reads_context_priority_header() {
         let mut headers = HeaderMap::new();
-        let ctx = masa_core::ContextBuilder::new("test.Service/Rpc", 7)
-            .prio_hint(masa_core::PriorityHint::new(42))
-            .build();
+        let ctx = masa_core::Context::new(
+            "test.Service/Rpc",
+            7,
+            0,
+            0,
+            0,
+            masa_core::PriorityHint::new(42),
+        );
         headers.insert(
             masa_core::MASA_CONTEXT_HEADER,
             ctx.to_header_string().parse().unwrap(),

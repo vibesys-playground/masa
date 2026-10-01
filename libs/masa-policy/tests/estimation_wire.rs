@@ -8,13 +8,14 @@
 
 use std::sync::Arc;
 
-use masa_core::{time_now, Context, ContextBuilder};
+use masa_core::{time_now, Context};
 use masa_policy::modules::EstimationLayer;
+use masa_policy::ContextBuilder;
 use masa_policy::{
     get_wire_from_metadata, policy_stack, set_masa_context_in_metadata, set_wire_in_metadata,
-    EstimationInfo, EstimationRequestWire, EstimationResponseWire, EstimationWire, Extensions,
-    Layer, MasaRequestExt, MasaResponseExt, MasaStatusExt, PolicyHooks, RootMethod, WireIn,
-    WireOut, MASA_CONTEXT_HEADER,
+    BudgetChildWriter, BudgetLayer, EstimationInfo, EstimationRequestWire, EstimationResponseWire,
+    EstimationWire, Extensions, Layer, MasaRequestExt, MasaResponseExt, MasaStatusExt, PolicyHooks,
+    RootMethod, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
@@ -234,13 +235,7 @@ impl Layer for Probe {
     const NAME: &'static str = "probe";
     type Wire = Seen;
 
-    fn new(
-        _m: &CowGrpcMethod,
-        _s: &(),
-        _c: &mut Context,
-        _w: &WireIn<'_>,
-        ext: &mut Extensions,
-    ) -> Self {
+    fn new(_m: &CowGrpcMethod, _s: &(), _w: &WireIn<'_>, ext: &mut Extensions) -> Self {
         let info = ext
             .get::<EstimationInfo>()
             .expect("estimation runs before the probe");
@@ -256,7 +251,6 @@ impl Layer for Probe {
 
     fn finalize<Ret>(
         &self,
-        _ctx: &mut Context,
         _result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
         _ext: &Extensions,
@@ -265,7 +259,7 @@ impl Layer for Probe {
     }
 }
 
-type Probed = policy_stack![EstimationLayer, Probe];
+type Probed = policy_stack![BudgetLayer, EstimationLayer, Probe, BudgetChildWriter];
 
 fn probe(req: &http::Request<()>) -> Seen {
     let server = Arc::new(Server::<Probed>::new("probed"));
@@ -336,7 +330,7 @@ mod ordering {
 
     #[test]
     fn admission_after_estimation_constructs() {
-        type Ordered = policy_stack![EstimationLayer, PredAdmissionLayer];
+        type Ordered = policy_stack![BudgetLayer, EstimationLayer, PredAdmissionLayer];
         assert!(masa_policy::ServerContext::<Ordered>::try_new("ordered").is_ok());
     }
 }
@@ -540,13 +534,7 @@ impl Layer for OutcomeProbe {
     const NAME: &'static str = "outcome_probe";
     type Wire = bool;
 
-    fn new(
-        _m: &CowGrpcMethod,
-        _s: &(),
-        _c: &mut Context,
-        _w: &WireIn<'_>,
-        ext: &mut Extensions,
-    ) -> Self {
+    fn new(_m: &CowGrpcMethod, _s: &(), _w: &WireIn<'_>, ext: &mut Extensions) -> Self {
         Self(
             ext.get::<EstimationInfo>()
                 .expect("estimation runs first")
@@ -556,7 +544,6 @@ impl Layer for OutcomeProbe {
 
     fn finalize<Ret>(
         &self,
-        _ctx: &mut Context,
         _result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
         _ext: &Extensions,
@@ -566,7 +553,12 @@ impl Layer for OutcomeProbe {
     }
 }
 
-type Outcome = policy_stack![EstimationLayer, OutcomeProbe];
+type Outcome = policy_stack![
+    BudgetLayer,
+    EstimationLayer,
+    OutcomeProbe,
+    BudgetChildWriter
+];
 
 fn subtree_outcome(child: Option<Result<Response<()>, Status>>) -> bool {
     let parent = begin::<Outcome>("outcome", "Method", &inbound(None));
