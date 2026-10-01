@@ -12,8 +12,8 @@ use masa_core::{PriorityHint, ABORT_SLACK};
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
 use super::super::{
-    BudgetInfo, BudgetLayer, ChildDeadline, ChildPriority, ChildState, Extensions, Layer,
-    LayerServer, MissingDependency, Outcome, Requires, ServerInit,
+    BudgetInfo, BudgetLayer, ChildDeadline, ChildOutcome, ChildPriority, ChildState, Extensions,
+    Layer, LayerServer, MissingDependency, Outcome, Requires, ServerInit,
 };
 use super::default_estimator::DefaultLatencyEstimator;
 use super::state::{
@@ -223,11 +223,16 @@ impl Layer for EstimationLayer {
     fn after_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        response: &Result<Response<T>, Status>,
+        outcome: ChildOutcome<'_, T>,
         response_wire: &WireIn<'_>,
         child: &ChildState,
         ext: &Extensions,
     ) -> Result<(), Status> {
+        // A rejected child was never sent: there is no latency to record and
+        // nothing to absorb.
+        let Some(response) = outcome.sent() else {
+            return Ok(());
+        };
         if let Some(child_tracker) = child.get::<ChildRPCTracker>() {
             let report = child_report(
                 response,

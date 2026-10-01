@@ -10,8 +10,8 @@ use std::sync::Arc;
 use masa_core::time_now;
 use masa_policy::ContextBuilder;
 use masa_policy::{
-    policy_stack, BudgetLayer, ChildState, Extensions, Layer, MasaResponseExt, MasaStatusExt,
-    Outcome, PolicyHooks, WireIn, WireOut, MASA_CONTEXT_HEADER,
+    policy_stack, BudgetLayer, ChildOutcome, ChildState, Extensions, Layer, MasaResponseExt,
+    MasaStatusExt, Outcome, PolicyHooks, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
@@ -58,7 +58,7 @@ impl Layer for Sum {
     fn after_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _response: &Result<Response<T>, Status>,
+        _outcome: ChildOutcome<'_, T>,
         response_wire: &WireIn<'_>,
         _child: &ChildState,
         _ext: &Extensions,

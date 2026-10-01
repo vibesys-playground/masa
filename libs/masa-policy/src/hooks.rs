@@ -22,8 +22,8 @@ use crate::context_ext::{
     get_service_name_override_from_headers, get_service_name_override_from_metadata,
 };
 use crate::layer::{
-    validate_stack, ChildState, Early, Extensions, LayerServer, LayerStack, MissingDependency,
-    Outcome, ServerInit,
+    validate_stack, ChildOutcome, ChildState, Early, Extensions, LayerServer, LayerStack,
+    MissingDependency, Outcome, ServerInit,
 };
 use crate::masa_stack::MasaStack;
 use crate::wire::{WireIn, WireOut};
@@ -197,7 +197,7 @@ impl<S: LayerStack> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentCon
             &mut child_wire,
             &mut state.ext,
         ) {
-            self.layers.child_rpc_rejected(
+            self.layers.reject_child_rpc(
                 &child_method_name,
                 rejection.by,
                 &rejection.status,
@@ -230,7 +230,7 @@ impl<S: LayerStack> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentCon
                 WireIn::from_metadata(metadata).unwrap_or_else(|err| panic!("{err}"));
             self.layers.after_child_rpc(
                 child_method,
-                response,
+                ChildOutcome::Sent(&*response),
                 &response_wire,
                 &child_ctx.state,
                 &self.state().ext,

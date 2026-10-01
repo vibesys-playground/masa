@@ -33,7 +33,7 @@ pub use context_ext::{
 };
 pub use hooks::{ChildContext, ParentContext, PolicyHooks, ServerContext};
 pub use layer::{
-    root_priority, BudgetInfo, BudgetLayer, ChildDeadline, ChildPriority, ChildState,
+    root_priority, BudgetInfo, BudgetLayer, ChildDeadline, ChildOutcome, ChildPriority, ChildState,
     ContextBuilder, DecisionClosed, Early, Extensions, Layer, LayerServer, LayerStack,
     MissingDependency, Outcome, Proposal, Rejection, Requires, ServerInit, Stack,
 };

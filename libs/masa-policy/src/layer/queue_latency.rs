@@ -14,7 +14,10 @@ use std::sync::{Mutex, OnceLock};
 use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Response, Status};
 
-use super::{ChildState, Extensions, Layer, LayerServer, MissingDependency, Outcome, ServerInit};
+use super::{
+    ChildOutcome, ChildState, Extensions, Layer, LayerServer, MissingDependency, Outcome,
+    ServerInit,
+};
 
 // ── Wire data ───────────────────────────────────────────────────────────
 
@@ -98,15 +101,16 @@ impl Layer for QueueLatencyLayer {
     fn after_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        response: &Result<Response<T>, Status>,
+        outcome: ChildOutcome<'_, T>,
         response_wire: &WireIn<'_>,
         _child: &ChildState,
         _ext: &Extensions,
     ) -> Result<(), Status> {
-        // Only successful responses have ever contributed to the totals.
-        if response.is_err() {
+        // Only successful responses have ever contributed to the totals; a
+        // rejected child was never sent.
+        let Some(Ok(_)) = outcome.sent() else {
             return Ok(());
-        }
+        };
         let child = response_wire
             .get::<Self>()
             .unwrap_or_else(|err| panic!("{err}"));

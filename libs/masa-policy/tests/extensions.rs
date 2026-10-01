@@ -6,9 +6,9 @@ use std::sync::Arc;
 use masa_core::time_now;
 use masa_policy::ContextBuilder;
 use masa_policy::{
-    policy_stack, ChildState, Extensions, Layer, LayerServer, LayerStack, MasaResponseExt,
-    MissingDependency, Outcome, PolicyHooks, ServerContext, ServerInit, WireIn, WireOut,
-    MASA_CONTEXT_HEADER,
+    policy_stack, ChildOutcome, ChildState, Extensions, Layer, LayerServer, LayerStack,
+    MasaResponseExt, MissingDependency, Outcome, PolicyHooks, ServerContext, ServerInit, WireIn,
+    WireOut, MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
@@ -111,7 +111,7 @@ impl Layer for Consumer {
     fn after_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _response: &Result<Response<T>, Status>,
+        _outcome: ChildOutcome<'_, T>,
         _response_wire: &WireIn<'_>,
         _child: &ChildState,
         ext: &Extensions,

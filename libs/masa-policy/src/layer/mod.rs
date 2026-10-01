@@ -14,9 +14,10 @@
 //   they `propose` typed values, the framework records them with the proposing
 //   module's name, and the module that owns the decision `resolve`s them in its
 //   `seal_child_rpc` by its own rule. The framework has none.
-// - Post-hooks that undo or report on pre-hooks (`after_child_rpc`,
-//   `child_rpc_rejected`, `finalize`) run in reverse stack order, and only for
-//   the modules whose pre-hook ran. `finalize` also learns whether a module
+// - Post-hooks (`after_child_rpc`, `finalize`) run in reverse stack order, and
+//   only for the modules whose pre-hook ran: every `before_child_rpc` is
+//   followed by exactly one `after_child_rpc`, whether the child was sent or a
+//   module rejected it (`ChildOutcome`), and `finalize` learns whether a module
 //   ended the request (`Outcome`).
 // - `after_poll` decides, like `before_poll`, so it runs in stack order and
 //   short-circuits.
@@ -287,7 +288,11 @@ pub(crate) fn validate_stack<S: LayerStack>() -> Result<(), MissingDependency> {
 ///
 /// Modules entered before a later module ended the request learn about it
 /// here, so an observer placed early in the stack sees everything that
-/// happens after it.
+/// happens after it. The cause is structured data (the rejecting module's
+/// [`Layer::NAME`] and the status it gave), so an observer never parses a
+/// status message. It is what the framework recorded when the module ended the
+/// request and does not change if a module rewrites the result in `finalize`:
+/// the cause (`outcome`) and the final result (`result`) are both visible.
 #[derive(Debug, Clone, Copy)]
 pub enum Outcome<'a> {
     /// No module ended the request: the handler produced the result, which
@@ -307,6 +312,49 @@ pub enum Outcome<'a> {
         /// [`Layer::NAME`] of the module that replied.
         by: &'static str,
     },
+}
+
+impl Outcome<'_> {
+    /// [`Layer::NAME`] of the module that ended the request, if one did.
+    pub fn ended_by(&self) -> Option<&'static str> {
+        match *self {
+            Self::Handled => None,
+            Self::Rejected { by, .. } | Self::Replied { by } => Some(by),
+        }
+    }
+}
+
+/// How a child RPC ended, as `after_child_rpc` sees it.
+#[derive(Debug)]
+pub enum ChildOutcome<'a, T> {
+    /// The child RPC was sent; this is its response, or the error status it
+    /// failed with.
+    Sent(&'a Result<Response<T>, Status>),
+    /// A module rejected the child RPC, so it was not sent.
+    Rejected {
+        /// [`Layer::NAME`] of the module that rejected.
+        by: &'static str,
+        status: &'a Status,
+    },
+}
+
+impl<T> Clone for ChildOutcome<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for ChildOutcome<'_, T> {}
+
+impl<'a, T> ChildOutcome<'a, T> {
+    /// The response, or the status of a failed one, if the child RPC was sent;
+    /// `None` if a module rejected it.
+    pub fn sent(&self) -> Option<&'a Result<Response<T>, Status>> {
+        match *self {
+            Self::Sent(response) => Some(response),
+            Self::Rejected { .. } => None,
+        }
+    }
 }
 
 /// A policy module: per-request state that hooks into the request lifecycle
@@ -378,7 +426,8 @@ pub trait Layer: Send + Sync + std::fmt::Debug + 'static {
     /// The module may reject the child RPC (returning `Err`). Runs in stack
     /// order; the first `Err` rejects the child RPC and the modules after it
     /// do not run. The modules that ran, including the rejecting one, get
-    /// [`Layer::child_rpc_rejected`] in reverse order; the others get nothing.
+    /// [`Layer::after_child_rpc`] in reverse order with
+    /// [`ChildOutcome::Rejected`]; the others get nothing.
     ///
     /// `child_wire` starts empty and becomes the child request's wire
     /// sections: a module that does not `put` anything sends nothing, and
@@ -409,8 +458,8 @@ pub trait Layer: Send + Sync + std::fmt::Debug + 'static {
     /// owner applies its own rule. Masa's budget module resolves the child's
     /// deadline and priority this way and writes the child's budget section.
     /// Returns `Err` to reject the child RPC: it is then not sent, and every
-    /// module gets [`Layer::child_rpc_rejected`] (the modules that had not yet
-    /// sealed do not seal).
+    /// module gets [`Layer::after_child_rpc`] with [`ChildOutcome::Rejected`]
+    /// (the modules that had not yet sealed do not seal).
     fn seal_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
@@ -422,39 +471,27 @@ pub trait Layer: Send + Sync + std::fmt::Debug + 'static {
         Ok(())
     }
 
-    /// Called when a module rejected the child RPC that this module's
-    /// `before_child_rpc` had already run for, in `before_child_rpc` or in
-    /// `seal_child_rpc`. `by` is [`Layer::NAME`] of the rejecting module, which
-    /// may be this one. Runs in reverse stack order over the modules that ran
-    /// `before_child_rpc`; the response-side counterpart of a rejected child
-    /// RPC, which gets no [`Layer::after_child_rpc`].
-    fn child_rpc_rejected(
-        &self,
-        _child_method: &CowGrpcMethod,
-        _by: &'static str,
-        _status: &Status,
-        _child: &ChildState,
-        _ext: &Extensions,
-    ) {
-    }
-
-    /// Called after a child RPC response is received.
+    /// Called once for every child RPC this module's `before_child_rpc` ran
+    /// for, when the child RPC is over: after its response arrived
+    /// ([`ChildOutcome::Sent`]), or when a module rejected it
+    /// ([`ChildOutcome::Rejected`], the child was not sent). A module that
+    /// counts children in `before_child_rpc` undoes it here for both.
     ///
     /// `response_wire` is the wire sections the child's modules attached to
     /// the response (or to the error status); read this module's own with
-    /// `response_wire.get::<Self>()`. It borrows from `response`, which is
-    /// therefore read-only here. The framework carries none of it forward:
-    /// whatever this module wants to report upstream it must `put` in
-    /// [`Layer::finalize`].
+    /// `response_wire.get::<Self>()`. It is empty for a rejected child. It
+    /// borrows from the response, which is therefore read-only here. The
+    /// framework carries none of it forward: whatever this module wants to
+    /// report upstream it must `put` in [`Layer::finalize`].
     ///
-    /// Runs for every module, in reverse stack order, and an `Err` does not
-    /// skip the others (each module's hook pairs with its `before_child_rpc`).
-    /// The first `Err` in that order is returned to the handler as the child
-    /// RPC's failure.
+    /// Runs in reverse stack order, and an `Err` does not skip the others. For
+    /// a sent child, the first `Err` in that order is returned to the handler
+    /// as the child RPC's failure; for a rejected child the rejection stands and
+    /// an `Err` is ignored.
     fn after_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _response: &Result<Response<T>, Status>,
+        _outcome: ChildOutcome<'_, T>,
         _response_wire: &WireIn<'_>,
         _child: &ChildState,
         _ext: &Extensions,
@@ -597,7 +634,7 @@ pub trait LayerStack: Send + Sync + std::fmt::Debug + 'static {
     /// Tell every module that a module rejected the child RPC in
     /// `seal_child_rpc`, when all of them had accepted it.
     #[doc(hidden)]
-    fn child_rpc_rejected(
+    fn reject_child_rpc(
         &self,
         child_method: &CowGrpcMethod,
         by: &'static str,
@@ -610,7 +647,7 @@ pub trait LayerStack: Send + Sync + std::fmt::Debug + 'static {
     fn after_child_rpc<T>(
         &self,
         child_method: &CowGrpcMethod,
-        response: &Result<Response<T>, Status>,
+        outcome: ChildOutcome<'_, T>,
         response_wire: &WireIn<'_>,
         child: &ChildState,
         ext: &Extensions,
@@ -673,7 +710,7 @@ impl LayerStack for () {
         Ok(())
     }
 
-    fn child_rpc_rejected(
+    fn reject_child_rpc(
         &self,
         _child_method: &CowGrpcMethod,
         _by: &'static str,
@@ -686,7 +723,7 @@ impl LayerStack for () {
     fn after_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _response: &Result<Response<T>, Status>,
+        _outcome: ChildOutcome<'_, T>,
         _response_wire: &WireIn<'_>,
         _child: &ChildState,
         _ext: &Extensions,
@@ -788,9 +825,15 @@ impl<H: Layer, T: LayerStack> LayerStack for Stack<H, T> {
                 }
             };
         // The head ran, so it learns of the rejection after the modules
-        // behind it, which have already been told.
-        self.head
-            .child_rpc_rejected(child_method, rejection.by, &rejection.status, child, ext);
+        // behind it, which have already been told. An error from the hook
+        // cannot undo the rejection.
+        let rejected: ChildOutcome<'_, ()> = ChildOutcome::Rejected {
+            by: rejection.by,
+            status: &rejection.status,
+        };
+        let _ = self
+            .head
+            .after_child_rpc(child_method, rejected, &WireIn::default(), child, ext);
         Err(rejection)
     }
 
@@ -816,7 +859,7 @@ impl<H: Layer, T: LayerStack> LayerStack for Stack<H, T> {
     }
 
     #[inline]
-    fn child_rpc_rejected(
+    fn reject_child_rpc(
         &self,
         child_method: &CowGrpcMethod,
         by: &'static str,
@@ -825,26 +868,28 @@ impl<H: Layer, T: LayerStack> LayerStack for Stack<H, T> {
         ext: &Extensions,
     ) {
         self.tail
-            .child_rpc_rejected(child_method, by, status, child, ext);
-        self.head
-            .child_rpc_rejected(child_method, by, status, child, ext);
+            .reject_child_rpc(child_method, by, status, child, ext);
+        let rejected: ChildOutcome<'_, ()> = ChildOutcome::Rejected { by, status };
+        let _ = self
+            .head
+            .after_child_rpc(child_method, rejected, &WireIn::default(), child, ext);
     }
 
     #[inline]
     fn after_child_rpc<R>(
         &self,
         child_method: &CowGrpcMethod,
-        response: &Result<Response<R>, Status>,
+        outcome: ChildOutcome<'_, R>,
         response_wire: &WireIn<'_>,
         child: &ChildState,
         ext: &Extensions,
     ) -> Result<(), Status> {
         let tail = self
             .tail
-            .after_child_rpc(child_method, response, response_wire, child, ext);
+            .after_child_rpc(child_method, outcome, response_wire, child, ext);
         let head = self
             .head
-            .after_child_rpc(child_method, response, response_wire, child, ext);
+            .after_child_rpc(child_method, outcome, response_wire, child, ext);
         tail.and(head)
     }
 

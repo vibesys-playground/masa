@@ -15,8 +15,8 @@ use masa_core::Instant;
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
 use super::super::{
-    BudgetInfo, BudgetLayer, ChildState, Extensions, Layer, LayerServer, MissingDependency,
-    Outcome, Requires, ServerInit,
+    BudgetInfo, BudgetLayer, ChildOutcome, ChildState, Extensions, Layer, LayerServer,
+    MissingDependency, Outcome, Requires, ServerInit,
 };
 use crate::layer::est::default_estimator::DefaultLatencyEstimator;
 use crate::layer::est::latency_map::{MethodKey, ParentToChildKey};
@@ -242,12 +242,17 @@ impl Layer for PredAdmissionLayer {
     fn after_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        response: &Result<Response<T>, Status>,
+        outcome: ChildOutcome<'_, T>,
         response_wire: &WireIn<'_>,
         _child: &ChildState,
         _ext: &Extensions,
     ) -> Result<(), Status> {
-        if !self.info.is_ingress() || response.is_err() {
+        // Only a child that was sent and succeeded reports compute; a rejected
+        // child was never sent.
+        let Some(Ok(_)) = outcome.sent() else {
+            return Ok(());
+        };
+        if !self.info.is_ingress() {
             return Ok(());
         }
         let Some(root_mid) = self.info.root_method_id() else {
@@ -776,7 +781,7 @@ mod tests {
                 layer
                     .after_child_rpc(
                         &child,
-                        &response,
+                        ChildOutcome::Sent(&response),
                         &wire,
                         &ChildState::new(),
                         &Extensions::new(),

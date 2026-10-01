@@ -6,7 +6,8 @@ use tonic::{CowGrpcMethod, Response, Status};
 
 use super::shared::{RajomonSharedState, RAJOMON_STATE};
 use crate::layer::{
-    ChildState, Extensions, Layer, LayerServer, MissingDependency, Outcome, ServerInit,
+    ChildOutcome, ChildState, Extensions, Layer, LayerServer, MissingDependency, Outcome,
+    ServerInit,
 };
 use crate::policy_params::PolicyParams;
 use crate::wire::{WireIn, WireOut};
@@ -180,11 +181,15 @@ impl Layer for RajomonLayer {
     fn after_child_rpc<T>(
         &self,
         child_method: &CowGrpcMethod,
-        _response: &Result<Response<T>, Status>,
+        outcome: ChildOutcome<'_, T>,
         response_wire: &WireIn<'_>,
         _child: &ChildState,
         _ext: &Extensions,
     ) -> Result<(), Status> {
+        // A rejected child was never sent, so no price came back.
+        if outcome.sent().is_none() {
+            return Ok(());
+        }
         // Extract and cache downstream prices from the child's response, which
         // may be an error status: the price is read regardless of outcome.
         let price = response_wire
