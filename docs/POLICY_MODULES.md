@@ -23,6 +23,10 @@ lives in three crates that know nothing about Masa
 | `libs/rpcstack` | `Module`, `ModuleServer`, `Stack`/`policy_stack!`, `Extensions`/`ChildState` with decision points, `Outcome`/`ChildOutcome`, `Requires`/`MissingDependency`/`ServerInit`, `build_server`, and the typed wire codec (`WireIn`, `WireOut`, `peek`). |
 | `libs/rpcstack-tonic` | `PolicyHooks<S>` (tonic's `Hooks` for any stack), and `RequestExt`/`ResponseExt`/`StatusExt` for module wire data and method-name overrides on tonic messages. |
 
+`libs/rajomon` is a policy built on those crates alone (`RajomonModule`, its
+state, wire data and parameters; no Masa crate in its dependencies, which the
+same script checks). `masa-policy` depends on it under `ac_rajomon`.
+
 `libs/masa-policy` holds Masa's own modules and stacks (budget, guard,
 estimation, oracle, admission, queue latency, `MasaStack`) and re-exports the
 framework, so `masa_policy::Module`, `masa_policy::policy_stack!` and
