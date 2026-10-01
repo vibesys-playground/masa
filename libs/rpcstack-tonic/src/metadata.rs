@@ -24,30 +24,36 @@ pub fn set_wire_in_metadata<M: Module>(metadata: &mut MetadataMap, data: &M::Wir
     wire::set_in_metadata::<M>(metadata, data).unwrap_or_else(|err| panic!("{err}"));
 }
 
+#[inline]
 fn get_ascii_metadata<'a>(metadata: &'a MetadataMap, key: &str) -> Option<&'a str> {
     metadata.get(key).and_then(|value| value.to_str().ok())
 }
 
+#[inline]
 fn get_ascii_header<'a>(headers: &'a http::HeaderMap, key: &str) -> Option<&'a str> {
     headers.get(key).and_then(|value| value.to_str().ok())
 }
 
 /// Get the logical method-name override from metadata.
+#[inline]
 pub fn get_method_name_override_from_metadata(metadata: &MetadataMap) -> Option<&str> {
     get_ascii_metadata(metadata, METHOD_NAME_OVERRIDE_HEADER)
 }
 
 /// Get the logical service-name override from metadata.
+#[inline]
 pub fn get_service_name_override_from_metadata(metadata: &MetadataMap) -> Option<&str> {
     get_ascii_metadata(metadata, SERVICE_NAME_OVERRIDE_HEADER)
 }
 
 /// Get the logical method-name override from HTTP headers.
+#[inline]
 pub fn get_method_name_override_from_headers(headers: &http::HeaderMap) -> Option<&str> {
     get_ascii_header(headers, METHOD_NAME_OVERRIDE_HEADER)
 }
 
 /// Get the logical service-name override from HTTP headers.
+#[inline]
 pub fn get_service_name_override_from_headers(headers: &http::HeaderMap) -> Option<&str> {
     get_ascii_header(headers, SERVICE_NAME_OVERRIDE_HEADER)
 }

@@ -161,6 +161,14 @@ fn the_default_stack_sends_the_child_a_budget() {
         Arc::new(Server::<MasaStack>::new(service)),
     );
     let mut request = Request::new(());
+    // The oracle refuses child RPCs that lack its headers.
+    #[cfg(feature = "sched_oracle")]
+    for header in [
+        masa_core::ORACLE_CHILD_WORK_US_HEADER,
+        masa_core::ORACLE_REMAINING_AFTER_US_HEADER,
+    ] {
+        request.metadata_mut().insert(header, "1".parse().unwrap());
+    }
     let mut child = Child::<MasaStack>::new(child_method(service), &request);
     parent
         .before_child_rpc(child_method(service), &mut request, &mut child)

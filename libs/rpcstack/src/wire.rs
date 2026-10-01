@@ -97,6 +97,7 @@ pub struct WireIn<'a> {
 impl<'a> WireIn<'a> {
     /// Split the `ctx` header of `headers` into sections. Decodes nothing; a
     /// missing header yields no sections.
+    #[inline]
     pub fn from_headers(headers: &'a http::HeaderMap) -> Result<Self, WireError> {
         match headers.get(HEADER_NAME) {
             None => Ok(Self::default()),
@@ -106,6 +107,7 @@ impl<'a> WireIn<'a> {
 
     /// Split the `ctx` header of `metadata` into sections. Decodes nothing; a
     /// missing header yields no sections.
+    #[inline]
     pub fn from_metadata(metadata: &'a MetadataMap) -> Result<Self, WireError> {
         match metadata.get(HEADER_NAME) {
             None => Ok(Self::default()),
@@ -115,6 +117,7 @@ impl<'a> WireIn<'a> {
 
     // Bytes rather than `to_str`: the latter re-validates every byte as
     // visible ASCII, which costs more than the split itself.
+    #[inline]
     fn from_header_bytes(value: &'a [u8]) -> Result<Self, WireError> {
         std::str::from_utf8(value)
             .map(|sections| Self { sections })
@@ -152,6 +155,7 @@ pub struct WireOut {
 
 impl WireOut {
     /// An empty set of sections.
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
@@ -186,6 +190,7 @@ impl WireOut {
         Ok(())
     }
 
+    #[inline]
     fn set(&mut self, name: Cow<'static, str>, payload: String) {
         match self
             .sections
@@ -198,6 +203,7 @@ impl WireOut {
     }
 
     /// The `ctx` header value these sections make.
+    #[inline]
     pub fn header_value(&self) -> String {
         let len = self
             .sections
@@ -213,6 +219,7 @@ impl WireOut {
 
     /// Make these sections the `ctx` header of `metadata`, replacing whatever
     /// it carried; with no sections the header is removed.
+    #[inline]
     pub fn install(&self, metadata: &mut MetadataMap) {
         if self.sections.is_empty() {
             metadata.remove(HEADER_NAME);

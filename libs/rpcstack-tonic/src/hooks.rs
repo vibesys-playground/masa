@@ -32,6 +32,7 @@ impl<S> std::fmt::Debug for PolicyHooks<S> {
     }
 }
 
+#[inline]
 fn resolve_method_name_impl(
     method: GrpcMethod,
     method_override: Option<&str>,

@@ -27,7 +27,10 @@ RUNTIME_CRATES = {"hyper", "tokio", "rpcstack-sched", "multiqueue-prio-queue"}
 RPCSTACK_CRATES = {"rpcstack", "rpcstack-wire", "rpcstack-tonic", "rpcstack-sched"}
 
 FORBIDDEN: dict[str, set[str]] = {
-    "rpcstack-wire": MASA_CRATES | RUNTIME_CRATES | (RPCSTACK_CRATES - {"rpcstack-wire"}) | {"tonic", "http"},
+    "rpcstack-wire": MASA_CRATES
+    | RUNTIME_CRATES
+    | (RPCSTACK_CRATES - {"rpcstack-wire"})
+    | {"tonic", "http"},
     "rpcstack": MASA_CRATES | RUNTIME_CRATES,
     "rpcstack-tonic": MASA_CRATES | RUNTIME_CRATES,
 }

@@ -33,6 +33,7 @@ pub struct Extensions {
 
 impl Extensions {
     /// An empty map.
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
@@ -230,6 +231,7 @@ impl Extensions {
     }
 
     /// Record the module whose hook the framework is about to call.
+    #[inline]
     pub(crate) fn set_module(&mut self, module: &'static str) {
         self.module = module;
     }
