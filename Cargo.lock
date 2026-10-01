@@ -4507,6 +4507,7 @@ name = "rpcstack"
 version = "0.1.0"
 dependencies = [
  "http",
+ "rpcstack-sched",
  "rpcstack-wire",
  "serde",
  "smallvec",
@@ -4523,6 +4524,7 @@ version = "0.1.0"
 dependencies = [
  "http",
  "rpcstack",
+ "rpcstack-sched",
  "serde",
  "tonic",
 ]

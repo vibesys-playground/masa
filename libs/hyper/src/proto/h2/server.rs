@@ -18,7 +18,7 @@ use tracing::{debug, trace, warn};
 use super::{ping, PipeToSendStream, SendBuf};
 use crate::body::HttpBody;
 use crate::common::date;
-use crate::common::exec::ConnStreamExec;
+use crate::common::exec::{ConnStreamExec, StreamVerdict};
 use crate::ext::Protocol;
 use crate::headers;
 use crate::proto::h2::ping::Recorder;
@@ -344,7 +344,24 @@ where
                             req.extensions_mut().insert(Protocol::from_inner(protocol));
                         }
 
-                        let prio = exec.h2_stream_priority(req.headers());
+                        let prio = match exec.h2_stream_ingress(&req) {
+                            StreamVerdict::Spawn(prio) => prio,
+                            StreamVerdict::Reject(head) => {
+                                // The service never sees the request. The head
+                                // ends the stream, and dropping the request drops
+                                // its receive side, which releases the
+                                // connection's flow-control capacity and resets
+                                // the stream with `NO_ERROR` if the body was not
+                                // finished.
+                                trace!("stream rejected at ingress: {}", head.status);
+                                if let Err(err) =
+                                    respond.send_response(Response::from_parts(head, ()), true)
+                                {
+                                    debug!("error sending an ingress rejection: {}", err);
+                                }
+                                continue;
+                            }
+                        };
                         // [NOTE] Into executor.
                         let fut = H2Stream::new(service.call(req), connect_parts, respond);
                         // [TODO:Weixin] Skip if the deadline is already passed.

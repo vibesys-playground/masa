@@ -131,7 +131,13 @@ pub struct Router<L = Identity> {
 
 impl<S: NamedService, T> NamedService for Either<S, T> {
     const NAME: &'static str = S::NAME;
-    const INGRESS: Option<crate::masa::IngressFn> = S::INGRESS;
+
+    fn ingress_handler(&self) -> Option<std::sync::Arc<dyn crate::masa::ServiceIngress>> {
+        match self {
+            Either::A(service) => service.ingress_handler(),
+            Either::B(_) => None,
+        }
+    }
 }
 
 impl Server {

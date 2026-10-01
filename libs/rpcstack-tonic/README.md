@@ -14,7 +14,8 @@ Public surface:
   produce on child requests and responses. `ServerContext<S>`,
   `ParentContext<S>` and `ChildContext<S>` are its three contexts;
   `ServerContext::try_new` reports a misconfigured stack as an error, and
-  `ChildContext::state` exposes the child RPC's `ChildState`.
+  `ChildContext::state` exposes the child RPC's `ChildState`. Its
+  `Hooks::ingress` runs the stack's ingress decision on a request's headers.
 - `RequestExt`, `ResponseExt`, `StatusExt`: `set_wire::<M>` and `get_wire::<M>`
   for a module's wire data on tonic messages, and, on `Request`, method-name
   and service-name overrides.

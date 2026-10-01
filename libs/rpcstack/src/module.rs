@@ -29,9 +29,9 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::task::Poll;
 
+use rpcstack_sched::Meta;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use tonic::masa::Meta;
 use tonic::{CowGrpcMethod, Response, Status};
 
 use crate::extensions::{ChildState, Extensions, Proposal};
@@ -399,21 +399,22 @@ pub trait Module: Send + Sync + std::fmt::Debug + 'static {
     /// built). Without an owner, no request gets a `Meta` from the stack.
     const OWNS_INGRESS: bool = false;
 
-    /// Propose the `Meta` of the task that will serve a request, before the
-    /// task is queued.
+    /// Decide what happens to a request before the task that serves it is
+    /// queued: propose its `Meta` with [`Ingress::propose`], or turn it away
+    /// with [`Ingress::reject`].
     ///
     /// Runs for every module, in stack order, once per request stream, before
-    /// any per-request state exists: it is a function of the inbound `wire`
-    /// alone, which is why it takes no `self` and has no server state, and it
-    /// is on the connection's hot path. Read only what is needed (a module's own
+    /// any per-request state exists: the inputs are the module's server state
+    /// (shared by all requests, so this is where an admission decision that
+    /// needs only server state belongs) and the inbound `wire`. It is on the
+    /// connection's hot path, so read only what is needed (a module's own
     /// section is decoded by `wire.get::<Self>()`, and nothing else is) and
-    /// panic on malformed wire data as [`Module::new`] does. A request that
-    /// needs stateful treatment, such as admission, gets it at its first
-    /// `before_poll`.
+    /// panic on malformed wire data as [`Module::new`] does.
     ///
-    /// Propose with [`Ingress::propose`]; the owner decides which proposal
-    /// counts.
-    fn ingress(_wire: &WireIn<'_>, _ingress: &mut Ingress) {}
+    /// A module that rejects here ends the request: the modules after it do not
+    /// run `ingress`, and the rejection is the stack's ingress decision. The
+    /// owner ([`Module::OWNS_INGRESS`]) decides which proposal counts.
+    fn ingress(_server: &Self::Server, _wire: &WireIn<'_>, _ingress: &mut Ingress) {}
 
     /// Settle the ingress decision by this module's own rule. Called only on
     /// the module that sets [`Module::OWNS_INGRESS`], with every module's
@@ -622,7 +623,7 @@ pub trait ModuleStack: Send + Sync + std::fmt::Debug + 'static {
     fn describe(modules: &mut Vec<ModuleDecl>);
 
     #[doc(hidden)]
-    fn ingress(wire: &WireIn<'_>, ingress: &mut Ingress);
+    fn ingress(server: &Self::Server, wire: &WireIn<'_>, ingress: &mut Ingress);
 
     #[doc(hidden)]
     fn resolve_ingress(proposals: &[Proposal<Meta>]) -> Option<Meta>;
@@ -702,7 +703,7 @@ impl ModuleStack for () {
 
     fn describe(_modules: &mut Vec<ModuleDecl>) {}
 
-    fn ingress(_wire: &WireIn<'_>, _ingress: &mut Ingress) {}
+    fn ingress(_server: &(), _wire: &WireIn<'_>, _ingress: &mut Ingress) {}
 
     fn resolve_ingress(_proposals: &[Proposal<Meta>]) -> Option<Meta> {
         None
@@ -801,10 +802,12 @@ impl<H: Module, T: ModuleStack> ModuleStack for Stack<H, T> {
     }
 
     #[inline]
-    fn ingress(wire: &WireIn<'_>, ingress: &mut Ingress) {
+    fn ingress(server: &Self::Server, wire: &WireIn<'_>, ingress: &mut Ingress) {
         ingress.set_module(H::NAME);
-        H::ingress(wire, ingress);
-        T::ingress(wire, ingress);
+        H::ingress(&server.0, wire, ingress);
+        if ingress.rejection().is_none() {
+            T::ingress(&server.1, wire, ingress);
+        }
     }
 
     #[inline]

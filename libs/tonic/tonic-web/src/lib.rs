@@ -188,7 +188,10 @@ where
     S: NamedService,
 {
     const NAME: &'static str = S::NAME;
-    const INGRESS: Option<tonic::masa::IngressFn> = S::INGRESS;
+
+    fn ingress_handler(&self) -> Option<std::sync::Arc<dyn tonic::masa::ServiceIngress>> {
+        self.0.get_ref().ingress_handler()
+    }
 }
 
 pub(crate) mod util {

@@ -170,7 +170,10 @@ where
     S: crate::server::NamedService,
 {
     const NAME: &'static str = S::NAME;
-    const INGRESS: Option<crate::masa::IngressFn> = S::INGRESS;
+
+    fn ingress_handler(&self) -> Option<std::sync::Arc<dyn crate::masa::ServiceIngress>> {
+        self.inner.ingress_handler()
+    }
 }
 
 /// Response future for [`InterceptedService`].

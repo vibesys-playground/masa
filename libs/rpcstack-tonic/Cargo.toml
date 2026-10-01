@@ -5,9 +5,11 @@ edition = "2021"
 publish = false
 description = "Runs an rpcstack module stack as tonic's request hooks"
 
-# Must not depend on any masa crate, hyper, or a tokio runtime policy crate.
+# Must not depend on any masa crate, hyper, tokio or the scheduler policy; the
+# dependency-free leaf `rpcstack-sched` is allowed for `Meta`.
 [dependencies]
 rpcstack = { path = "../rpcstack" }
+rpcstack-sched = { path = "../rpcstack-sched" }
 tonic = { path = "../tonic/tonic", default-features = false, features = ["transport"] }
 http = "0.2"
 

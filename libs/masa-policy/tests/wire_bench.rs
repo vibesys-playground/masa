@@ -18,7 +18,7 @@ use masa_policy::ContextBuilder;
 use masa_policy::{peek, Extensions, MasaRequestExt, Module, WireIn, WireOut, MASA_CONTEXT_HEADER};
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
-use tonic::masa::Hooks;
+use tonic::masa::ServerHooks;
 use tonic::{CowGrpcMethod, Request};
 
 /// What hyper decoded per stream before ingress hooks: the priority alone, by
@@ -154,15 +154,12 @@ fn compare_context_decode_envelope_split_and_peek() {
             black_box(skip_to_priority(black_box(&headers)));
         },
     );
+    let server = <masa_policy::ServerContext as ServerHooks>::new("bench");
     time("(a3) ingress hook, budget section only", n, || {
-        black_box(<masa_policy::PolicyHooks as Hooks>::ingress(black_box(
-            &plain,
-        )));
+        black_box(server.ingress("/svc.Service/Rpc", black_box(&plain)));
     });
     time("(a3) ingress hook, header with 4 sections", n, || {
-        black_box(<masa_policy::PolicyHooks as Hooks>::ingress(black_box(
-            &headers,
-        )));
+        black_box(server.ingress("/svc.Service/Rpc", black_box(&headers)));
     });
     let payload = rpcstack_wire::find_section(
         plain.get(MASA_CONTEXT_HEADER).unwrap().to_str().unwrap(),

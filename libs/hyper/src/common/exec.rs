@@ -14,21 +14,32 @@ use crate::rt::Executor;
 use crate::server::server::{new_svc::NewSvcTask, Watcher};
 #[cfg(all(feature = "server", any(feature = "http1", feature = "http2")))]
 use crate::service::HttpService;
-use http::HeaderMap;
-#[cfg(feature = "masa")]
-use tokio::task::Meta;
 use tokio::task::{meta_for_unannotated_spawn, TaskPriority};
 
-/// Decides the [`Meta`] of the task that serves an HTTP/2 stream from the
-/// stream's request headers, before the task is queued. `None` means no
-/// decision, and the task gets the runtime's default for unannotated spawns.
-#[cfg(feature = "masa")]
-pub type IngressFn = fn(&HeaderMap) -> Option<Meta>;
+/// What to do with a new HTTP/2 stream, decided before anything is spawned.
+#[cfg(feature = "server")]
+#[derive(Debug)]
+pub enum StreamVerdict {
+    /// Serve the stream with a task queued with this priority.
+    Spawn(TaskPriority),
+    /// Answer the stream with this response head, ending the stream, and spawn
+    /// nothing: the service never sees the request.
+    Reject(http::response::Parts),
+}
+
+/// Decides what happens to each new HTTP/2 stream from its request head,
+/// before a task is spawned for it. Knows nothing of what the requests mean:
+/// the implementor does.
+#[cfg(feature = "server")]
+pub trait StreamIngress: Send + Sync {
+    /// Called once per stream, on the connection's task; keep it cheap.
+    fn ingress(&self, req: &http::Request<crate::body::Body>) -> StreamVerdict;
+}
 
 #[cfg(feature = "server")]
 pub trait ConnStreamExec<F, B: HttpBody>: Clone {
-    fn h2_stream_priority(&self, _headers: &HeaderMap) -> TaskPriority {
-        meta_for_unannotated_spawn(None)
+    fn h2_stream_ingress(&self, _req: &http::Request<crate::body::Body>) -> StreamVerdict {
+        StreamVerdict::Spawn(meta_for_unannotated_spawn(None))
     }
 
     fn execute_h2stream_with_prio(&mut self, fut: H2Stream<F, B>, prio: TaskPriority);
@@ -50,10 +61,11 @@ pub enum Exec {
     Default,
     /// Use custom executor.
     Executor(Arc<dyn Executor<BoxSendFuture> + Send + Sync>),
-    /// Use tokio, queueing each HTTP/2 stream's task with the `Meta` that the
-    /// function decides from the stream's request headers.
-    #[cfg(feature = "masa")]
-    Ingress(IngressFn),
+    /// Use tokio, deciding what happens to each HTTP/2 stream from its request
+    /// head before a task is spawned for it: spawn it with a priority, or
+    /// answer it without spawning.
+    #[cfg(all(feature = "masa", feature = "server"))]
+    Ingress(Arc<dyn StreamIngress>),
 }
 
 // ===== impl Exec =====
@@ -106,21 +118,21 @@ where
     H2Stream<F, B>: Future<Output = ()> + Send + 'static,
     B: HttpBody,
 {
-    fn h2_stream_priority(&self, headers: &HeaderMap) -> TaskPriority {
+    fn h2_stream_ingress(&self, req: &http::Request<Body>) -> StreamVerdict {
         match self {
-            Exec::Ingress(ingress) => {
-                ingress(headers).unwrap_or_else(|| meta_for_unannotated_spawn(None))
+            Exec::Ingress(ingress) => ingress.ingress(req),
+            Exec::Default | Exec::Executor(_) => {
+                StreamVerdict::Spawn(meta_for_unannotated_spawn(None))
             }
-            Exec::Default | Exec::Executor(_) => meta_for_unannotated_spawn(None),
         }
     }
 
     fn execute_h2stream_with_prio(&mut self, fut: H2Stream<F, B>, prio: TaskPriority) {
         match self {
-            Exec::Default | Exec::Ingress(_) => {
+            Exec::Ingress(_) => {
                 tokio::task::spawn_with_prio(fut, prio);
             }
-            Exec::Executor(_) => self.execute(fut),
+            Exec::Default | Exec::Executor(_) => self.execute(fut),
         }
     }
 }
@@ -166,49 +178,77 @@ where
 }
 
 #[cfg(all(test, feature = "server"))]
-mod h2_priority_tests {
+mod h2_ingress_tests {
     use super::*;
 
     type TestFuture = std::future::Ready<Result<http::Response<Body>, crate::Error>>;
 
-    fn priority(exec: &Exec, headers: &HeaderMap) -> TaskPriority {
-        <Exec as ConnStreamExec<TestFuture, Body>>::h2_stream_priority(exec, headers)
+    fn verdict(exec: &Exec, req: &http::Request<Body>) -> StreamVerdict {
+        <Exec as ConnStreamExec<TestFuture, Body>>::h2_stream_ingress(exec, req)
+    }
+
+    fn spawned(verdict: StreamVerdict) -> TaskPriority {
+        match verdict {
+            StreamVerdict::Spawn(priority) => priority,
+            StreamVerdict::Reject(_) => panic!("the stream was rejected"),
+        }
     }
 
     #[test]
-    fn default_executor_uses_infra_priority() {
-        let headers = HeaderMap::new();
+    fn default_executor_spawns_with_the_unannotated_default() {
+        let req = http::Request::new(Body::empty());
 
         assert_eq!(
-            priority(&Exec::Default, &headers),
+            spawned(verdict(&Exec::Default, &req)),
             meta_for_unannotated_spawn(None)
         );
     }
 
+    #[cfg(feature = "masa")]
+    struct ByHeader;
+
+    #[cfg(feature = "masa")]
+    impl StreamIngress for ByHeader {
+        fn ingress(&self, req: &http::Request<Body>) -> StreamVerdict {
+            match req.headers().get("x-prio") {
+                Some(value) => StreamVerdict::Spawn(TaskPriority::new(
+                    value.to_str().unwrap().parse().unwrap(),
+                )),
+                None => {
+                    let (parts, ()) = http::Response::builder()
+                        .status(403)
+                        .body(())
+                        .unwrap()
+                        .into_parts();
+                    StreamVerdict::Reject(parts)
+                }
+            }
+        }
+    }
+
     #[test]
     #[cfg(feature = "masa")]
-    fn ingress_executor_uses_the_decided_meta() {
-        fn ingress(headers: &HeaderMap) -> Option<Meta> {
-            headers
-                .get("x-prio")
-                .map(|value| Meta::new(value.to_str().unwrap().parse().unwrap()))
-        }
-        let mut headers = HeaderMap::new();
-        headers.insert("x-prio", "42".parse().unwrap());
+    fn ingress_executor_spawns_with_the_decided_priority() {
+        let req = http::Request::builder()
+            .header("x-prio", "42")
+            .body(Body::empty())
+            .unwrap();
 
         assert_eq!(
-            priority(&Exec::Ingress(ingress), &headers),
+            spawned(verdict(&Exec::Ingress(Arc::new(ByHeader)), &req)),
             TaskPriority::new(42)
         );
     }
 
     #[test]
     #[cfg(feature = "masa")]
-    fn ingress_executor_without_a_decision_uses_the_unannotated_default() {
-        assert_eq!(
-            priority(&Exec::Ingress(|_| None), &HeaderMap::new()),
-            meta_for_unannotated_spawn(None)
-        );
+    fn ingress_executor_can_reject_a_stream() {
+        let req = http::Request::new(Body::empty());
+
+        match verdict(&Exec::Ingress(Arc::new(ByHeader)), &req) {
+            StreamVerdict::Reject(parts) => assert_eq!(parts.status, 403),
+            StreamVerdict::Spawn(_) => panic!("the stream was spawned"),
+        }
     }
 }
 

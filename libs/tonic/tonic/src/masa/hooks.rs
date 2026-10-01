@@ -10,8 +10,31 @@ use rpcstack_sched::Meta;
 use crate::body::BoxBody;
 use crate::{http, GrpcMethod, Request, Response, Status};
 
-/// The shape of [`Hooks::ingress`], for code that holds one as a value.
-pub type IngressFn = fn(&http::HeaderMap) -> Option<Meta>;
+/// What a server decides about a request before the task that serves it is
+/// queued; see [`ServerHooks::ingress`].
+#[derive(Debug)]
+pub enum Ingress {
+    /// Serve the request with a task queued with this scheduling metadata.
+    Admit(Meta),
+    /// Turn the request away with this status. No task is spawned and no
+    /// [`ParentHooks`] are created, so the service never sees the request.
+    Reject(Status),
+}
+
+/// A service's ingress decision as a value, for a server that must dispatch
+/// to a service from its request path; see
+/// [`NamedService::ingress_handler`](crate::server::NamedService::ingress_handler).
+/// Implemented by every [`ServerHooks`].
+pub trait ServiceIngress: Send + Sync {
+    /// [`ServerHooks::ingress`] of the service's server state.
+    fn ingress(&self, path: &str, headers: &http::HeaderMap) -> Option<Ingress>;
+}
+
+impl<T: ServerHooks> ServiceIngress for T {
+    fn ingress(&self, path: &str, headers: &http::HeaderMap) -> Option<Ingress> {
+        ServerHooks::ingress(self, path, headers)
+    }
+}
 
 // TODO: add notes on trait bounds
 /// Trait for specifying the set of hooks to apply.
@@ -22,23 +45,6 @@ pub trait Hooks: Send + Sync + 'static {
     type ChildContext: ClientHooks;
     /// The state and hook implementations maintained per in the server-side request handlers.
     type ParentContext: ParentHooks<Self::ChildContext, Self::ServerContext>;
-
-    /// Decide the scheduling [`Meta`] of the task that will serve a request,
-    /// from the request's headers, before the task is queued.
-    ///
-    /// The transport calls this once per HTTP/2 stream, before any
-    /// [`ParentHooks`] exist: it is a function of the headers alone, with no
-    /// per-request or per-service state, and it runs on the connection's hot
-    /// path, so it should read only what it needs. `None` means no decision,
-    /// and the task gets the runtime's default for unannotated spawns.
-    ///
-    /// A service's hooks type supplies the function (see
-    /// [`NamedService::INGRESS`](crate::server::NamedService::INGRESS)); a
-    /// server uses the first one among its services, so all services of a
-    /// server must use one hooks type.
-    fn ingress(_headers: &http::HeaderMap) -> Option<Meta> {
-        None
-    }
 }
 
 /// Lifecycle hooks of a Masa server.
@@ -46,6 +52,20 @@ pub trait Hooks: Send + Sync + 'static {
 pub trait ServerHooks: Send + Sync + 'static {
     /// Creates the service-level context.
     fn new(service_name: &'static str) -> Self;
+
+    /// Decide what happens to a request before the task that serves it is
+    /// queued, from the request's path and headers and this service's state:
+    /// admit it with the scheduling [`Meta`] of its task, or reject it.
+    /// `None` means no decision, and the task gets the runtime's default for
+    /// unannotated spawns.
+    ///
+    /// The transport calls this once per HTTP/2 stream, before any
+    /// [`ParentHooks`] exist and before any tower layer or interceptor of the
+    /// server, on the connection's hot path: read only what is needed. A
+    /// request it rejects creates no task, no `ParentHooks` and no later hook.
+    fn ingress(&self, path: &str, headers: &http::HeaderMap) -> Option<Ingress> {
+        None
+    }
 }
 
 /// Lifecycle hooks when a client stub executes a request.
@@ -193,9 +213,14 @@ mod tests {
 
     #[test]
     fn noop_hooks_make_no_ingress_decision() {
-        use super::Hooks;
+        let server_ctx = noop::ServerContext::new("TestService");
 
-        assert_eq!(noop::NoopHooks::ingress(&http::HeaderMap::new()), None);
+        assert!(ServerHooks::ingress(
+            &server_ctx,
+            "/TestService/TestMethod",
+            &http::HeaderMap::new()
+        )
+        .is_none());
     }
 
     #[test]

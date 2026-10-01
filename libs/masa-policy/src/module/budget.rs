@@ -14,7 +14,8 @@
 //
 // The module also owns the ingress decision, the `Meta` of the task that serves
 // the request: its own proposal is the sender's priority, which it reads
-// without decoding the rest of the section, and the last proposal wins.
+// without decoding the rest of the section, and the last proposal wins. A
+// request without a valid budget section is rejected there.
 
 use std::sync::Arc;
 
@@ -234,14 +235,22 @@ impl Module for BudgetModule {
 
     const OWNS_INGRESS: bool = true;
 
-    /// Proposes the priority the sender wrote, reading only that field.
-    fn ingress(wire: &WireIn<'_>, ingress: &mut Ingress) {
-        let payload = wire
-            .get_encoded::<Self>()
-            .unwrap_or_else(|| panic!("{}", masa_core::missing_budget_section_message()));
-        let priority = masa_core::peek_priority(payload)
-            .unwrap_or_else(|err| panic!("{}", masa_core::invalid_budget_section_message(err)));
-        ingress.propose(Meta::new(priority.value()));
+    /// Proposes the priority the sender wrote, reading only that field. A
+    /// request without a budget section, or with one that does not decode, is a
+    /// misconfigured sender and is rejected as `InvalidArgument`.
+    fn ingress(_server: &BudgetServer, wire: &WireIn<'_>, ingress: &mut Ingress) {
+        let Some(payload) = wire.get_encoded::<Self>() else {
+            ingress.reject(Status::invalid_argument(
+                masa_core::missing_budget_section_message(),
+            ));
+            return;
+        };
+        match masa_core::peek_priority(payload) {
+            Ok(priority) => ingress.propose(Meta::new(priority.value())),
+            Err(err) => ingress.reject(Status::invalid_argument(
+                masa_core::invalid_budget_section_message(err),
+            )),
+        }
     }
 
     /// The last proposal wins, as for the child's priority; the budget module

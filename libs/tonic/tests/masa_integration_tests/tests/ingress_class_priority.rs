@@ -28,14 +28,16 @@ use masa_integration_tests::pb::{
 };
 use masa_policy::{
     header_string_with_wire, policy_stack, BudgetModule, Extensions, Ingress, Module, PolicyHooks,
-    Requires, WireIn, WireOut,
+    Requires, ServerContext, WireIn, WireOut,
 };
+use rpcstack_sched::Meta;
 use serde::{Deserialize, Serialize};
-use tonic::masa::{ClientHooks, Hooks, Meta, ParentHooks, ServerHooks};
+use tonic::masa::{ClientHooks, Hooks, Ingress as TonicIngress, ParentHooks, ServerHooks};
 use tonic::transport::Server;
 use tonic::{CowGrpcMethod, GrpcMethod, Request, Response, Status};
 
 const SECOND_US: u64 = 1_000_000;
+const PATH: &str = "/test.ChildService/Rpc1";
 const BLOCKER: u64 = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,10 +79,8 @@ struct ClassModule {
 }
 
 impl ClassModule {
-    fn class(wire: &WireIn<'_>) -> Class {
-        wire.get::<Self>()
-            .unwrap_or_else(|err| panic!("{err}"))
-            .unwrap_or(Class::Bronze)
+    fn class(wire: &WireIn<'_>) -> Result<Class, masa_policy::WireError> {
+        Ok(wire.get::<Self>()?.unwrap_or(Class::Bronze))
     }
 }
 
@@ -96,12 +96,16 @@ impl Module for ClassModule {
     /// The task's priority is the sender's, moved earlier by the class bonus.
     /// The sender's priority is read from the budget section without decoding
     /// anything else in it.
-    fn ingress(wire: &WireIn<'_>, ingress: &mut Ingress) {
-        let budget = wire
-            .get_encoded::<BudgetModule>()
-            .expect("the request carries a budget section");
-        let sender = peek_priority(budget).expect("a valid budget section");
-        let class = Self::class(wire);
+    fn ingress(_server: &(), wire: &WireIn<'_>, ingress: &mut Ingress) {
+        let Some(budget) = wire.get_encoded::<BudgetModule>() else {
+            return ingress.reject(Status::invalid_argument("no budget section"));
+        };
+        let Ok(sender) = peek_priority(budget) else {
+            return ingress.reject(Status::invalid_argument("bad budget section"));
+        };
+        let Ok(class) = Self::class(wire) else {
+            return ingress.reject(Status::invalid_argument("bad class section"));
+        };
         ingress.propose(Meta::new(sender.value().saturating_sub(class.bonus_us())));
     }
 
@@ -112,7 +116,7 @@ impl Module for ClassModule {
         _ext: &mut Extensions,
     ) -> Self {
         Self {
-            class: Self::class(wire),
+            class: Self::class(wire).unwrap_or_else(|err| panic!("{err}")),
         }
     }
 
@@ -286,14 +290,17 @@ fn ingress_reads_the_class_and_the_senders_priority_and_the_class_module_wins() 
             .unwrap(),
     );
 
-    assert_eq!(
-        <PolicyHooks<ClassStack> as Hooks>::ingress(&headers),
-        Some(Meta::new(80 * SECOND_US))
-    );
-    assert_eq!(
-        <PolicyHooks<PlainStack> as Hooks>::ingress(&headers),
-        Some(Meta::new(100 * SECOND_US))
-    );
+    let class = <ServerContext<ClassStack> as ServerHooks>::new("svc");
+    let plain = <ServerContext<PlainStack> as ServerHooks>::new("svc");
+
+    assert!(matches!(
+        class.ingress(PATH, &headers),
+        Some(TonicIngress::Admit(meta)) if meta == Meta::new(80 * SECOND_US)
+    ));
+    assert!(matches!(
+        plain.ingress(PATH, &headers),
+        Some(TonicIngress::Admit(meta)) if meta == Meta::new(100 * SECOND_US)
+    ));
 }
 
 #[test]

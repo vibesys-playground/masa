@@ -17,10 +17,10 @@ use crate::metadata::{
     get_service_name_override_from_headers, get_service_name_override_from_metadata,
 };
 use rpcstack::{
-    build_server, ChildOutcome, ChildState, Early, Extensions, Ingress, MissingDependency,
-    ModuleStack, Outcome, WireIn, WireOut,
+    build_server, ChildOutcome, ChildState, Early, Extensions, Ingress as StackIngress,
+    MissingDependency, ModuleStack, Outcome, WireIn, WireOut,
 };
-use tonic::masa::{ClientHooks, Hooks, Meta, ParentHooks, ServerHooks};
+use tonic::masa::{ClientHooks, Hooks, Ingress, ParentHooks, ServerHooks};
 use tonic::{CowGrpcMethod, GrpcMethod, Request, Response, Status};
 
 /// `Hooks` implementation that runs the policy module stack `S`.
@@ -67,13 +67,6 @@ impl<S: ModuleStack> Hooks for PolicyHooks<S> {
     type ServerContext = ServerContext<S>;
     type ChildContext = ChildContext<S>;
     type ParentContext = ParentContext<S>;
-
-    fn ingress(headers: &http::HeaderMap) -> Option<Meta> {
-        let wire = WireIn::from_headers(headers).unwrap_or_else(|err| panic!("{err}"));
-        let mut ingress = Ingress::default();
-        S::ingress(&wire, &mut ingress);
-        S::resolve_ingress(ingress.proposals())
-    }
 }
 
 #[derive(Debug)]
@@ -97,6 +90,31 @@ impl<S: ModuleStack> ServerContext<S> {
 impl<S: ModuleStack> ServerHooks for ServerContext<S> {
     fn new(service_name: &'static str) -> Self {
         Self::try_new(service_name).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Runs the stack's `ingress` hooks on the request's wire sections and
+    /// this service's server state: the module that turned the request away
+    /// and its status (carrying the wire sections it put), or the `Meta` the
+    /// owning module settled from the modules' proposals, if any.
+    ///
+    /// A `ctx` header that is not valid is rejected as `InvalidArgument`
+    /// instead of panicking: ingress runs on the connection's task, where a
+    /// panic would take the connection down.
+    fn ingress(&self, _path: &str, headers: &http::HeaderMap) -> Option<Ingress> {
+        let wire = match WireIn::from_headers(headers) {
+            Ok(wire) => wire,
+            Err(err) => {
+                return Some(Ingress::Reject(Status::invalid_argument(err.to_string())));
+            }
+        };
+        let mut ingress = StackIngress::default();
+        S::ingress(&self.modules, &wire, &mut ingress);
+        if let Some(rejection) = ingress.rejection() {
+            let mut status = rejection.status.clone();
+            ingress.wire().install(status.metadata_mut());
+            return Some(Ingress::Reject(status));
+        }
+        S::resolve_ingress(ingress.proposals()).map(Ingress::Admit)
     }
 }
 

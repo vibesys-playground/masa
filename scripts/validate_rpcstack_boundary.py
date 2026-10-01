@@ -9,7 +9,8 @@ kind (normal, dev, build):
 - `rpcstack-wire` is a leaf: no tonic, http, hyper, tokio, Masa or other
   rpcstack crate.
 - `rpcstack` and `rpcstack-tonic` depend on no Masa crate, no rajomon, no
-  hyper and no tokio or scheduler crate.
+  hyper and no tokio. Of the scheduler crates only the dependency-free leaf
+  `rpcstack-sched` is allowed, for its `Meta`.
 - `rpcstack-sched` has no dependencies at all.
 """
 
@@ -31,8 +32,8 @@ FORBIDDEN: dict[str, set[str]] = {
     | RUNTIME_CRATES
     | (RPCSTACK_CRATES - {"rpcstack-wire"})
     | {"tonic", "http"},
-    "rpcstack": MASA_CRATES | RUNTIME_CRATES,
-    "rpcstack-tonic": MASA_CRATES | RUNTIME_CRATES,
+    "rpcstack": MASA_CRATES | (RUNTIME_CRATES - {"rpcstack-sched"}),
+    "rpcstack-tonic": MASA_CRATES | (RUNTIME_CRATES - {"rpcstack-sched"}),
 }
 
 

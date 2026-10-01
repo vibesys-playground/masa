@@ -12,7 +12,8 @@ crate (`scripts/validate_rpcstack_boundary.py` checks this).
 
 Public surface:
 
-- `Module`: the module trait (`NAME`, `Wire`, `Server`, `requires`, `new`,
+- `Module`: the module trait (`NAME`, `Wire`, `Server`, `requires`, `ingress`,
+  `OWNS_INGRESS`, `resolve_ingress`, `new`,
   `before_poll`, `before_child_rpc`, `seal_child_rpc`, `after_child_rpc`,
   `after_poll`, `finalize`). `ModuleServer` is its server-level state.
 - `Stack`, `()` and `policy_stack!`: composition. Pre-hooks run in stack order
@@ -24,6 +25,10 @@ Public surface:
   checking that every `Module::NAME` is unique (the empty module is exempt;
   a module with wire data also needs a name that fits a section) and every
   declared dependency is met. Panics on a duplicate name.
+- `Ingress`: the `Meta` proposals modules make in `Module::ingress` for the task
+  that will serve a request, before it is queued. The module with
+  `OWNS_INGRESS` settles them in `resolve_ingress` by its own rule; at most one
+  module of a stack may own it.
 - `Requires`, `MissingDependency`, `ServerInit`: declared dependencies between
   modules (`Module::requires`) and server state shared through
   `ServerInit::provide` and `require`.

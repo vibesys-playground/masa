@@ -4,6 +4,8 @@ mod connector;
 mod discover;
 pub(crate) mod executor;
 pub(crate) mod grpc_timeout;
+#[cfg(feature = "masa")]
+mod ingress;
 mod io;
 mod reconnect;
 mod router;

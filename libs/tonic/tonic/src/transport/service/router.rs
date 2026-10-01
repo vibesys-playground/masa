@@ -16,12 +16,24 @@ use tower::ServiceExt;
 use tower_service::Service;
 
 /// A [`Service`] router.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct Routes {
     router: axum::Router,
-    /// The ingress decision of the first added service that supplies one.
+    /// The ingress decision of each added service that supplies one, by
+    /// service name.
     #[cfg(feature = "masa")]
-    ingress: Option<crate::masa::IngressFn>,
+    ingress: Vec<(
+        &'static str,
+        std::sync::Arc<dyn crate::masa::ServiceIngress>,
+    )>,
+}
+
+impl fmt::Debug for Routes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Routes")
+            .field("router", &self.router)
+            .finish()
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -68,7 +80,7 @@ impl Routes {
         Self {
             router,
             #[cfg(feature = "masa")]
-            ingress: None,
+            ingress: Vec::new(),
         }
         .add_service(svc)
     }
@@ -84,23 +96,27 @@ impl Routes {
         S::Future: Send + 'static,
         S::Error: Into<crate::Error> + Send,
     {
+        #[cfg(feature = "masa")]
+        if let Some(handler) = svc.ingress_handler() {
+            self.ingress.retain(|(name, _)| *name != S::NAME);
+            self.ingress.push((S::NAME, handler));
+        }
         let svc = svc.map_response(|res| res.map(axum::body::boxed));
         self.router = self
             .router
             .route_service(&format!("/{}/*rest", S::NAME), svc);
-        #[cfg(feature = "masa")]
-        {
-            self.ingress = self.ingress.or(S::INGRESS);
-        }
         self
     }
 
-    /// The executor that queues each HTTP/2 stream's task with the `Meta` the
-    /// services' hooks decide at ingress; tokio's default when none does.
+    /// The executor for the server: when a service supplies an ingress decision,
+    /// each HTTP/2 stream goes to the decision of the service its path names
+    /// before any task is spawned for it; tokio's default otherwise.
     pub(crate) fn exec(&self) -> hyper::rt::Exec {
         #[cfg(feature = "masa")]
-        if let Some(ingress) = self.ingress {
-            return hyper::rt::Exec::Ingress(ingress);
+        if !self.ingress.is_empty() {
+            return hyper::rt::Exec::Ingress(std::sync::Arc::new(
+                super::ingress::IngressTable::new(self.ingress.clone()),
+            ));
         }
         hyper::rt::Exec::Default
     }
