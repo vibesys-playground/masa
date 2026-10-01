@@ -24,6 +24,9 @@ use std::ops::{Deref, DerefMut};
 #[derive(Debug, Default)]
 pub struct Extensions {
     values: Vec<(TypeId, Box<dyn Any + Send + Sync>)>,
+    /// The module whose hook is running, set by the framework before it calls
+    /// a hook that takes the map mutably; empty outside a stack.
+    module: &'static str,
 }
 
 impl Extensions {
@@ -75,12 +78,145 @@ impl Extensions {
     }
 }
 
+/// A module's proposal for a decision point, with the module that made it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Proposal<T> {
+    /// [`Layer::NAME`](super::Layer::NAME) of the proposing module, recorded
+    /// by the framework.
+    pub by: &'static str,
+    pub value: T,
+}
+
+/// The proposals made so far for decision type `T`, and whether the owner has
+/// resolved them.
+#[derive(Debug)]
+struct Decision<T> {
+    proposals: Vec<Proposal<T>>,
+    resolved_by: Option<&'static str>,
+}
+
+/// A module proposed a value after the module that owns the decision had
+/// resolved it, so the proposal could not count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionClosed {
+    decision: &'static str,
+    proposer: &'static str,
+    resolver: &'static str,
+}
+
+impl DecisionClosed {
+    /// Type name of the decision.
+    pub fn decision(&self) -> &'static str {
+        self.decision
+    }
+
+    /// Module that made the late proposal.
+    pub fn proposer(&self) -> &'static str {
+        self.proposer
+    }
+
+    /// Module that had resolved the decision.
+    pub fn resolver(&self) -> &'static str {
+        self.resolver
+    }
+}
+
+impl std::fmt::Display for DecisionClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "module `{}` proposed a `{}` after module `{}` had resolved it; proposals must be \
+             made before the owner's `seal_child_rpc`, which runs in reverse stack order, so a \
+             proposer must come after its owner in the stack",
+            self.proposer, self.decision, self.resolver
+        )
+    }
+}
+
+impl std::error::Error for DecisionClosed {}
+
+impl From<DecisionClosed> for tonic::Status {
+    fn from(closed: DecisionClosed) -> Self {
+        tonic::Status::internal(closed.to_string())
+    }
+}
+
+/// Typed decision points: several modules contribute to one decision, and the
+/// module that owns it settles it by its own rule.
+///
+/// The decision type `T` is any type; the owner defines it, usually as a public
+/// newtype, and documents how it combines proposals. Modules submit values
+/// with [`propose`](Self::propose) while the request or child RPC is being set
+/// up; the framework only records them, in the order they were made and with the
+/// proposing module's name. The owner calls [`resolve`](Self::resolve) once,
+/// typically in [`Layer::seal_child_rpc`](super::Layer::seal_child_rpc), which
+/// runs after every `before_child_rpc`, and applies whatever rule it likes:
+/// the last proposal, the smallest, a refusal if any module vetoed. The
+/// framework has no rule of its own. Resolving closes the decision, so a proposal
+/// that comes too late is an error rather than a silent no-op.
+impl Extensions {
+    /// Submit `value` for decision type `T`, attributed to the module whose
+    /// hook is running. Fails if the owner already resolved `T`.
+    pub fn propose<T: Any + Send + Sync>(&mut self, value: T) -> Result<(), DecisionClosed> {
+        let by = self.module;
+        match self.get_mut::<Decision<T>>() {
+            Some(Decision {
+                resolved_by: Some(resolver),
+                ..
+            }) => Err(DecisionClosed {
+                decision: std::any::type_name::<T>(),
+                proposer: by,
+                resolver,
+            }),
+            Some(decision) => {
+                decision.proposals.push(Proposal { by, value });
+                Ok(())
+            }
+            None => {
+                self.insert(Decision {
+                    proposals: vec![Proposal { by, value }],
+                    resolved_by: None,
+                });
+                Ok(())
+            }
+        }
+    }
+
+    /// The proposals made so far for `T`, in the order they were made. A module
+    /// that runs after another can see what the earlier one proposed.
+    pub fn proposals<T: Any + Send + Sync>(&self) -> &[Proposal<T>] {
+        self.get::<Decision<T>>()
+            .map_or(&[], |decision| &decision.proposals)
+    }
+
+    /// Take the proposals for `T` and close the decision: later proposals fail.
+    /// Called by the owner of `T`; the proposals come back in the order they
+    /// were made.
+    pub fn resolve<T: Any + Send + Sync>(&mut self) -> Vec<Proposal<T>> {
+        let by = self.module;
+        if let Some(decision) = self.get_mut::<Decision<T>>() {
+            decision.resolved_by = Some(by);
+            return std::mem::take(&mut decision.proposals);
+        }
+        self.insert(Decision::<T> {
+            proposals: Vec::new(),
+            resolved_by: Some(by),
+        });
+        Vec::new()
+    }
+
+    /// Record the module whose hook the framework is about to call.
+    pub(crate) fn set_module(&mut self, module: &'static str) {
+        self.module = module;
+    }
+}
+
 /// The state of one child RPC: an [`Extensions`] map that lives from the
 /// child's `before_child_rpc` to its `after_child_rpc`, or to its rejection.
 ///
-/// Each child RPC has its own map, so what modules store here (the deadline
-/// and priority being decided for this child, a latency tracker) belongs to
-/// that child alone, however many children are in flight. It is keyed by type
+/// Each child RPC has its own map, so what modules store here (the proposals
+/// for this child's deadline and priority, a latency tracker) belongs to that
+/// child alone, however many children are in flight. It is keyed by type
 /// like [`Extensions`], so a module finds its state, and a module that wants
 /// to read another's, by naming the type, never by position in the stack.
 #[derive(Debug, Default)]

@@ -190,13 +190,22 @@ impl<S: LayerStack> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentCon
                 &mut state.ext,
             )
             .map_err(|rejection| rejection.status)?;
-        self.layers.seal_child_rpc(
+        if let Err(rejection) = self.layers.seal_child_rpc(
             &child_method_name,
             &mut child_ctx.state,
             request,
             &mut child_wire,
             &mut state.ext,
-        );
+        ) {
+            self.layers.child_rpc_rejected(
+                &child_method_name,
+                rejection.by,
+                &rejection.status,
+                &child_ctx.state,
+                &state.ext,
+            );
+            return Err(rejection.status);
+        }
         drop(state);
 
         // The child request carries exactly what the modules put: nothing is

@@ -9,7 +9,11 @@
 // - Pre-hooks (`new`, `before_poll`, `before_child_rpc`) run in stack order and
 //   the first `Err` short-circuits the rest.
 // - `seal_child_rpc` runs once per child RPC after every `before_child_rpc`
-//   succeeded, in reverse stack order.
+//   succeeded, in reverse stack order; a module can reject the child there.
+// - Several modules can contribute to one decision (the child's deadline, say):
+//   they `propose` typed values, the framework records them with the proposing
+//   module's name, and the module that owns the decision `resolve`s them in its
+//   `seal_child_rpc` by its own rule. The framework has none.
 // - Post-hooks that undo or report on pre-hooks (`after_child_rpc`,
 //   `child_rpc_rejected`, `finalize`) run in reverse stack order, and only for
 //   the modules whose pre-hook ran. `finalize` also learns whether a module
@@ -47,7 +51,7 @@ use tonic::{CowGrpcMethod, Response, Status};
 
 use crate::wire::{assert_valid_name, WireIn, WireOut};
 
-pub use extensions::{ChildState, Extensions};
+pub use extensions::{ChildState, DecisionClosed, Extensions, Proposal};
 
 // ── Submodules ──────────────────────────────────────────────────────────
 
@@ -379,10 +383,11 @@ pub trait Layer: Send + Sync + std::fmt::Debug + 'static {
     /// `child_wire` starts empty and becomes the child request's wire
     /// sections: a module that does not `put` anything sends nothing, and
     /// nothing is carried over from this request's inbound wire. `child` holds
-    /// this child's state: what a module decides for this child alone (the
-    /// deadline and priority are [`ChildBudget`]) goes there, keyed by type,
-    /// and no other child sees it. A module that needs the result of the
-    /// modules after it, such as the final deadline, completes its work in
+    /// this child's state, keyed by type, which no other child sees. A
+    /// decision several modules share is made by proposing to it (the child's
+    /// deadline and priority are [`ChildDeadline`] and [`ChildPriority`], owned
+    /// by [`BudgetLayer`]): `child.propose(value)`. A module that needs the
+    /// result of the modules after it completes its work in
     /// [`Layer::seal_child_rpc`].
     fn before_child_rpc<T>(
         &self,
@@ -399,9 +404,13 @@ pub trait Layer: Send + Sync + std::fmt::Debug + 'static {
     /// accepted it, in reverse stack order: the module nearest the head of the
     /// stack runs last and sees what every module after it decided.
     ///
-    /// Masa's budget module writes the child's budget section here, from the
-    /// [`ChildBudget`] the modules after it have settled on. Cannot reject; a
-    /// module that may reject a child does so in `before_child_rpc`.
+    /// This is where the owner of a decision settles it: `child.resolve::<D>()`
+    /// returns every module's proposal with the proposing module's name, and the
+    /// owner applies its own rule. Masa's budget module resolves the child's
+    /// deadline and priority this way and writes the child's budget section.
+    /// Returns `Err` to reject the child RPC: it is then not sent, and every
+    /// module gets [`Layer::child_rpc_rejected`] (the modules that had not yet
+    /// sealed do not seal).
     fn seal_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
@@ -409,15 +418,16 @@ pub trait Layer: Send + Sync + std::fmt::Debug + 'static {
         _request: &mut tonic::Request<T>,
         _child_wire: &mut WireOut,
         _ext: &mut Extensions,
-    ) {
+    ) -> Result<(), Status> {
+        Ok(())
     }
 
     /// Called when a module rejected the child RPC that this module's
-    /// `before_child_rpc` had already run for. `by` is [`Layer::NAME`] of the
-    /// rejecting module, which may be this one. Runs in reverse stack order
-    /// over the modules that ran `before_child_rpc`; the response-side
-    /// counterpart of a rejected child RPC, which gets no
-    /// [`Layer::after_child_rpc`].
+    /// `before_child_rpc` had already run for, in `before_child_rpc` or in
+    /// `seal_child_rpc`. `by` is [`Layer::NAME`] of the rejecting module, which
+    /// may be this one. Runs in reverse stack order over the modules that ran
+    /// `before_child_rpc`; the response-side counterpart of a rejected child
+    /// RPC, which gets no [`Layer::after_child_rpc`].
     fn child_rpc_rejected(
         &self,
         _child_method: &CowGrpcMethod,
@@ -582,6 +592,18 @@ pub trait LayerStack: Send + Sync + std::fmt::Debug + 'static {
         request: &mut tonic::Request<T>,
         child_wire: &mut WireOut,
         ext: &mut Extensions,
+    ) -> Result<(), Rejection>;
+
+    /// Tell every module that a module rejected the child RPC in
+    /// `seal_child_rpc`, when all of them had accepted it.
+    #[doc(hidden)]
+    fn child_rpc_rejected(
+        &self,
+        child_method: &CowGrpcMethod,
+        by: &'static str,
+        status: &Status,
+        child: &ChildState,
+        ext: &Extensions,
     );
 
     #[doc(hidden)]
@@ -647,6 +669,17 @@ impl LayerStack for () {
         _request: &mut tonic::Request<T>,
         _child_wire: &mut WireOut,
         _ext: &mut Extensions,
+    ) -> Result<(), Rejection> {
+        Ok(())
+    }
+
+    fn child_rpc_rejected(
+        &self,
+        _child_method: &CowGrpcMethod,
+        _by: &'static str,
+        _status: &Status,
+        _child: &ChildState,
+        _ext: &Extensions,
     ) {
     }
 
@@ -705,6 +738,7 @@ impl<H: Layer, T: LayerStack> LayerStack for Stack<H, T> {
 
     #[inline]
     fn before_poll<Ret>(&self, ext: &mut Extensions) -> Result<(), Early<Ret>> {
+        ext.set_module(H::NAME);
         self.head
             .before_poll(ext)
             .map_err(|reply| Early { by: H::NAME, reply })?;
@@ -732,6 +766,8 @@ impl<H: Layer, T: LayerStack> LayerStack for Stack<H, T> {
         child_wire: &mut WireOut,
         ext: &mut Extensions,
     ) -> Result<(), Rejection> {
+        child.set_module(H::NAME);
+        ext.set_module(H::NAME);
         let rejection =
             match self
                 .head
@@ -766,11 +802,32 @@ impl<H: Layer, T: LayerStack> LayerStack for Stack<H, T> {
         request: &mut tonic::Request<R>,
         child_wire: &mut WireOut,
         ext: &mut Extensions,
+    ) -> Result<(), Rejection> {
+        self.tail
+            .seal_child_rpc(child_method, child, request, child_wire, ext)?;
+        child.set_module(H::NAME);
+        ext.set_module(H::NAME);
+        self.head
+            .seal_child_rpc(child_method, child, request, child_wire, ext)
+            .map_err(|status| Rejection {
+                by: H::NAME,
+                status,
+            })
+    }
+
+    #[inline]
+    fn child_rpc_rejected(
+        &self,
+        child_method: &CowGrpcMethod,
+        by: &'static str,
+        status: &Status,
+        child: &ChildState,
+        ext: &Extensions,
     ) {
         self.tail
-            .seal_child_rpc(child_method, child, request, child_wire, ext);
+            .child_rpc_rejected(child_method, by, status, child, ext);
         self.head
-            .seal_child_rpc(child_method, child, request, child_wire, ext);
+            .child_rpc_rejected(child_method, by, status, child, ext);
     }
 
     #[inline]
@@ -825,7 +882,9 @@ macro_rules! policy_stack {
 pub use admission::predictive::PredAdmissionLayer;
 #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
 pub use admission::rajomon::RajomonLayer;
-pub use budget::{root_priority, BudgetInfo, BudgetLayer, ChildBudget, ContextBuilder};
+pub use budget::{
+    root_priority, BudgetInfo, BudgetLayer, ChildDeadline, ChildPriority, ContextBuilder,
+};
 #[cfg(feature = "abort_slo")]
 pub use e2e_deadline_guard::E2eDeadlineGuardLayer;
 #[cfg(feature = "estimator")]

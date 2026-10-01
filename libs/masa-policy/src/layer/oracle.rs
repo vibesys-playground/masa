@@ -10,8 +10,8 @@ use masa_core::{PriorityHint, ORACLE_CHILD_WORK_US_HEADER, ORACLE_REMAINING_AFTE
 use tonic::{CowGrpcMethod, Request, Status};
 
 use super::{
-    BudgetInfo, BudgetLayer, ChildBudget, ChildState, Extensions, Layer, LayerServer,
-    MissingDependency, Requires, ServerInit,
+    BudgetInfo, BudgetLayer, ChildDeadline, ChildPriority, ChildState, Extensions, Layer,
+    LayerServer, MissingDependency, Requires, ServerInit,
 };
 
 #[derive(Debug)]
@@ -63,9 +63,8 @@ impl Layer for OracleLayer {
             .saturating_sub(hint.remaining_after_us);
         let latest_start = completion_deadline.saturating_sub(hint.child_work_us);
 
-        let child = ChildBudget::of(child);
-        child.deadline = completion_deadline;
-        child.prio_hint = PriorityHint::new(latest_start);
+        child.propose(ChildDeadline(completion_deadline))?;
+        child.propose(ChildPriority(PriorityHint::new(latest_start)))?;
 
         Ok(())
     }

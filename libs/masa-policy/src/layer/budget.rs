@@ -7,11 +7,10 @@
 // writes the child's and the response's sections itself.
 //
 // A child request's deadline and priority are decided by several modules
-// (estimation, oracle). `BudgetLayer`, first in the stack, opens the decision
-// with the parent's values in `before_child_rpc`; the modules after it
-// overwrite the fields they decide, the last writer winning; and
-// `seal_child_rpc`, which the framework runs after all of them, writes the
-// child's section from the result.
+// (estimation, oracle). They propose values (`ChildDeadline`, `ChildPriority`)
+// in `before_child_rpc`; `BudgetLayer`, the owner of both decisions, resolves
+// them in `seal_child_rpc`, which the framework runs after all of them. Its
+// rule is that the last proposal wins; the framework has no rule.
 
 use std::sync::Arc;
 
@@ -179,31 +178,20 @@ impl BudgetInfo {
     }
 }
 
-/// The deadline and priority the child request being set up will carry, in
-/// its [`ChildState`]. [`BudgetLayer`] opens it in `before_child_rpc` with the
-/// parent's values; modules after it (estimation, oracle) overwrite the fields
-/// they decide, the last writer winning; [`BudgetLayer`] then writes the
-/// child's budget section from it in `seal_child_rpc`. Reach it with
-/// [`ChildBudget::of`].
+/// The deadline the child request will carry: a decision point owned by
+/// [`BudgetLayer`], which resolves it in `seal_child_rpc`. Modules that decide
+/// the child's deadline (estimation, oracle) `propose` a value in
+/// `before_child_rpc`; the budget module takes the last proposal, so the module
+/// nearest the end of the stack wins, and falls back to the parent's own
+/// deadline when nobody proposed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChildBudget {
-    pub deadline: Timestamp,
-    pub prio_hint: PriorityHint,
-}
+pub struct ChildDeadline(pub Timestamp);
 
-impl ChildBudget {
-    /// The child budget being decided for this child RPC. Panics if the
-    /// module asking runs before [`BudgetLayer`]; a module that declares
-    /// [`BudgetLayer`] in [`Layer::requires`] cannot hit that.
-    pub fn of(child: &mut ChildState) -> &mut Self {
-        child.get_mut::<Self>().unwrap_or_else(|| {
-            panic!(
-                "no `ChildBudget` is open; a module that sets a child's deadline or priority \
-                 must sit after `BudgetLayer` in the policy stack"
-            )
-        })
-    }
-}
+/// The priority the child request will carry: a decision point owned by
+/// [`BudgetLayer`], resolved like [`ChildDeadline`] and independently of it, so
+/// a module that decides only one of the two leaves the other alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChildPriority(pub PriorityHint);
 
 // ── Budget ──────────────────────────────────────────────────────────────
 
@@ -255,18 +243,6 @@ impl Layer for BudgetLayer {
         Self { info, encoded }
     }
 
-    fn before_child_rpc<T>(
-        &self,
-        _child_method: &CowGrpcMethod,
-        child: &mut ChildState,
-        _request: &mut tonic::Request<T>,
-        _child_wire: &mut WireOut,
-        _ext: &mut Extensions,
-    ) -> Result<(), Status> {
-        child.insert(self.parent_budget());
-        Ok(())
-    }
-
     fn seal_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
@@ -274,23 +250,34 @@ impl Layer for BudgetLayer {
         _request: &mut tonic::Request<T>,
         child_wire: &mut WireOut,
         _ext: &mut Extensions,
-    ) {
-        let settled = *ChildBudget::of(child);
-        if settled == self.parent_budget() {
+    ) -> Result<(), Status> {
+        // The rule for both decisions: the last proposal wins, and with none
+        // the child inherits the parent's own value.
+        let deadline = child
+            .resolve::<ChildDeadline>()
+            .last()
+            .map_or(self.info.deadline(), |proposal| proposal.value.0);
+        let prio_hint = child
+            .resolve::<ChildPriority>()
+            .last()
+            .map_or(self.info.prio_hint(), |proposal| proposal.value.0);
+
+        if deadline == self.info.deadline() && prio_hint == self.info.prio_hint() {
             child_wire.put_encoded::<Self>(&self.encoded);
-            return;
+            return Ok(());
         }
         let context = Context::new(
             self.info.api().clone(),
             self.info.request_id(),
             self.info.slo(),
             self.info.gateway_entry(),
-            settled.deadline,
-            settled.prio_hint,
+            deadline,
+            prio_hint,
         );
         child_wire
             .put::<Self>(&context)
             .unwrap_or_else(|err| panic!("{err}"));
+        Ok(())
     }
 
     fn finalize<Ret>(
@@ -301,16 +288,6 @@ impl Layer for BudgetLayer {
         _ext: &Extensions,
     ) {
         wire.put_encoded::<Self>(&self.encoded);
-    }
-}
-
-impl BudgetLayer {
-    /// The budget of a child that no module changed.
-    fn parent_budget(&self) -> ChildBudget {
-        ChildBudget {
-            deadline: self.info.deadline(),
-            prio_hint: self.info.prio_hint(),
-        }
     }
 }
 

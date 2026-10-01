@@ -12,8 +12,8 @@ use masa_core::{PriorityHint, ABORT_SLACK};
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
 use super::super::{
-    BudgetInfo, BudgetLayer, ChildBudget, ChildState, Extensions, Layer, LayerServer,
-    MissingDependency, Outcome, Requires, ServerInit,
+    BudgetInfo, BudgetLayer, ChildDeadline, ChildPriority, ChildState, Extensions, Layer,
+    LayerServer, MissingDependency, Outcome, Requires, ServerInit,
 };
 use super::default_estimator::DefaultLatencyEstimator;
 use super::state::{
@@ -210,9 +210,8 @@ impl Layer for EstimationLayer {
 
         let (deadline, prio_hint) =
             Self::child_deadline_and_prio(&self.budget, decayed_full, decayed_floor);
-        let budget = ChildBudget::of(child);
-        budget.deadline = deadline;
-        budget.prio_hint = prio_hint;
+        child.propose(ChildDeadline(deadline))?;
+        child.propose(ChildPriority(prio_hint))?;
 
         child.insert(child_tracker);
 

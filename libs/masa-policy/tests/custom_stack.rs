@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use masa_core::{time_now, Context, PriorityHint};
 use masa_policy::{
-    get_masa_context_from_metadata, policy_stack, BudgetLayer, ChildBudget, ChildState,
+    get_masa_context_from_metadata, policy_stack, BudgetLayer, ChildPriority, ChildState,
     ContextBuilder, Extensions, Layer, LayerServer, LayerStack, MissingDependency, PolicyHooks,
     Requires, ServerContext, ServerInit, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
@@ -96,7 +96,7 @@ impl<const P: u64> Layer for FixedChildPriority<P> {
         _child_wire: &mut WireOut,
         _ext: &mut Extensions,
     ) -> Result<(), Status> {
-        ChildBudget::of(child).prio_hint = PriorityHint::new(P);
+        child.propose(ChildPriority(PriorityHint::new(P)))?;
         Ok(())
     }
 }
@@ -247,7 +247,9 @@ impl Layer for PriorityFromCount {
         _child_wire: &mut WireOut,
         _ext: &mut Extensions,
     ) -> Result<(), Status> {
-        ChildBudget::of(child).prio_hint = PriorityHint::new(self.0 .0.load(Ordering::Relaxed));
+        child.propose(ChildPriority(PriorityHint::new(
+            self.0 .0.load(Ordering::Relaxed),
+        )))?;
         Ok(())
     }
 }
