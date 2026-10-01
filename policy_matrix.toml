@@ -202,7 +202,7 @@ signal_slack = ["masa", "estimator", "ac_pred", "masa-core/signal_slack"]
 estimator = ["masa-core/estimator", "tokio"]
 sched_pred = ["estimator", "sched_slo", "masa-core/sched_pred"]
 ac_pred = ["estimator", "masa-core/ac_pred"]
-ac_rajomon = ["masa", "masa-core/ac_rajomon", "tokio"]
+ac_rajomon = ["masa", "masa-core/ac_rajomon", "tokio", "dep:rajomon"]
 deadline_equals_slack = ["sched_pred"]
 stack_custom = ["masa"]
 

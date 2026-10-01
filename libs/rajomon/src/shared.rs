@@ -5,7 +5,7 @@ use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use tonic::CowGrpcMethod;
 
-use crate::policy_params::PolicyParams;
+use crate::params::RajomonParams;
 
 /// Global Rajomon state shared across all request handlers.
 pub static RAJOMON_STATE: Lazy<RajomonSharedState> = Lazy::new(|| RajomonSharedState::new());
@@ -72,7 +72,7 @@ pub struct RajomonSharedState {
 impl RajomonSharedState {
     pub(crate) fn new() -> Self {
         Self {
-            own_price: AtomicU64::new(PolicyParams::global().rajomon.init_price),
+            own_price: AtomicU64::new(RajomonParams::global().init_price),
             downstream_prices: DashMap::new(),
             max_downstream_for_method: DashMap::new(),
             queue_stats: QueueStats::new(),
@@ -138,7 +138,7 @@ impl RajomonSharedState {
     ///
     /// See 3rd_party/rajomon/RUST_PORT_ALIGNMENT.md §0.1 and §10.4/§10.5.
     pub(crate) fn update_prices(&self) {
-        let p = &PolicyParams::global().rajomon;
+        let p = &RajomonParams::global();
         // §10.5 Option B: atomically halve the window_max and read its
         // previous value, so the signal persists for a few ticks even if no
         // new observations arrive. fetch_update is a CAS loop, so it safely
@@ -303,7 +303,7 @@ impl RajomonSharedState {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async {
                 let mut interval = tokio::time::interval(Duration::from_millis(
-                    PolicyParams::global().rajomon.price_update_rate_ms,
+                    RajomonParams::global().price_update_rate_ms,
                 ));
                 let mut log_tick: u32 = 0;
                 loop {

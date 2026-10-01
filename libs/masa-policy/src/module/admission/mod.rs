@@ -1,7 +1,8 @@
 // Admission control modules.
 //
 // - `predictive` (feature `ac_pred`): goodput-tracking token-bucket AC.
-// - `rajomon` (feature `ac_rajomon`): token-based AC with price signals.
+// - Rajomon (feature `ac_rajomon`): token-based AC with price signals, in the
+//   `rajomon` crate.
 //
 // `ac_pred` and `ac_rajomon` are mutually exclusive (two admission
 // controllers cannot coexist). Which one, if any, joins the default stack is
@@ -16,6 +17,3 @@ compile_error!(
 
 #[cfg(feature = "ac_pred")]
 pub(crate) mod predictive;
-
-#[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
-pub mod rajomon;

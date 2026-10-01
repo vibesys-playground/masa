@@ -7,6 +7,7 @@ edition = "2021"
 masa-core = { path = "../masa-core" }
 rpcstack = { path = "../rpcstack" }
 rpcstack-tonic = { path = "../rpcstack-tonic" }
+rajomon = { path = "../rajomon", optional = true }
 tonic = { path = "../tonic/tonic", default-features = false, features = ["transport"] }
 tokio = { path = "../tokio/tokio", optional = true, features = ["rt"] }
 dashmap = "5.5"
@@ -35,7 +36,7 @@ signal_slack = ["masa", "estimator", "ac_pred", "masa-core/signal_slack"]
 estimator = ["masa-core/estimator", "tokio"]
 sched_pred = ["estimator", "sched_slo", "masa-core/sched_pred"]
 ac_pred = ["estimator", "masa-core/ac_pred"]
-ac_rajomon = ["masa", "masa-core/ac_rajomon", "tokio"]
+ac_rajomon = ["masa", "masa-core/ac_rajomon", "tokio", "dep:rajomon"]
 est_rms = []
 est_hist = []
 est_mean_var = []

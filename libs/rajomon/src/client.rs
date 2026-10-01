@@ -5,7 +5,7 @@ use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use tonic::CowGrpcMethod;
 
-use crate::policy_params::PolicyParams;
+use crate::params::RajomonParams;
 
 // ── Client Token Bucket ─────────────────────────────────────────────────
 
@@ -20,7 +20,7 @@ pub struct ClientTokenBucket {
 impl ClientTokenBucket {
     pub(super) fn new() -> Self {
         Self {
-            tokens_left: AtomicU64::new(PolicyParams::global().rajomon.tokens_left_init),
+            tokens_left: AtomicU64::new(RajomonParams::global().tokens_left_init),
             cached_prices: DashMap::new(),
         }
     }
@@ -134,7 +134,7 @@ impl ClientTokenBucket {
 
     /// Replenish token pool by `token_update_step`.
     pub fn replenish(&self) {
-        let p = &PolicyParams::global().rajomon;
+        let p = &RajomonParams::global();
         loop {
             let current = self.tokens_left.load(Ordering::Relaxed);
             let new_val = current.saturating_add(p.token_update_step);
@@ -162,7 +162,7 @@ impl ClientTokenBucket {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async {
                 use rand_distr::{Distribution, Exp};
-                let rate = 1.0 / PolicyParams::global().rajomon.token_update_rate_ms as f64;
+                let rate = 1.0 / RajomonParams::global().token_update_rate_ms as f64;
                 let dist = Exp::new(rate).expect("Exp::new failed");
                 let mut log_tick: u32 = 0;
                 loop {

@@ -11,6 +11,9 @@ kind (normal, dev, build):
 - `rpcstack` and `rpcstack-tonic` depend on no Masa crate, no rajomon, no
   hyper and no tokio or scheduler crate.
 - `rpcstack-sched` has no dependencies at all.
+- `rajomon` depends on the framework (`rpcstack`; `rpcstack-tonic` only for
+  tests) and generic libraries: no Masa crate, no hyper, no scheduler crate.
+- No framework crate depends on `rajomon`.
 """
 
 from __future__ import annotations
@@ -22,17 +25,19 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-MASA_CRATES = {"masa", "masa-core", "masa-policy", "masa-semantics", "rajomon"}
+MASA_CRATES = {"masa", "masa-core", "masa-policy", "masa-semantics"}
 RUNTIME_CRATES = {"hyper", "tokio", "rpcstack-sched", "multiqueue-prio-queue"}
 RPCSTACK_CRATES = {"rpcstack", "rpcstack-wire", "rpcstack-tonic", "rpcstack-sched"}
 
 FORBIDDEN: dict[str, set[str]] = {
     "rpcstack-wire": MASA_CRATES
+    | {"rajomon"}
     | RUNTIME_CRATES
     | (RPCSTACK_CRATES - {"rpcstack-wire"})
     | {"tonic", "http"},
-    "rpcstack": MASA_CRATES | RUNTIME_CRATES,
-    "rpcstack-tonic": MASA_CRATES | RUNTIME_CRATES,
+    "rpcstack": MASA_CRATES | RUNTIME_CRATES | {"rajomon"},
+    "rpcstack-tonic": MASA_CRATES | RUNTIME_CRATES | {"rajomon"},
+    "rajomon": MASA_CRATES | (RUNTIME_CRATES - {"tokio"}),
 }
 
 

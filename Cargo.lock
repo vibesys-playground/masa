@@ -3042,6 +3042,7 @@ dependencies = [
  "log",
  "masa-core",
  "once_cell",
+ "rajomon",
  "rand 0.8.5",
  "rand_distr 0.4.3",
  "rpcstack",
@@ -4205,6 +4206,24 @@ name = "radium"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
+
+[[package]]
+name = "rajomon"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+ "http",
+ "log",
+ "once_cell",
+ "rand 0.8.5",
+ "rand_distr 0.4.3",
+ "rpcstack",
+ "rpcstack-tonic",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tonic",
+]
 
 [[package]]
 name = "rand"
