@@ -21,6 +21,9 @@ Public surface:
 - `find_section(header, name)`: one undecoded payload.
 - `decode_payload::<W>(payload)` and `encode_payload(&wire)`: base64 JSON, with
   an error that says which step failed.
+- `decode_payload_into(payload, &mut buf)`: the same bytes as the base64 half of
+  `decode_payload`, without allocating; `None` if it does not handle the payload
+  (invalid, or too long for `buf`), which `decode_payload` then explains.
 - `push_section(&mut header, name, payload)`.
 
 `rpcstack` builds the typed module API (`WireIn`, `WireOut`) on these.

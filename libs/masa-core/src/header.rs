@@ -1,10 +1,20 @@
-use crate::context::{PriorityPeek, BUDGET_SECTION};
+use crate::context::{peek_priority, BUDGET_SECTION};
 use crate::{wire, Context, PriorityHint, MASA_CONTEXT_HEADER};
 
 fn header_value(headers: &http::HeaderMap) -> &str {
     let ctx = headers
         .get(MASA_CONTEXT_HEADER)
         .unwrap_or_else(|| panic!("{}", crate::MISSING_CONTEXT_HEADER_MESSAGE));
+    // `HeaderValue::to_str` checks each byte for visible ASCII, which costs more
+    // than everything else this does with the header. A header value holds no
+    // control characters other than tab, so ASCII means `to_str` would succeed;
+    // anything else takes it, for the same error as before.
+    let bytes = ctx.as_bytes();
+    if bytes.is_ascii() {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return text;
+        }
+    }
     ctx.to_str()
         .unwrap_or_else(|err| panic!("{}", crate::invalid_context_header_metadata_message(err)))
 }
@@ -21,14 +31,14 @@ pub fn read_context<B>(req: &http::Request<B>) -> Context {
 
 /// Read the priority hint from MASA context HTTP headers.
 ///
-/// Decodes the priority of the budget section only; Hyper calls this for every
-/// stream, before any policy module has run.
+/// Reads only the priority of the budget section, without decoding the rest or
+/// allocating (see [`peek_priority`]); Hyper calls this for every stream,
+/// before any policy module has run.
 pub fn read_priority_from_headers(headers: &http::HeaderMap) -> PriorityHint {
     let payload = wire::find_section(header_value(headers), BUDGET_SECTION)
         .unwrap_or_else(|| panic!("{}", crate::missing_budget_section_message()));
-    wire::decode_payload::<PriorityPeek>(payload)
+    peek_priority(payload)
         .unwrap_or_else(|err| panic!("{}", crate::invalid_budget_section_message(err)))
-        .5
 }
 
 #[cfg(test)]
@@ -111,6 +121,115 @@ mod tests {
         );
 
         let _ = read_context_from_headers(&headers);
+    }
+
+    fn headers_with(value: &str) -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(MASA_CONTEXT_HEADER, HeaderValue::from_str(value).unwrap());
+        headers
+    }
+
+    #[test]
+    fn read_priority_agrees_with_the_full_context_for_many_values() {
+        let mut state = 7u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state >> (state % 40)
+        };
+        for _ in 0..2_000 {
+            let ctx = Context::new(
+                "hotel.Search/Rpc",
+                next(),
+                next(),
+                next(),
+                next(),
+                PriorityHint::new(next()),
+            );
+            // Another module's section may come before the budget section.
+            for value in [
+                ctx.to_header_string(),
+                format!("other:AAAA.{}", ctx.to_header_string()),
+            ] {
+                let headers = headers_with(&value);
+                assert_eq!(read_priority_from_headers(&headers), ctx.prio_hint());
+                assert_eq!(read_context_from_headers(&headers), ctx);
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "missing MASA context header `ctx`")]
+    fn read_priority_panics_with_explicit_message_when_missing() {
+        let _ = read_priority_from_headers(&http::HeaderMap::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid MASA context header `ctx`: invalid ASCII/metadata")]
+    fn read_priority_panics_with_explicit_message_for_invalid_ascii() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            MASA_CONTEXT_HEADER,
+            HeaderValue::from_bytes(b"budget:\xff").unwrap(),
+        );
+
+        let _ = read_priority_from_headers(&headers);
+    }
+
+    #[test]
+    #[should_panic(expected = "has no `budget` section")]
+    fn read_priority_panics_with_explicit_message_when_the_budget_section_is_missing() {
+        let _ = read_priority_from_headers(&headers_with("other:AA=="));
+    }
+
+    /// What Hyper decoded before the scan: the priority alone, by deserializing
+    /// the section and skipping the first five elements.
+    #[derive(serde::Deserialize)]
+    struct PriorityPeek(
+        serde::de::IgnoredAny,
+        serde::de::IgnoredAny,
+        serde::de::IgnoredAny,
+        serde::de::IgnoredAny,
+        serde::de::IgnoredAny,
+        PriorityHint,
+    );
+
+    #[test]
+    fn read_priority_panics_with_the_message_it_always_did_for_a_malformed_section() {
+        for section in [
+            "not-base64",
+            "AAAA",
+            "AAA",
+            "IjEi",
+            "WzEsMiwzLDQsNV0=",
+            "WyJhIiwxLDIsMyw0LDUsNl0=",
+            "WyJhIiwxLDIsMyw0LCI1Il0=",
+            "WyJhIiwxLDIsMyw0LDE4NDQ2NzQ0MDczNzA5NTUxNjE2XQ==",
+        ] {
+            let before = wire::decode_payload::<PriorityPeek>(section);
+            let headers = headers_with(&format!("budget:{section}"));
+
+            let result = std::panic::catch_unwind(|| read_priority_from_headers(&headers));
+
+            match (before, result) {
+                (Ok(PriorityPeek(.., priority)), Ok(read)) => {
+                    assert_eq!(read, priority, "{section}")
+                }
+                (Err(err), Err(panic)) => assert_eq!(
+                    panic.downcast_ref::<String>().unwrap(),
+                    &crate::invalid_budget_section_message(err),
+                    "{section}"
+                ),
+                (before, result) => {
+                    panic!(
+                        "{section}: before {:?}, now {:?}",
+                        before.is_ok(),
+                        result.is_ok()
+                    )
+                }
+            }
+        }
     }
 
     #[test]

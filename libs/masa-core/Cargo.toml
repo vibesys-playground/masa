@@ -30,3 +30,6 @@ rpcstack-wire = { path = "../rpcstack-wire" }
 log = "0.4"
 http = "0.2"
 tower-service = "0.3"
+
+[dev-dependencies]
+base64 = "0.21"
