@@ -3037,7 +3037,6 @@ dependencies = [
 name = "masa-policy"
 version = "0.1.0"
 dependencies = [
- "base64 0.21.7",
  "dashmap",
  "http",
  "log",
@@ -3046,9 +3045,9 @@ dependencies = [
  "rand 0.8.5",
  "rand_distr 0.4.3",
  "rpcstack",
+ "rpcstack-tonic",
  "serde",
  "serde_json",
- "smallvec",
  "tokio",
  "tonic",
 ]
@@ -4515,6 +4514,15 @@ dependencies = [
 [[package]]
 name = "rpcstack-sched"
 version = "0.1.0"
+
+[[package]]
+name = "rpcstack-tonic"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "rpcstack",
+ "tonic",
+]
 
 [[package]]
 name = "rpcstack-wire"
