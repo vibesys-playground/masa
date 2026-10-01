@@ -8,7 +8,7 @@ use super::super::fanout::{recover_path_groups, ChildRecord, PathPrefix};
 use super::super::latency_map::{ParentToChildKey, RootToLocalKey};
 use super::latency_estimators::{fanout_enabled_for_parent, LatencyEstimators};
 use super::metadata::{is_early_return_response, is_signaled_report};
-use crate::layer::est::wire::EstimationResponseWire;
+use crate::module::est::wire::EstimationResponseWire;
 use crate::registry::MethodId;
 use crate::MethodRegistry;
 
@@ -275,7 +275,7 @@ pub(crate) struct ChildRPCTracker {
     pub(crate) path_prefix: PathPrefix,
     /// Sorted multiset of still-open earlier children + this child at issue
     /// time. Lower bound on the eventual fanout-group signature; used by
-    /// the estimation layer to look up the matching group's EMA.
+    /// the estimation module to look up the matching group's EMA.
     pub(crate) base_signature: Vec<MethodId>,
     pub(crate) service_path_prefix: PathPrefix,
     pub(crate) base_service_signature: Vec<MethodId>,

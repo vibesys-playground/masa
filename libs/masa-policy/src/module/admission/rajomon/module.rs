@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Response, Status};
 
 use super::shared::{RajomonSharedState, RAJOMON_STATE};
-use crate::layer::{
-    ChildOutcome, ChildState, Extensions, Layer, LayerServer, MissingDependency, Outcome,
+use crate::module::{
+    ChildOutcome, ChildState, Extensions, MissingDependency, Module, ModuleServer, Outcome,
     ServerInit,
 };
 use crate::policy_params::PolicyParams;
@@ -49,19 +49,19 @@ impl RajomonWire {
     }
 }
 
-// ── Layer Implementation ────────────────────────────────────────────────
+// ── Module Implementation ────────────────────────────────────────────────
 
 #[derive(Debug)]
 pub struct RajomonServer;
 
-impl LayerServer for RajomonServer {
+impl ModuleServer for RajomonServer {
     fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
         Ok(Self)
     }
 }
 
 #[derive(Debug)]
-pub struct RajomonLayer {
+pub struct RajomonModule {
     pub(super) rpc: CowGrpcMethod,
     pub(super) should_drop: bool,
     /// Remaining token budget for this request, shared across fan-out branches.
@@ -70,7 +70,7 @@ pub struct RajomonLayer {
     pub(super) inbound_tokens: AtomicU64,
 }
 
-impl Layer for RajomonLayer {
+impl Module for RajomonModule {
     type Server = RajomonServer;
     const NAME: &'static str = "rajomon";
     type Wire = RajomonWire;
@@ -83,7 +83,7 @@ impl Layer for RajomonLayer {
     ) -> Self {
         RajomonSharedState::ensure_worker_started();
 
-        let mut layer = Self {
+        let mut module = Self {
             rpc: method.clone(),
             should_drop: false,
             remaining_tokens: AtomicU64::new(0),
@@ -97,23 +97,23 @@ impl Layer for RajomonLayer {
             .get::<Self>()
             .unwrap_or_else(|err| panic!("{err}"))
             .map_or(DEFAULT_TOKENS, |wire| wire.tokens);
-        let accumulated = RAJOMON_STATE.accumulated_price(&layer.rpc);
+        let accumulated = RAJOMON_STATE.accumulated_price(&module.rpc);
         let own = RAJOMON_STATE.own_price.load(Ordering::Relaxed);
-        layer.inbound_tokens.store(tokens, Ordering::Relaxed);
+        module.inbound_tokens.store(tokens, Ordering::Relaxed);
         if tokens < accumulated {
-            layer.should_drop = true;
+            module.should_drop = true;
             RAJOMON_STATE.diag_rejected.fetch_add(1, Ordering::Relaxed);
             RAJOMON_STATE
                 .diag_token_deficit_sum
                 .fetch_add(accumulated - tokens, Ordering::Relaxed);
         } else {
-            layer
+            module
                 .remaining_tokens
                 .store(tokens - own, Ordering::Relaxed);
             RAJOMON_STATE.diag_admitted.fetch_add(1, Ordering::Relaxed);
         }
 
-        layer
+        module
     }
 
     #[inline]
@@ -239,7 +239,7 @@ impl Layer for RajomonLayer {
     }
 }
 
-impl RajomonLayer {
+impl RajomonModule {
     /// Build a rejection `Status` carrying a structured `/EarlyReturn?...` message.
     ///
     /// Mirrors the format used by predictive admission so the experiment plotting code

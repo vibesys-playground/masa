@@ -1,6 +1,6 @@
-// Oracle layer — perfect-information child priority assignment.
+// Oracle module — perfect-information child priority assignment.
 //
-// Included in the default stack only with `sched_oracle`. The layer consumes synthetic-provided
+// Included in the default stack only with `sched_oracle`. The module consumes synthetic-provided
 // metadata describing the child RPC's wall-clock work and the remaining
 // wall-clock work after that child returns. It then converts that information
 // into a child completion deadline and priority hint.
@@ -10,31 +10,31 @@ use masa_core::{PriorityHint, ORACLE_CHILD_WORK_US_HEADER, ORACLE_REMAINING_AFTE
 use tonic::{CowGrpcMethod, Request, Status};
 
 use super::{
-    BudgetInfo, BudgetLayer, ChildDeadline, ChildPriority, ChildState, Extensions, Layer,
-    LayerServer, MissingDependency, Requires, ServerInit,
+    BudgetInfo, BudgetModule, ChildDeadline, ChildPriority, ChildState, Extensions,
+    MissingDependency, Module, ModuleServer, Requires, ServerInit,
 };
 
 #[derive(Debug)]
 pub struct OracleServer;
 
-impl LayerServer for OracleServer {
+impl ModuleServer for OracleServer {
     fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
         Ok(Self)
     }
 }
 
 #[derive(Debug)]
-pub struct OracleLayer {
+pub struct OracleModule {
     budget: BudgetInfo,
 }
 
-impl Layer for OracleLayer {
+impl Module for OracleModule {
     type Server = OracleServer;
     const NAME: &'static str = "oracle";
     type Wire = ();
 
     fn requires(requires: &mut Requires) {
-        requires.module::<BudgetLayer>();
+        requires.module::<BudgetModule>();
     }
 
     fn new(

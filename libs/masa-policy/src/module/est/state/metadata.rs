@@ -6,7 +6,7 @@ use std::sync::{
 
 use tonic::{Code, Response, Status};
 
-use crate::layer::est::wire::{EstimationResponseWire, SubtreeHealth};
+use crate::module::est::wire::{EstimationResponseWire, SubtreeHealth};
 
 // ══════════════════════════════════════════════════════════════════════════
 // Response metadata assembly

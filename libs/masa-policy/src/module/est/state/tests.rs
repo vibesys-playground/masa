@@ -8,8 +8,8 @@ use super::latency_estimators::blend_toward_legacy;
 use super::metadata::ComputeTracker;
 use super::request::FanoutInvocationState;
 use super::*;
-use crate::layer::est::fanout::{ChildRecord, PathPrefix};
-use crate::layer::est::latency_map::ParentToChildKey;
+use crate::module::est::fanout::{ChildRecord, PathPrefix};
+use crate::module::est::latency_map::ParentToChildKey;
 use crate::registry::MethodId;
 use crate::MethodRegistry;
 

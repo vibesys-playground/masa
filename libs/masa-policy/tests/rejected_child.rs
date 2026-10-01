@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use masa_core::time_now;
-use masa_policy::modules::E2eDeadlineGuardLayer;
+use masa_policy::modules::E2eDeadlineGuardModule;
 use masa_policy::{
-    policy_stack, BudgetLayer, ChildState, ContextBuilder, Extensions, Layer, PolicyHooks, WireIn,
-    WireOut, MASA_CONTEXT_HEADER,
+    policy_stack, BudgetModule, ChildState, ContextBuilder, Extensions, Module, PolicyHooks,
+    WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
 use tonic::{CowGrpcMethod, GrpcMethod, Request, Response, Status};
@@ -20,7 +20,7 @@ use tonic::{CowGrpcMethod, GrpcMethod, Request, Response, Status};
 #[derive(Debug)]
 struct RejectsChildren;
 
-impl Layer for RejectsChildren {
+impl Module for RejectsChildren {
     type Server = ();
     const NAME: &'static str = "rejects_children";
     type Wire = ();
@@ -41,12 +41,12 @@ impl Layer for RejectsChildren {
     }
 }
 
-type Rejecting = policy_stack![BudgetLayer, E2eDeadlineGuardLayer, RejectsChildren];
-type Accepting = policy_stack![BudgetLayer, E2eDeadlineGuardLayer];
+type Rejecting = policy_stack![BudgetModule, E2eDeadlineGuardModule, RejectsChildren];
+type Accepting = policy_stack![BudgetModule, E2eDeadlineGuardModule];
 
 /// The message of the guard's rejection after a child call, once the request's
 /// SLO has run out.
-fn guard_message_after_child<S: masa_policy::LayerStack>(send: bool) -> String {
+fn guard_message_after_child<S: masa_policy::ModuleStack>(send: bool) -> String {
     const SERVICE: &str = "rejected-child";
     let now = time_now();
     let slo = 20_000; // 20 ms

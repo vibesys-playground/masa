@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Once};
 
 use masa_core::time_now;
-use masa_policy::modules::QueueLatencyLayer;
+use masa_policy::modules::QueueLatencyModule;
 use masa_policy::ContextBuilder;
 use masa_policy::{
     policy_stack, MasaRequestExt, MasaResponseExt, PolicyHooks, QueueLatencyWire,
@@ -17,14 +17,14 @@ use masa_policy::{
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
 use tonic::{GrpcMethod, Request, Response, Status};
 
-type Stack = policy_stack![QueueLatencyLayer];
+type Stack = policy_stack![QueueLatencyModule];
 type Server = <PolicyHooks<Stack> as Hooks>::ServerContext;
 type Parent = <PolicyHooks<Stack> as Hooks>::ParentContext;
 type Child = <PolicyHooks<Stack> as Hooks>::ChildContext;
 
 fn init() {
     static ONCE: Once = Once::new();
-    // The layer reads its service name from the environment once per process.
+    // The module reads its service name from the environment once per process.
     ONCE.call_once(|| std::env::set_var("SERVICE_NAME", "q-svc"));
 }
 
@@ -61,7 +61,7 @@ fn reply_with(wire: Option<QueueLatencyWire>) -> Response<()> {
         .build();
     let mut reply = Response::new(()).with_masa_context(&ctx);
     if let Some(wire) = wire {
-        reply.set_wire::<QueueLatencyLayer>(&wire);
+        reply.set_wire::<QueueLatencyModule>(&wire);
     }
     reply
 }
@@ -101,7 +101,7 @@ fn totals_aggregate_across_two_hops() {
             })),
         );
         let mid_reply = finish(&mid);
-        let mid_wire = mid_reply.get_wire::<QueueLatencyLayer>().unwrap();
+        let mid_wire = mid_reply.get_wire::<QueueLatencyModule>().unwrap();
         assert_eq!(mid_wire.initial, 11);
         assert_eq!(mid_wire.resume, 22);
         assert_eq!(
@@ -121,7 +121,7 @@ fn totals_aggregate_across_two_hops() {
                 queue_lengths: lengths(&[("leaf", 9)]),
             })),
         );
-        let root_wire = finish(&root).get_wire::<QueueLatencyLayer>().unwrap();
+        let root_wire = finish(&root).get_wire::<QueueLatencyModule>().unwrap();
         assert_eq!(root_wire.initial, 12);
         assert_eq!(root_wire.resume, 24);
         assert_eq!(
@@ -141,7 +141,7 @@ fn an_all_zero_child_section_round_trips_as_present() {
             "Leaf",
             reply_with(Some(QueueLatencyWire::default())),
         );
-        let wire = finish(&parent).get_wire::<QueueLatencyLayer>().unwrap();
+        let wire = finish(&parent).get_wire::<QueueLatencyModule>().unwrap();
         assert_eq!((wire.initial, wire.resume), (0, 0));
         assert_eq!(wire.queue_lengths, lengths(&[("q-svc", 0)]));
     });
@@ -153,7 +153,7 @@ fn a_child_without_a_section_contributes_nothing() {
         let server = Arc::new(Server::new("q.Service"));
         let parent = begin(&server, "Root");
         call(&parent, "Leaf", reply_with(None));
-        let wire = finish(&parent).get_wire::<QueueLatencyLayer>().unwrap();
+        let wire = finish(&parent).get_wire::<QueueLatencyModule>().unwrap();
         assert_eq!((wire.initial, wire.resume), (0, 0));
         assert_eq!(wire.queue_lengths, lengths(&[("q-svc", 0)]));
     });
@@ -174,6 +174,6 @@ fn the_response_section_is_the_only_carrier() {
             (request, child)
         };
         // Nothing queue-related is sent down with the child request.
-        assert_eq!(request.get_wire::<QueueLatencyLayer>(), None);
+        assert_eq!(request.get_wire::<QueueLatencyModule>(), None);
     });
 }

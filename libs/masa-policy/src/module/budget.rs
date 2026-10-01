@@ -1,14 +1,14 @@
 // Budget module — Masa's request facts and time budget.
 //
 // A request's API, id, SLO, gateway entry time, deadline and priority are the
-// wire data of the budget module (`BudgetLayer`, the `budget` section of the
+// wire data of the budget module (`BudgetModule`, the `budget` section of the
 // `ctx` header). The framework carries none of it: this module reads it from
 // the inbound request, shares a read-only view with the modules after it, and
 // writes the child's and the response's sections itself.
 //
 // A child request's deadline and priority are decided by several modules
 // (estimation, oracle). They propose values (`ChildDeadline`, `ChildPriority`)
-// in `before_child_rpc`; `BudgetLayer`, the owner of both decisions, resolves
+// in `before_child_rpc`; `BudgetModule`, the owner of both decisions, resolves
 // them in `seal_child_rpc`, which the framework runs after all of them. Its
 // rule is that the last proposal wins; the framework has no rule.
 
@@ -17,7 +17,7 @@ use std::sync::Arc;
 use masa_core::{Api, Context, Latency, PriorityHint, RequestId, Timestamp, BUDGET_SECTION};
 use tonic::{CowGrpcMethod, Response, Status};
 
-use super::{ChildState, Extensions, Layer, LayerServer, MissingDependency, Outcome, ServerInit};
+use super::{ChildState, Extensions, MissingDependency, Module, ModuleServer, Outcome, ServerInit};
 use crate::wire::{WireIn, WireOut};
 
 // ── Root priority ───────────────────────────────────────────────────────
@@ -121,7 +121,7 @@ impl ContextBuilder {
 
 /// What the budget module knows about the request being served, read-only:
 /// the facts the sender attached. Inserted into [`Extensions`] by
-/// [`BudgetLayer::new`], so modules after it read it in their own `new`.
+/// [`BudgetModule::new`], so modules after it read it in their own `new`.
 #[derive(Debug, Clone)]
 pub struct BudgetInfo(Arc<Context>);
 
@@ -133,13 +133,13 @@ impl From<Context> for BudgetInfo {
 
 impl BudgetInfo {
     /// The view the budget module published for this request. Panics if the
-    /// module is missing; a module that declares [`BudgetLayer`] in
-    /// [`Layer::requires`] cannot hit that.
+    /// module is missing; a module that declares [`BudgetModule`] in
+    /// [`Module::requires`] cannot hit that.
     pub fn of(ext: &Extensions) -> Self {
         ext.get::<Self>()
             .unwrap_or_else(|| {
                 panic!(
-                    "the `BudgetInfo` that `BudgetLayer` publishes is missing; put `BudgetLayer` \
+                    "the `BudgetInfo` that `BudgetModule` publishes is missing; put `BudgetModule` \
                      first in the policy stack"
                 )
             })
@@ -179,7 +179,7 @@ impl BudgetInfo {
 }
 
 /// The deadline the child request will carry: a decision point owned by
-/// [`BudgetLayer`], which resolves it in `seal_child_rpc`. Modules that decide
+/// [`BudgetModule`], which resolves it in `seal_child_rpc`. Modules that decide
 /// the child's deadline (estimation, oracle) `propose` a value in
 /// `before_child_rpc`; the budget module takes the last proposal, so the module
 /// nearest the end of the stack wins, and falls back to the parent's own
@@ -188,7 +188,7 @@ impl BudgetInfo {
 pub struct ChildDeadline(pub Timestamp);
 
 /// The priority the child request will carry: a decision point owned by
-/// [`BudgetLayer`], resolved like [`ChildDeadline`] and independently of it, so
+/// [`BudgetModule`], resolved like [`ChildDeadline`] and independently of it, so
 /// a module that decides only one of the two leaves the other alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChildPriority(pub PriorityHint);
@@ -198,7 +198,7 @@ pub struct ChildPriority(pub PriorityHint);
 #[derive(Debug)]
 pub struct BudgetServer;
 
-impl LayerServer for BudgetServer {
+impl ModuleServer for BudgetServer {
     fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
         Ok(Self)
     }
@@ -211,7 +211,7 @@ impl LayerServer for BudgetServer {
 /// a request without it is a misconfigured sender, so `new` panics with a
 /// message saying so (as for any malformed wire data).
 #[derive(Debug)]
-pub struct BudgetLayer {
+pub struct BudgetModule {
     info: BudgetInfo,
     /// The inbound section as the sender encoded it. The response carries the
     /// request's own facts unchanged, and so does a child whose budget no
@@ -219,7 +219,7 @@ pub struct BudgetLayer {
     encoded: String,
 }
 
-impl Layer for BudgetLayer {
+impl Module for BudgetModule {
     type Server = BudgetServer;
     const NAME: &'static str = BUDGET_SECTION;
     type Wire = Context;

@@ -24,8 +24,8 @@ use masa_integration_tests::pb::{
     Input1, Input2, Output1, Output2,
 };
 use masa_policy::{
-    policy_stack, BudgetInfo, BudgetLayer, ContextBuilder, Extensions, Layer, Outcome, PolicyHooks,
-    Requires, WireIn, WireOut,
+    policy_stack, BudgetInfo, BudgetModule, ContextBuilder, Extensions, Module, Outcome,
+    PolicyHooks, Requires, WireIn, WireOut,
 };
 use tonic::metadata::MetadataValue;
 use tonic::transport::Server;
@@ -74,13 +74,13 @@ impl ChildService for RecordingSvc {
 #[derive(Debug)]
 struct RejectBlocked(BudgetInfo);
 
-impl Layer for RejectBlocked {
+impl Module for RejectBlocked {
     type Server = ();
     const NAME: &'static str = "RejectBlocked";
     type Wire = ();
 
     fn requires(requires: &mut Requires) {
-        requires.module::<BudgetLayer>();
+        requires.module::<BudgetModule>();
     }
 
     fn new(
@@ -104,7 +104,7 @@ impl Layer for RejectBlocked {
 #[derive(Debug)]
 struct StampResponse;
 
-impl Layer for StampResponse {
+impl Module for StampResponse {
     type Server = ();
     const NAME: &'static str = "StampResponse";
     type Wire = ();
@@ -133,7 +133,7 @@ impl Layer for StampResponse {
     }
 }
 
-type TestStack = policy_stack![BudgetLayer, RejectBlocked, StampResponse];
+type TestStack = policy_stack![BudgetModule, RejectBlocked, StampResponse];
 
 // ── Tests ───────────────────────────────────────────────────────────────
 

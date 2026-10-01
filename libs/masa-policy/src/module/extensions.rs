@@ -10,10 +10,10 @@ use smallvec::SmallVec;
 /// idea as `http::Extensions`).
 ///
 /// The framework creates one empty map when a request begins and hands it to
-/// every hook of that request: mutably to [`Layer::new`](super::Layer::new),
-/// [`Layer::before_poll`](super::Layer::before_poll),
-/// [`Layer::before_child_rpc`](super::Layer::before_child_rpc) and
-/// [`Layer::seal_child_rpc`](super::Layer::seal_child_rpc), shared to the
+/// every hook of that request: mutably to [`Module::new`](super::Module::new),
+/// [`Module::before_poll`](super::Module::before_poll),
+/// [`Module::before_child_rpc`](super::Module::before_child_rpc) and
+/// [`Module::seal_child_rpc`](super::Module::seal_child_rpc), shared to the
 /// other hooks. It never inserts, reads or interprets a value. The key is the
 /// value's type, so a module that wants its data private should define a
 /// private type for it; data meant for other modules is published by making
@@ -83,7 +83,7 @@ impl Extensions {
 /// A module's proposal for a decision point, with the module that made it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Proposal<T> {
-    /// [`Layer::NAME`](super::Layer::NAME) of the proposing module, recorded
+    /// [`Module::NAME`](super::Module::NAME) of the proposing module, recorded
     /// by the framework.
     pub by: &'static str,
     pub value: T,
@@ -173,7 +173,7 @@ impl From<DecisionClosed> for tonic::Status {
 /// with [`propose`](Self::propose) while the request or child RPC is being set
 /// up; the framework only records them, in the order they were made and with the
 /// proposing module's name. The owner calls [`resolve`](Self::resolve) once,
-/// typically in [`Layer::seal_child_rpc`](super::Layer::seal_child_rpc), which
+/// typically in [`Module::seal_child_rpc`](super::Module::seal_child_rpc), which
 /// runs after every `before_child_rpc`, and applies whatever rule it likes:
 /// the last proposal, the smallest, a refusal if any module vetoed. The
 /// framework has no rule of its own. Resolving closes the decision, so a proposal

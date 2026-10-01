@@ -1,6 +1,6 @@
 //! Framework-owned codec for per-module wire data.
 //!
-//! Each policy module declares a serde `Wire` type ([`Layer::Wire`]) and a
+//! Each policy module declares a serde `Wire` type ([`Module::Wire`]) and a
 //! unique `NAME`. This module is the only place that knows how those values
 //! are laid out in the `ctx` header; modules and hooks use the typed API
 //! ([`WireIn`], [`WireOut`], [`peek`], and the metadata helpers) and never
@@ -46,7 +46,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tonic::metadata::{Ascii, MetadataMap, MetadataValue};
 
-use crate::layer::Layer;
+use crate::module::Module;
 
 /// A wire section could not be read or written.
 #[derive(Debug)]
@@ -82,7 +82,7 @@ pub(crate) fn assert_valid_name(name: &str) {
             && name
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
-        "`Layer::NAME` {name:?} must be non-empty and contain only ASCII letters, digits, `_` and `-`"
+        "`Module::NAME` {name:?} must be non-empty and contain only ASCII letters, digits, `_` and `-`"
     );
 }
 
@@ -122,14 +122,14 @@ impl<'a> WireIn<'a> {
 
     /// Module `M`'s wire data, or `None` if the sender attached none; what
     /// absence means is up to the module. Only `M`'s section is decoded.
-    pub fn get<M: Layer>(&self) -> Result<Option<M::Wire>, WireError> {
+    pub fn get<M: Module>(&self) -> Result<Option<M::Wire>, WireError> {
         self.decode_present(M::NAME)
     }
 
     /// Module `M`'s section exactly as the sender encoded it, or `None` if the
     /// sender attached none. Together with [`WireOut::put_encoded`] it
     /// forwards a section without decoding and re-encoding it.
-    pub fn get_encoded<M: Layer>(&self) -> Option<&'a str> {
+    pub fn get_encoded<M: Module>(&self) -> Option<&'a str> {
         codec::find_section(self.sections, M::NAME)
     }
 
@@ -166,7 +166,7 @@ impl WireOut {
     }
 
     /// Set module `M`'s wire data, replacing any earlier value.
-    pub fn put<M: Layer>(&mut self, wire: &M::Wire) -> Result<(), WireError> {
+    pub fn put<M: Module>(&mut self, wire: &M::Wire) -> Result<(), WireError> {
         self.put_named(M::NAME, wire)
     }
 
@@ -174,7 +174,7 @@ impl WireOut {
     /// from [`WireIn::get_encoded`] for a section of the same type. Nothing
     /// is validated: a payload that is not `M::Wire` is a [`WireError`] for
     /// whoever reads it.
-    pub fn put_encoded<M: Layer>(&mut self, payload: &str) {
+    pub fn put_encoded<M: Module>(&mut self, payload: &str) {
         self.set(Cow::Borrowed(M::NAME), payload.to_owned());
     }
 
@@ -226,17 +226,17 @@ impl WireOut {
 
 /// Decode only module `M`'s section from `headers`, without decoding any
 /// other module's data. `Ok(None)` if the header or the section is absent.
-pub fn peek<M: Layer>(headers: &http::HeaderMap) -> Result<Option<M::Wire>, WireError> {
+pub fn peek<M: Module>(headers: &http::HeaderMap) -> Result<Option<M::Wire>, WireError> {
     WireIn::from_headers(headers)?.get::<M>()
 }
 
 /// Module `M`'s wire data in `metadata`, if any.
-pub fn get_from_metadata<M: Layer>(metadata: &MetadataMap) -> Result<Option<M::Wire>, WireError> {
+pub fn get_from_metadata<M: Module>(metadata: &MetadataMap) -> Result<Option<M::Wire>, WireError> {
     WireIn::from_metadata(metadata)?.get::<M>()
 }
 
 /// Set module `M`'s wire data in `metadata`, keeping other modules' data.
-pub fn set_in_metadata<M: Layer>(
+pub fn set_in_metadata<M: Module>(
     metadata: &mut MetadataMap,
     wire: &M::Wire,
 ) -> Result<(), WireError> {
@@ -248,7 +248,7 @@ pub fn set_in_metadata<M: Layer>(
 
 /// A `ctx` header value carrying module `M`'s wire data, for building inbound
 /// requests by hand (tests, tools).
-pub fn header_value_with<M: Layer>(wire: &M::Wire) -> Result<String, WireError> {
+pub fn header_value_with<M: Module>(wire: &M::Wire) -> Result<String, WireError> {
     let mut out = WireOut::new();
     out.put::<M>(wire)?;
     Ok(out.header_value())

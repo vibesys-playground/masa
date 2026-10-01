@@ -6,7 +6,7 @@
 // which module ended a request) and delegates every policy decision to the
 // module stack `S`: what a request carries, what a child request carries, and
 // what a response carries are all whatever the modules put. The stack applies
-// the ordering rules (see `layer/mod.rs`). The default stack,
+// the ordering rules (see `module/mod.rs`). The default stack,
 // `MasaStack`, is selected by Cargo features in `masa_stack.rs`; any other
 // stack built with `policy_stack!` plugs in the same way.
 //
@@ -21,11 +21,11 @@ use crate::context_ext::{
     get_method_name_override_from_headers, get_method_name_override_from_metadata,
     get_service_name_override_from_headers, get_service_name_override_from_metadata,
 };
-use crate::layer::{
-    validate_stack, ChildOutcome, ChildState, Early, Extensions, LayerServer, LayerStack,
-    MissingDependency, Outcome, ServerInit,
-};
 use crate::masa_stack::MasaStack;
+use crate::module::{
+    validate_stack, ChildOutcome, ChildState, Early, Extensions, MissingDependency, ModuleServer,
+    ModuleStack, Outcome, ServerInit,
+};
 use crate::wire::{WireIn, WireOut};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
 use tonic::{CowGrpcMethod, GrpcMethod, Request, Response, Status};
@@ -69,18 +69,18 @@ fn resolve_method_name_from_request<T>(method: GrpcMethod, request: &Request<T>)
     )
 }
 
-impl<S: LayerStack> Hooks for PolicyHooks<S> {
+impl<S: ModuleStack> Hooks for PolicyHooks<S> {
     type ServerContext = ServerContext<S>;
     type ChildContext = ChildContext<S>;
     type ParentContext = ParentContext<S>;
 }
 
 #[derive(Debug)]
-pub struct ServerContext<S: LayerStack = MasaStack> {
-    layers: S::Server,
+pub struct ServerContext<S: ModuleStack = MasaStack> {
+    modules: S::Server,
 }
 
-impl<S: LayerStack> ServerContext<S> {
+impl<S: ModuleStack> ServerContext<S> {
     /// Build the server state of the stack `S`, or report the first module
     /// whose required module or server state the stack does not provide before
     /// it. [`ServerHooks::new`] panics with the same message.
@@ -89,20 +89,20 @@ impl<S: LayerStack> ServerContext<S> {
     pub fn try_new(service_name: &'static str) -> Result<Self, MissingDependency> {
         validate_stack::<S>()?;
         Ok(Self {
-            layers: S::Server::new(&mut ServerInit::new(service_name))?,
+            modules: S::Server::new(&mut ServerInit::new(service_name))?,
         })
     }
 }
 
-impl<S: LayerStack> ServerHooks for ServerContext<S> {
+impl<S: ModuleStack> ServerHooks for ServerContext<S> {
     fn new(service_name: &'static str) -> Self {
         Self::try_new(service_name).unwrap_or_else(|err| panic!("{err}"))
     }
 }
 
 #[derive(Debug)]
-pub struct ParentContext<S: LayerStack = MasaStack> {
-    layers: S,
+pub struct ParentContext<S: ModuleStack = MasaStack> {
+    modules: S,
     /// Hooks take `&self`, so the per-request state sits behind a lock;
     /// hooks run one at a time, so it is never contended. The lock is held
     /// for a whole stack call, so each child RPC is set up atomically.
@@ -133,13 +133,13 @@ impl RequestState {
     }
 }
 
-impl<S: LayerStack> ParentContext<S> {
+impl<S: ModuleStack> ParentContext<S> {
     fn state(&self) -> MutexGuard<'_, RequestState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
-impl<S: LayerStack> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentContext<S> {
+impl<S: ModuleStack> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentContext<S> {
     fn begin<B>(
         method: GrpcMethod,
         req: &http::Request<B>,
@@ -148,10 +148,10 @@ impl<S: LayerStack> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentCon
         let resolved_method = resolve_method_name_from_http(method, req);
         let wire = WireIn::from_headers(req.headers()).unwrap_or_else(|err| panic!("{err}"));
         let mut ext = Extensions::new();
-        let layers = S::new(&resolved_method, &server_ctx.layers, &wire, &mut ext);
+        let modules = S::new(&resolved_method, &server_ctx.modules, &wire, &mut ext);
 
         Self {
-            layers,
+            modules,
             state: Mutex::new(RequestState {
                 ext,
                 ended_by: None,
@@ -161,7 +161,7 @@ impl<S: LayerStack> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentCon
 
     fn before_poll<Ret>(&self) -> Result<(), Result<Response<Ret>, Status>> {
         let mut state = self.state();
-        match self.layers.before_poll(&mut state.ext) {
+        match self.modules.before_poll(&mut state.ext) {
             Ok(()) => Ok(()),
             Err(early) => {
                 state.record(&early);
@@ -181,7 +181,7 @@ impl<S: LayerStack> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentCon
 
         let mut child_wire = WireOut::new();
         let mut state = self.state();
-        self.layers
+        self.modules
             .before_child_rpc(
                 &child_method_name,
                 &mut child_ctx.state,
@@ -190,14 +190,14 @@ impl<S: LayerStack> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentCon
                 &mut state.ext,
             )
             .map_err(|rejection| rejection.status)?;
-        if let Err(rejection) = self.layers.seal_child_rpc(
+        if let Err(rejection) = self.modules.seal_child_rpc(
             &child_method_name,
             &mut child_ctx.state,
             request,
             &mut child_wire,
             &mut state.ext,
         ) {
-            self.layers.reject_child_rpc(
+            self.modules.reject_child_rpc(
                 &child_method_name,
                 rejection.by,
                 &rejection.status,
@@ -228,7 +228,7 @@ impl<S: LayerStack> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentCon
             };
             let response_wire =
                 WireIn::from_metadata(metadata).unwrap_or_else(|err| panic!("{err}"));
-            self.layers.after_child_rpc(
+            self.modules.after_child_rpc(
                 child_method,
                 ChildOutcome::Sent(&*response),
                 &response_wire,
@@ -244,7 +244,7 @@ impl<S: LayerStack> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentCon
         poll: &Poll<Result<Response<Ret>, Status>>,
     ) -> Result<(), Result<Response<Ret>, Status>> {
         let mut state = self.state();
-        match self.layers.after_poll(poll, &state.ext) {
+        match self.modules.after_poll(poll, &state.ext) {
             Ok(()) => Ok(()),
             Err(early) => {
                 state.record(&early);
@@ -256,7 +256,7 @@ impl<S: LayerStack> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentCon
     fn finalize_before_serialization<Ret>(&self, result: &mut Result<Response<Ret>, Status>) {
         let mut wire = WireOut::new();
         let state = self.state();
-        self.layers
+        self.modules
             .finalize(result, state.outcome(), &mut wire, &state.ext);
         let metadata = match result {
             Ok(resp) => resp.metadata_mut(),
@@ -267,14 +267,14 @@ impl<S: LayerStack> ParentHooks<ChildContext<S>, ServerContext<S>> for ParentCon
 }
 
 #[derive(Debug)]
-pub struct ChildContext<S: LayerStack = MasaStack> {
+pub struct ChildContext<S: ModuleStack = MasaStack> {
     pub child_method_name: Option<CowGrpcMethod>,
     /// What the modules keep for this one child RPC.
     state: ChildState,
     stack: PhantomData<fn() -> S>,
 }
 
-impl<S: LayerStack> ClientHooks for ChildContext<S> {
+impl<S: ModuleStack> ClientHooks for ChildContext<S> {
     fn new<T>(_method: GrpcMethod, _request: &Request<T>) -> Self {
         Self {
             child_method_name: None,
@@ -284,7 +284,7 @@ impl<S: LayerStack> ClientHooks for ChildContext<S> {
     }
 }
 
-impl<S: LayerStack> ChildContext<S> {
+impl<S: ModuleStack> ChildContext<S> {
     pub fn set_method_name(&mut self, name: CowGrpcMethod) {
         self.child_method_name = Some(name);
     }
@@ -316,8 +316,8 @@ mod tests {
             DefaultServerContext as ServerContext,
         };
         use crate::context_ext::MASA_CONTEXT_HEADER;
-        use crate::layer::est::latency_map::ParentToChildKey;
-        use crate::layer::est::state::{ChildRPCTracker, LatencyEstimators};
+        use crate::module::est::latency_map::ParentToChildKey;
+        use crate::module::est::state::{ChildRPCTracker, LatencyEstimators};
         use crate::ContextBuilder;
         use crate::MethodRegistry;
         use masa_core::LatencyRms;
@@ -434,7 +434,7 @@ mod tests {
                 .before_child_rpc(child_method, &mut child_req, &mut child_ctx)
                 .unwrap();
 
-            // Verify child tracker was initialized by the estimation layer
+            // Verify child tracker was initialized by the estimation module
             let child_tracker = child_ctx
                 .state
                 .get::<ChildRPCTracker>()

@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 use tonic::{CowGrpcMethod, Response, Status};
 
 use super::*;
-use crate::layer::Layer;
+use crate::module::Module;
 use crate::wire::WireIn;
 
 // Default parameter values matching PolicyParams defaults.
@@ -14,22 +14,22 @@ const PRICE_STEP_UP: u64 = 8;
 const TOKENS_LEFT_INIT: u64 = 10;
 const TOKEN_UPDATE_STEP: u64 = 5;
 
-/// A layer for a request that arrived carrying `tokens` as Rajomon wire data.
-fn layer_with_tokens(method: &CowGrpcMethod, tokens: u64) -> RajomonLayer {
+/// A module for a request that arrived carrying `tokens` as Rajomon wire data.
+fn module_with_tokens(method: &CowGrpcMethod, tokens: u64) -> RajomonModule {
     let mut headers = http::HeaderMap::new();
     headers.insert(
         masa_core::MASA_CONTEXT_HEADER,
-        crate::wire::header_value_with::<RajomonLayer>(&RajomonWire::request(tokens))
+        crate::wire::header_value_with::<RajomonModule>(&RajomonWire::request(tokens))
             .unwrap()
             .parse()
             .unwrap(),
     );
     let wire = WireIn::from_headers(&headers).unwrap();
-    RajomonLayer::new(
+    RajomonModule::new(
         method,
         &RajomonServer,
         &wire,
-        &mut crate::layer::Extensions::new(),
+        &mut crate::module::Extensions::new(),
     )
 }
 
@@ -221,9 +221,9 @@ fn test_check_inbound_deducts_own_price_not_accumulated() {
         .max_downstream_for_method
         .remove(&CowGrpcMethod::new("svc", "method"));
 
-    let layer = layer_with_tokens(&method, 20);
-    assert!(!layer.should_drop);
-    assert_eq!(layer.remaining_tokens.load(Ordering::Relaxed), 17); // 20 - own(3) = 17
+    let module = module_with_tokens(&method, 20);
+    assert!(!module.should_drop);
+    assert_eq!(module.remaining_tokens.load(Ordering::Relaxed), 17); // 20 - own(3) = 17
 }
 
 /// The inbound gate uses the paper's `accumulated = own + max(downstream)`
@@ -238,9 +238,9 @@ fn test_check_inbound_deducts_own_not_accumulated_when_downstream_dominant() {
     RAJOMON_STATE
         .max_downstream_for_method
         .insert(method.clone(), 20); // accumulated = 5 + 20 = 25
-    let layer = layer_with_tokens(&method, 25);
-    assert!(!layer.should_drop); // tok(25) >= accumulated(25) -> admitted
-    assert_eq!(layer.remaining_tokens.load(Ordering::Relaxed), 20); // 25 - own(5) = 20
+    let module = module_with_tokens(&method, 25);
+    assert!(!module.should_drop); // tok(25) >= accumulated(25) -> admitted
+    assert_eq!(module.remaining_tokens.load(Ordering::Relaxed), 20); // 25 - own(5) = 20
 }
 
 #[test]
@@ -249,8 +249,8 @@ fn test_check_inbound_rejects_insufficient_tokens() {
     let method = CowGrpcMethod::new("svc", "reject_method");
     RAJOMON_STATE.own_price.store(100, Ordering::Relaxed);
 
-    let layer = layer_with_tokens(&method, 10);
-    assert!(layer.should_drop);
+    let module = module_with_tokens(&method, 10);
+    assert!(module.should_drop);
 }
 
 #[test]
@@ -262,9 +262,9 @@ fn test_check_inbound_accepts_exact_tokens() {
         .max_downstream_for_method
         .remove(&CowGrpcMethod::new("svc", "exact_method"));
 
-    let layer = layer_with_tokens(&method, 10);
-    assert!(!layer.should_drop);
-    assert_eq!(layer.remaining_tokens.load(Ordering::Relaxed), 0); // 10 - 10 = 0
+    let module = module_with_tokens(&method, 10);
+    assert!(!module.should_drop);
+    assert_eq!(module.remaining_tokens.load(Ordering::Relaxed), 0); // 10 - 10 = 0
 }
 
 #[test]
@@ -280,8 +280,8 @@ fn test_check_inbound_tokens_zero_price_zero() {
     // there is nothing to charge the request for, so it is admitted.
     // This test used to assert rejection under our now-removed .max(1)
     // minimum-effective-price clamp (§10.7).
-    let layer = layer_with_tokens(&method, 0);
-    assert!(!layer.should_drop);
+    let module = module_with_tokens(&method, 0);
+    assert!(!module.should_drop);
 }
 
 // ── E. Downstream Price Tests (Max Recomputation, Not Ratchet) ──
@@ -359,7 +359,7 @@ fn test_child_price_default_zero() {
 }
 
 #[test]
-fn test_layer_records_child_price_response_and_updates_parent_max() {
+fn test_module_records_child_price_response_and_updates_parent_max() {
     let _lock = GLOBAL_STATE_LOCK.lock().unwrap();
     let parent = CowGrpcMethod::new("rajomon_e2e", "parent");
     let child = CowGrpcMethod::new("rajomon_e2e", "child");
@@ -369,25 +369,25 @@ fn test_layer_records_child_price_response_and_updates_parent_max() {
         .remove(&(parent.clone(), child.clone()));
     RAJOMON_STATE.max_downstream_for_method.remove(&parent);
 
-    let layer = layer_with_tokens(&parent, 100);
+    let module = module_with_tokens(&parent, 100);
     let response: Result<Response<()>, Status> = Ok(Response::new(()));
     let mut headers = http::HeaderMap::new();
     headers.insert(
         masa_core::MASA_CONTEXT_HEADER,
-        crate::wire::header_value_with::<RajomonLayer>(&RajomonWire::response(100, 13))
+        crate::wire::header_value_with::<RajomonModule>(&RajomonWire::response(100, 13))
             .unwrap()
             .parse()
             .unwrap(),
     );
     let response_wire = WireIn::from_headers(&headers).unwrap();
 
-    crate::layer::Layer::after_child_rpc(
-        &layer,
+    crate::module::Module::after_child_rpc(
+        &module,
         &child,
-        crate::layer::ChildOutcome::Sent(&response),
+        crate::module::ChildOutcome::Sent(&response),
         &response_wire,
-        &crate::layer::ChildState::new(),
-        &crate::layer::Extensions::new(),
+        &crate::module::ChildState::new(),
+        &crate::module::Extensions::new(),
     )
     .unwrap();
 
@@ -497,7 +497,7 @@ fn test_price_propagation_edge_cases() {
     let _lock = GLOBAL_STATE_LOCK.lock().unwrap();
     RAJOMON_STATE.own_price.store(0, Ordering::Relaxed);
     RAJOMON_STATE.max_downstream_for_method.remove(&method);
-    let layer = layer_with_tokens(&method, 100);
+    let module = module_with_tokens(&method, 100);
 
     // We can't override PolicyParams::global() at runtime here, so we
     // can't easily test arbitrary price_freq values from the test
@@ -508,7 +508,7 @@ fn test_price_propagation_edge_cases() {
     let n_trials = 5000;
     let mut true_count = 0;
     for _ in 0..n_trials {
-        if layer.should_propagate_price() {
+        if module.should_propagate_price() {
             true_count += 1;
         }
     }
@@ -532,9 +532,9 @@ fn test_load_shedding_returns_correct_remaining_tokens() {
     let method = CowGrpcMethod::new("svc", "Foo_ls");
     RAJOMON_STATE.max_downstream_for_method.remove(&method);
 
-    let layer = layer_with_tokens(&method, 20);
-    assert!(!layer.should_drop);
-    assert_eq!(layer.remaining_tokens.load(Ordering::Relaxed), 13); // 20 - 7 = 13
+    let module = module_with_tokens(&method, 20);
+    assert!(!module.should_drop);
+    assert_eq!(module.remaining_tokens.load(Ordering::Relaxed), 13); // 20 - 7 = 13
 }
 
 #[test]
@@ -548,13 +548,13 @@ fn test_mixed_tokens_accept_reject() {
     let mut accepted = 0;
     for i in 0..10 {
         let token_val = if i < 5 { 3u64 } else { 20u64 };
-        let layer = layer_with_tokens(&method, token_val);
-        if layer.should_drop {
+        let module = module_with_tokens(&method, token_val);
+        if module.should_drop {
             rejected += 1;
         } else {
             accepted += 1;
             if i >= 5 {
-                assert_eq!(layer.remaining_tokens.load(Ordering::Relaxed), 10);
+                assert_eq!(module.remaining_tokens.load(Ordering::Relaxed), 10);
                 // 20 - 10
             }
         }

@@ -162,8 +162,8 @@ impl From<ResponseCompact> for EstimationResponseWire {
 /// Facts about one request that estimation publishes in
 /// [`Extensions`](crate::Extensions) when the request begins, for modules
 /// later in the stack. A module that reads it declares
-/// [`EstimationLayer`](super::EstimationLayer) in
-/// [`Layer::requires`](crate::Layer::requires), so a stack that puts it earlier
+/// [`EstimationModule`](super::EstimationModule) in
+/// [`Module::requires`](crate::Module::requires), so a stack that puts it earlier
 /// fails at construction.
 #[derive(Debug, Clone)]
 pub struct EstimationInfo {
@@ -227,13 +227,13 @@ pub struct SubtreeHealth {
 
 impl SubtreeHealth {
     /// A snapshot of the request's subtree. Panics if estimation is missing; a
-    /// module that declares [`EstimationLayer`](super::EstimationLayer) in
-    /// [`Layer::requires`](crate::Layer::requires) cannot hit that.
+    /// module that declares [`EstimationModule`](super::EstimationModule) in
+    /// [`Module::requires`](crate::Module::requires) cannot hit that.
     pub fn of(ext: &crate::Extensions) -> Self {
         ext.get::<RequestMetadataTracker>()
             .unwrap_or_else(|| {
                 panic!(
-                    "estimation's tally is missing; put `EstimationLayer` before the module that \
+                    "estimation's tally is missing; put `EstimationModule` before the module that \
                      reads `SubtreeHealth`"
                 )
             })

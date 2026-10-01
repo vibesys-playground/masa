@@ -1,7 +1,7 @@
-// Layer module — composable policy modules layered on the base request
+// Module module — composable policy modules moduleed on the base request
 // lifecycle.
 //
-// A policy module is a type implementing `Layer`. Modules are composed into a
+// A policy module is a type implementing `Module`. Modules are composed into a
 // stack with `policy_stack!`, and `PolicyHooks<S>` drives every lifecycle hook
 // through the stack. The framework owns the composition rules, so a module
 // states only what it does at each hook:
@@ -21,23 +21,23 @@
 //   ended the request (`Outcome`).
 // - `after_poll` decides, like `before_poll`, so it runs in stack order and
 //   short-circuits.
-// - Modules name the modules that must precede them (`Layer::requires`); a
+// - Modules name the modules that must precede them (`Module::requires`); a
 //   stack that violates this fails at server construction.
 //
 // `()` is the empty module, so a disabled slot in a stack costs nothing.
 //
 // Masa's built-in modules:
-// - **Budget** (always): `BudgetLayer` — the request's facts and time budget,
+// - **Budget** (always): `BudgetModule` — the request's facts and time budget,
 //   and the child request's budget section.
-// - **Guard** (feature `abort_slo`): `E2eDeadlineGuardLayer` — rejects
+// - **Guard** (feature `abort_slo`): `E2eDeadlineGuardModule` — rejects
 //   past-deadline requests.
-// - **Estimation** (feature `estimator`): `EstimationLayer` — latency tracking,
+// - **Estimation** (feature `estimator`): `EstimationModule` — latency tracking,
 //   deadline tightening, reprioritization, feasibility checks.
-// - **Oracle** (feature `sched_oracle`): `OracleLayer` — perfect-information
+// - **Oracle** (feature `sched_oracle`): `OracleModule` — perfect-information
 //   child deadline and priority assignment for synthetic experiments.
 // - **Admission**: `predictive` (feature `ac_pred`) or `rajomon`
 //   (feature `ac_rajomon`).
-// - **Observer** (feature `trace_queue_latency`): `QueueLatencyLayer`.
+// - **Observer** (feature `trace_queue_latency`): `QueueLatencyModule`.
 //
 // Which modules make up the default stack is decided in `masa_stack.rs`.
 // All dispatch is monomorphic — zero runtime cost.
@@ -74,7 +74,7 @@ mod queue_latency;
 
 /// Server-level module state, created once per service and shared across all
 /// requests.
-pub trait LayerServer: Send + Sync + std::fmt::Debug + Sized {
+pub trait ModuleServer: Send + Sync + std::fmt::Debug + Sized {
     /// Construct the server state.
     ///
     /// Modules earlier in the stack are constructed first, so a module can
@@ -146,7 +146,7 @@ impl std::fmt::Display for MissingDependency {
 
 impl std::error::Error for MissingDependency {}
 
-/// Construction context passed to every [`LayerServer::new`] in stack order.
+/// Construction context passed to every [`ModuleServer::new`] in stack order.
 ///
 /// Carries the service name and a typed store through which modules share
 /// server-level state (e.g., the estimation module publishes its latency
@@ -169,7 +169,7 @@ impl ServerInit {
     }
 
     /// Record which module server is about to be constructed.
-    fn enter<M: LayerServer>(&mut self) {
+    fn enter<M: ModuleServer>(&mut self) {
         self.module = std::any::type_name::<M>();
     }
 
@@ -204,7 +204,7 @@ impl ServerInit {
 }
 
 /// The modules a module declares must precede it in the stack; filled by
-/// [`Layer::requires`].
+/// [`Module::requires`].
 #[derive(Debug, Default)]
 pub struct Requires {
     modules: Vec<(TypeId, &'static str)>,
@@ -212,7 +212,7 @@ pub struct Requires {
 
 impl Requires {
     /// `M` must appear earlier in the stack than the module declaring this.
-    pub fn module<M: Layer>(&mut self) -> &mut Self {
+    pub fn module<M: Module>(&mut self) -> &mut Self {
         self.modules
             .push((TypeId::of::<M>(), std::any::type_name::<M>()));
         self
@@ -231,7 +231,7 @@ pub struct ModuleDecl {
 }
 
 impl ModuleDecl {
-    fn of<M: Layer>() -> Self {
+    fn of<M: Module>() -> Self {
         let mut requires = Requires::default();
         M::requires(&mut requires);
         Self {
@@ -247,7 +247,7 @@ impl ModuleDecl {
 /// Fails unless every module of the stack `S` is preceded by the modules it
 /// requires. Panics if two modules share a wire name, which would make their
 /// data overwrite each other.
-pub(crate) fn validate_stack<S: LayerStack>() -> Result<(), MissingDependency> {
+pub(crate) fn validate_stack<S: ModuleStack>() -> Result<(), MissingDependency> {
     let mut modules = Vec::new();
     S::describe(&mut modules);
 
@@ -256,7 +256,7 @@ pub(crate) fn validate_stack<S: LayerStack>() -> Result<(), MissingDependency> {
         assert_valid_name(module.name);
         assert!(
             !wire_names.contains(&module.name),
-            "two modules in the policy stack use the wire name `{}`; `Layer::NAME` must be unique",
+            "two modules in the policy stack use the wire name `{}`; `Module::NAME` must be unique",
             module.name
         );
         wire_names.push(module.name);
@@ -289,7 +289,7 @@ pub(crate) fn validate_stack<S: LayerStack>() -> Result<(), MissingDependency> {
 /// Modules entered before a later module ended the request learn about it
 /// here, so an observer placed early in the stack sees everything that
 /// happens after it. The cause is structured data (the rejecting module's
-/// [`Layer::NAME`] and the status it gave), so an observer never parses a
+/// [`Module::NAME`] and the status it gave), so an observer never parses a
 /// status message. It is what the framework recorded when the module ended the
 /// request and does not change if a module rewrites the result in `finalize`:
 /// the cause (`outcome`) and the final result (`result`) are both visible.
@@ -302,20 +302,20 @@ pub enum Outcome<'a> {
     /// A module's `before_poll` or `after_poll` ended the request with an
     /// error status.
     Rejected {
-        /// [`Layer::NAME`] of the module that rejected.
+        /// [`Module::NAME`] of the module that rejected.
         by: &'static str,
         status: &'a Status,
     },
     /// A module's `before_poll` or `after_poll` ended the request with a
     /// response it supplied itself.
     Replied {
-        /// [`Layer::NAME`] of the module that replied.
+        /// [`Module::NAME`] of the module that replied.
         by: &'static str,
     },
 }
 
 impl Outcome<'_> {
-    /// [`Layer::NAME`] of the module that ended the request, if one did.
+    /// [`Module::NAME`] of the module that ended the request, if one did.
     pub fn ended_by(&self) -> Option<&'static str> {
         match *self {
             Self::Handled => None,
@@ -332,7 +332,7 @@ pub enum ChildOutcome<'a, T> {
     Sent(&'a Result<Response<T>, Status>),
     /// A module rejected the child RPC, so it was not sent.
     Rejected {
-        /// [`Layer::NAME`] of the module that rejected.
+        /// [`Module::NAME`] of the module that rejected.
         by: &'static str,
         status: &'a Status,
     },
@@ -365,8 +365,8 @@ impl<'a, T> ChildOutcome<'a, T> {
 /// to override the hooks they care about. The framework decides the order in
 /// which a stack's modules run each hook and which modules run it; see the
 /// documentation of each hook.
-pub trait Layer: Send + Sync + std::fmt::Debug + 'static {
-    type Server: LayerServer;
+pub trait Module: Send + Sync + std::fmt::Debug + 'static {
+    type Server: ModuleServer;
 
     /// Name of this module. Identifies it in [`Outcome`] and, when `Wire` is
     /// not `()`, names its section in the wire envelope: then it must be
@@ -403,7 +403,7 @@ pub trait Layer: Send + Sync + std::fmt::Debug + 'static {
     /// runs; modules earlier in the stack may already have stored values.
     ///
     /// Runs for every module, in stack order; every module therefore gets
-    /// [`Layer::finalize`].
+    /// [`Module::finalize`].
     fn new(
         method: &CowGrpcMethod,
         server: &Self::Server,
@@ -416,7 +416,7 @@ pub trait Layer: Send + Sync + std::fmt::Debug + 'static {
     /// Returns `Err` to end the request. Runs in stack order; the first `Err`
     /// ends the request without polling the handler, and the modules after it
     /// do not run. No `after_poll` follows; every module still learns about
-    /// the rejection in [`Layer::finalize`].
+    /// the rejection in [`Module::finalize`].
     fn before_poll<Ret>(&self, _ext: &mut Extensions) -> Result<(), Result<Response<Ret>, Status>> {
         Ok(())
     }
@@ -426,7 +426,7 @@ pub trait Layer: Send + Sync + std::fmt::Debug + 'static {
     /// The module may reject the child RPC (returning `Err`). Runs in stack
     /// order; the first `Err` rejects the child RPC and the modules after it
     /// do not run. The modules that ran, including the rejecting one, get
-    /// [`Layer::after_child_rpc`] in reverse order with
+    /// [`Module::after_child_rpc`] in reverse order with
     /// [`ChildOutcome::Rejected`]; the others get nothing.
     ///
     /// `child_wire` starts empty and becomes the child request's wire
@@ -435,9 +435,9 @@ pub trait Layer: Send + Sync + std::fmt::Debug + 'static {
     /// this child's state, keyed by type, which no other child sees. A
     /// decision several modules share is made by proposing to it (the child's
     /// deadline and priority are [`ChildDeadline`] and [`ChildPriority`], owned
-    /// by [`BudgetLayer`]): `child.propose(value)`. A module that needs the
+    /// by [`BudgetModule`]): `child.propose(value)`. A module that needs the
     /// result of the modules after it completes its work in
-    /// [`Layer::seal_child_rpc`].
+    /// [`Module::seal_child_rpc`].
     fn before_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
@@ -458,7 +458,7 @@ pub trait Layer: Send + Sync + std::fmt::Debug + 'static {
     /// owner applies its own rule. Masa's budget module resolves the child's
     /// deadline and priority this way and writes the child's budget section.
     /// Returns `Err` to reject the child RPC: it is then not sent, and every
-    /// module gets [`Layer::after_child_rpc`] with [`ChildOutcome::Rejected`]
+    /// module gets [`Module::after_child_rpc`] with [`ChildOutcome::Rejected`]
     /// (the modules that had not yet sealed do not seal).
     fn seal_child_rpc<T>(
         &self,
@@ -482,7 +482,7 @@ pub trait Layer: Send + Sync + std::fmt::Debug + 'static {
     /// `response_wire.get::<Self>()`. It is empty for a rejected child. It
     /// borrows from the response, which is therefore read-only here. The
     /// framework carries none of it forward: whatever this module wants to
-    /// report upstream it must `put` in [`Layer::finalize`].
+    /// report upstream it must `put` in [`Module::finalize`].
     ///
     /// Runs in reverse stack order, and an `Err` does not skip the others. For
     /// a sent child, the first `Err` in that order is returned to the handler
@@ -538,14 +538,14 @@ pub trait Layer: Send + Sync + std::fmt::Debug + 'static {
 
 // ── The empty module and stacks ─────────────────────────────────────────
 
-impl LayerServer for () {
+impl ModuleServer for () {
     fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
         Ok(())
     }
 }
 
 /// The empty module. Fills a disabled slot in a stack.
-impl Layer for () {
+impl Module for () {
     type Server = ();
     const NAME: &'static str = "";
     type Wire = ();
@@ -559,7 +559,7 @@ impl Layer for () {
     }
 }
 
-impl<A: LayerServer, B: LayerServer> LayerServer for (A, B) {
+impl<A: ModuleServer, B: ModuleServer> ModuleServer for (A, B) {
     fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
         init.enter::<A>();
         let head = A::new(init)?;
@@ -585,10 +585,10 @@ pub struct Rejection {
 
 /// A module stack: the modules of a [`Stack`], or `()` for none. This is where
 /// the framework's rules for running modules live; modules implement
-/// [`Layer`] and never this trait.
-pub trait LayerStack: Send + Sync + std::fmt::Debug + 'static {
+/// [`Module`] and never this trait.
+pub trait ModuleStack: Send + Sync + std::fmt::Debug + 'static {
     #[doc(hidden)]
-    type Server: LayerServer;
+    type Server: ModuleServer;
 
     #[doc(hidden)]
     fn describe(modules: &mut Vec<ModuleDecl>);
@@ -663,7 +663,7 @@ pub trait LayerStack: Send + Sync + std::fmt::Debug + 'static {
     );
 }
 
-impl LayerStack for () {
+impl ModuleStack for () {
     type Server = ();
 
     fn describe(_modules: &mut Vec<ModuleDecl>) {}
@@ -752,7 +752,7 @@ pub struct Stack<H, T> {
     tail: T,
 }
 
-impl<H: Layer, T: LayerStack> LayerStack for Stack<H, T> {
+impl<H: Module, T: ModuleStack> ModuleStack for Stack<H, T> {
     type Server = (H::Server, T::Server);
 
     fn describe(modules: &mut Vec<ModuleDecl>) {
@@ -924,20 +924,20 @@ macro_rules! policy_stack {
 // ── Re-exports ──────────────────────────────────────────────────────────
 
 #[cfg(feature = "ac_pred")]
-pub use admission::predictive::PredAdmissionLayer;
+pub use admission::predictive::PredAdmissionModule;
 #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
-pub use admission::rajomon::RajomonLayer;
+pub use admission::rajomon::RajomonModule;
 pub use budget::{
-    root_priority, BudgetInfo, BudgetLayer, ChildDeadline, ChildPriority, ContextBuilder,
+    root_priority, BudgetInfo, BudgetModule, ChildDeadline, ChildPriority, ContextBuilder,
 };
 #[cfg(feature = "abort_slo")]
-pub use e2e_deadline_guard::E2eDeadlineGuardLayer;
+pub use e2e_deadline_guard::E2eDeadlineGuardModule;
 #[cfg(feature = "estimator")]
 pub use est::{
-    EstimationInfo, EstimationLayer, EstimationRequestWire, EstimationResponseWire, EstimationWire,
-    RootMethod, SubtreeHealth,
+    EstimationInfo, EstimationModule, EstimationRequestWire, EstimationResponseWire,
+    EstimationWire, RootMethod, SubtreeHealth,
 };
 #[cfg(feature = "sched_oracle")]
-pub use oracle::OracleLayer;
+pub use oracle::OracleModule;
 #[cfg(feature = "trace_queue_latency")]
-pub use queue_latency::{QueueLatencyLayer, QueueLatencyWire};
+pub use queue_latency::{QueueLatencyModule, QueueLatencyWire};

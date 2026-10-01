@@ -11,13 +11,13 @@
 
 use masa_core::SIGNAL_SLACK;
 
-use crate::layer::BudgetInfo;
+use crate::module::BudgetInfo;
 
 use super::state::RequestMetadataTracker;
 
 /// Mark the soft deadline signal on the per-request metadata if the
 /// current hop is past its local deadline. Called from
-/// `EstimationLayer::{before_poll, after_poll}`.
+/// `EstimationModule::{before_poll, after_poll}`.
 #[inline]
 pub(crate) fn mark_if_late(budget: &BudgetInfo, meta: &RequestMetadataTracker) {
     if !SIGNAL_SLACK {
@@ -31,7 +31,7 @@ pub(crate) fn mark_if_late(budget: &BudgetInfo, meta: &RequestMetadataTracker) {
 
 /// True when this request's subtree tripped a soft deadline signal and the
 /// estimator should skip flushing observations from it. Called from
-/// `EstimationLayer::finalize`.
+/// `EstimationModule::finalize`.
 #[inline]
 pub(crate) fn should_skip_flush(meta: &RequestMetadataTracker) -> bool {
     SIGNAL_SLACK && meta.is_subtree_signaled()

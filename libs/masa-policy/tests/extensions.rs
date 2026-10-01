@@ -6,9 +6,9 @@ use std::sync::Arc;
 use masa_core::time_now;
 use masa_policy::ContextBuilder;
 use masa_policy::{
-    policy_stack, ChildOutcome, ChildState, Extensions, Layer, LayerServer, LayerStack,
-    MasaResponseExt, MissingDependency, Outcome, PolicyHooks, ServerContext, ServerInit, WireIn,
-    WireOut, MASA_CONTEXT_HEADER,
+    policy_stack, ChildOutcome, ChildState, Extensions, MasaResponseExt, MissingDependency, Module,
+    ModuleServer, ModuleStack, Outcome, PolicyHooks, ServerContext, ServerInit, WireIn, WireOut,
+    MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
@@ -43,7 +43,7 @@ struct Shared {
 #[derive(Debug)]
 struct Producer;
 
-impl Layer for Producer {
+impl Module for Producer {
     type Server = ();
     const NAME: &'static str = "producer";
     type Wire = ();
@@ -83,7 +83,7 @@ struct Consumer {
     in_after_child: std::sync::Mutex<Option<u64>>,
 }
 
-impl Layer for Consumer {
+impl Module for Consumer {
     type Server = ();
     const NAME: &'static str = "consumer";
     type Wire = SeenWire;
@@ -137,7 +137,7 @@ impl Layer for Consumer {
 }
 
 /// One request through one child call; returns what `Consumer` reported.
-fn run_request<S: LayerStack>() -> SeenWire {
+fn run_request<S: ModuleStack>() -> SeenWire {
     let server = Arc::new(Server::<S>::new("ext.Service"));
     let parent = Parent::<S>::begin(
         GrpcMethod::new("ext.Service", "Hop"),
@@ -200,7 +200,7 @@ struct Published;
 #[derive(Debug)]
 struct ProvidesServer;
 
-impl LayerServer for ProvidesServer {
+impl ModuleServer for ProvidesServer {
     fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
         init.provide(Published);
         Ok(Self)
@@ -210,7 +210,7 @@ impl LayerServer for ProvidesServer {
 #[derive(Debug)]
 struct RequiresServer;
 
-impl LayerServer for RequiresServer {
+impl ModuleServer for RequiresServer {
     fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
         init.require::<Published>()?;
         Ok(Self)
@@ -222,7 +222,7 @@ macro_rules! dependency_module {
         #[derive(Debug)]
         struct $name;
 
-        impl Layer for $name {
+        impl Module for $name {
             type Server = $server;
             const NAME: &'static str = $wire_name;
             type Wire = ();

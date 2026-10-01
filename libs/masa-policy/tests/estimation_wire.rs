@@ -9,12 +9,12 @@
 use std::sync::Arc;
 
 use masa_core::{time_now, Context};
-use masa_policy::modules::EstimationLayer;
+use masa_policy::modules::EstimationModule;
 use masa_policy::ContextBuilder;
 use masa_policy::{
     get_wire_from_metadata, policy_stack, set_masa_context_in_metadata, set_wire_in_metadata,
-    BudgetLayer, EstimationInfo, EstimationRequestWire, EstimationResponseWire, EstimationWire,
-    Extensions, Layer, LayerStack, MasaRequestExt, MasaResponseExt, MasaStatusExt, Outcome,
+    BudgetModule, EstimationInfo, EstimationRequestWire, EstimationResponseWire, EstimationWire,
+    Extensions, MasaRequestExt, MasaResponseExt, MasaStatusExt, Module, ModuleStack, Outcome,
     PolicyHooks, RootMethod, SubtreeHealth, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,7 @@ fn inbound(estimation: Option<EstimationWire>) -> http::Request<()> {
     let mut metadata = MetadataMap::new();
     set_masa_context_in_metadata(&mut metadata, &context());
     if let Some(wire) = estimation {
-        set_wire_in_metadata::<EstimationLayer>(&mut metadata, &wire);
+        set_wire_in_metadata::<EstimationModule>(&mut metadata, &wire);
     }
     request_with(&metadata)
 }
@@ -57,7 +57,7 @@ fn request_with(metadata: &MetadataMap) -> http::Request<()> {
 
 /// Begin `method` on a fresh server, call one child, and return the outbound
 /// child request.
-fn call_child<S: LayerStack>(
+fn call_child<S: ModuleStack>(
     service: &'static str,
     method: &'static str,
     req: &http::Request<()>,
@@ -66,7 +66,7 @@ fn call_child<S: LayerStack>(
     issue_child(&parent).0
 }
 
-fn begin<S: LayerStack>(
+fn begin<S: ModuleStack>(
     service: &'static str,
     method: &'static str,
     req: &http::Request<()>,
@@ -81,7 +81,7 @@ fn child_method() -> GrpcMethod {
 
 /// Issue a child RPC from `parent`; returns the outbound request and the child
 /// context to hand back with the response.
-fn issue_child<S: LayerStack>(parent: &Parent<S>) -> (Request<()>, Child<S>) {
+fn issue_child<S: ModuleStack>(parent: &Parent<S>) -> (Request<()>, Child<S>) {
     let mut request = Request::new(());
     // The oracle refuses child RPCs that lack its headers.
     #[cfg(feature = "sched_oracle")]
@@ -102,7 +102,7 @@ type DefaultStack = masa_policy::MasaStack;
 
 fn sent(request: &Request<()>) -> EstimationRequestWire {
     request
-        .get_wire::<EstimationLayer>()
+        .get_wire::<EstimationModule>()
         .expect("estimation section on the child request")
         .request
         .expect("request part")
@@ -127,8 +127,8 @@ fn request_section_round_trips_including_zero_hop_count() {
     ] {
         let mut request = Request::new(());
         request.set_masa_context(&context());
-        request.set_wire::<EstimationLayer>(&wire);
-        assert_eq!(request.get_wire::<EstimationLayer>(), Some(wire));
+        request.set_wire::<EstimationModule>(&wire);
+        assert_eq!(request.get_wire::<EstimationModule>(), Some(wire));
     }
 }
 
@@ -136,9 +136,9 @@ fn request_section_round_trips_including_zero_hop_count() {
 fn a_zero_hop_count_is_a_present_value() {
     let mut metadata = MetadataMap::new();
     set_masa_context_in_metadata(&mut metadata, &context());
-    assert_eq!(get_wire_from_metadata::<EstimationLayer>(&metadata), None);
-    set_wire_in_metadata::<EstimationLayer>(&mut metadata, &EstimationWire::request(0, None));
-    let wire = get_wire_from_metadata::<EstimationLayer>(&metadata).expect("present");
+    assert_eq!(get_wire_from_metadata::<EstimationModule>(&metadata), None);
+    set_wire_in_metadata::<EstimationModule>(&mut metadata, &EstimationWire::request(0, None));
+    let wire = get_wire_from_metadata::<EstimationModule>(&metadata).expect("present");
     assert_eq!(wire.request.expect("request part").hop_count, 0);
 }
 
@@ -212,7 +212,7 @@ fn an_inbound_section_is_not_forwarded_by_the_framework() {
     type NoEstimation = policy_stack![];
     let req = inbound(Some(EstimationWire::request(5, Some(root("a", "b")))));
     let request = call_child::<NoEstimation>("z", "Method", &req);
-    assert_eq!(request.get_wire::<EstimationLayer>(), None);
+    assert_eq!(request.get_wire::<EstimationModule>(), None);
 }
 
 // ── Sharing through extensions ──────────────────────────────────────────
@@ -229,7 +229,7 @@ struct Seen {
 #[derive(Debug)]
 struct Probe(Seen);
 
-impl Layer for Probe {
+impl Module for Probe {
     type Server = ();
     const NAME: &'static str = "probe";
     type Wire = Seen;
@@ -259,7 +259,7 @@ impl Layer for Probe {
     }
 }
 
-type Probed = policy_stack![BudgetLayer, EstimationLayer, Probe];
+type Probed = policy_stack![BudgetModule, EstimationModule, Probe];
 
 fn probe(req: &http::Request<()>) -> Seen {
     let server = Arc::new(Server::<Probed>::new("probed"));
@@ -309,16 +309,16 @@ fn a_non_ingress_request_without_a_root_has_no_root_id() {
 #[cfg(feature = "ac_pred")]
 mod ordering {
     use super::*;
-    use masa_policy::modules::PredAdmissionLayer;
+    use masa_policy::modules::PredAdmissionModule;
 
     #[test]
     fn admission_before_estimation_is_reported_at_construction() {
-        type Misordered = policy_stack![BudgetLayer, PredAdmissionLayer, EstimationLayer];
+        type Misordered = policy_stack![BudgetModule, PredAdmissionModule, EstimationModule];
         let err = masa_policy::ServerContext::<Misordered>::try_new("misordered")
             .expect_err("admission needs estimation earlier in the stack");
         let message = err.to_string();
         assert!(
-            message.contains("PredAdmissionLayer") && message.contains("EstimationLayer"),
+            message.contains("PredAdmissionModule") && message.contains("EstimationModule"),
             "message names both modules: {message}"
         );
         assert!(message.contains("comes later"), "{message}");
@@ -326,13 +326,13 @@ mod ordering {
 
     #[test]
     fn admission_without_estimation_is_reported_at_construction() {
-        type Missing = policy_stack![PredAdmissionLayer];
+        type Missing = policy_stack![PredAdmissionModule];
         assert!(masa_policy::ServerContext::<Missing>::try_new("missing").is_err());
     }
 
     #[test]
     fn admission_after_estimation_constructs() {
-        type Ordered = policy_stack![BudgetLayer, EstimationLayer, PredAdmissionLayer];
+        type Ordered = policy_stack![BudgetModule, EstimationModule, PredAdmissionModule];
         assert!(masa_policy::ServerContext::<Ordered>::try_new("ordered").is_ok());
     }
 }
@@ -358,7 +358,7 @@ fn report(
 fn child_ok(report: Option<EstimationResponseWire>) -> Result<Response<()>, Status> {
     let mut response = Response::new(()).with_masa_context(&context());
     if let Some(report) = report {
-        response.set_wire::<EstimationLayer>(&EstimationWire::response(report));
+        response.set_wire::<EstimationModule>(&EstimationWire::response(report));
     }
     Ok(response)
 }
@@ -370,7 +370,7 @@ fn child_err(
 ) -> Result<Response<()>, Status> {
     let mut status = Status::new(code, message).with_masa_context(&context());
     if let Some(report) = report {
-        status.set_wire::<EstimationLayer>(&EstimationWire::response(report));
+        status.set_wire::<EstimationModule>(&EstimationWire::response(report));
     }
     Err(status)
 }
@@ -389,7 +389,7 @@ fn report_after(children: Vec<Result<Response<()>, Status>>) -> EstimationRespon
     parent.finalize_before_serialization(&mut result);
     let wire = result
         .unwrap()
-        .get_wire::<EstimationLayer>()
+        .get_wire::<EstimationModule>()
         .expect("estimation section");
     assert_eq!(
         wire.request, None,
@@ -413,9 +413,9 @@ fn response_section_round_trips_including_zero_values() {
         },
     ] {
         let mut response = Response::new(()).with_masa_context(&context());
-        response.set_wire::<EstimationLayer>(&EstimationWire::response(wire.clone()));
+        response.set_wire::<EstimationModule>(&EstimationWire::response(wire.clone()));
         assert_eq!(
-            response.get_wire::<EstimationLayer>(),
+            response.get_wire::<EstimationModule>(),
             Some(EstimationWire::response(wire))
         );
     }
@@ -490,7 +490,7 @@ fn an_error_status_carries_the_response_half_and_counts_its_own_early_return() {
     parent.finalize_before_serialization(&mut result);
     let wire = result
         .unwrap_err()
-        .get_wire::<EstimationLayer>()
+        .get_wire::<EstimationModule>()
         .expect("estimation section on the status");
     assert_eq!(wire.response.expect("response half").early_return_count, 1);
 }
@@ -513,7 +513,7 @@ fn a_report_makes_a_grandparent_see_the_whole_subtree() {
     middle.finalize_before_serialization(&mut result);
     let sent_up = result
         .unwrap()
-        .get_wire::<EstimationLayer>()
+        .get_wire::<EstimationModule>()
         .and_then(|wire| wire.response)
         .expect("response half");
 
@@ -531,13 +531,13 @@ fn a_report_makes_a_grandparent_see_the_whole_subtree() {
 #[derive(Debug)]
 struct OutcomeProbe;
 
-impl Layer for OutcomeProbe {
+impl Module for OutcomeProbe {
     type Server = ();
     const NAME: &'static str = "outcome_probe";
     type Wire = bool;
 
     fn requires(requires: &mut masa_policy::Requires) {
-        requires.module::<EstimationLayer>();
+        requires.module::<EstimationModule>();
     }
 
     fn new(_m: &CowGrpcMethod, _s: &(), _w: &WireIn<'_>, _ext: &mut Extensions) -> Self {
@@ -555,7 +555,7 @@ impl Layer for OutcomeProbe {
     }
 }
 
-type Subtree = policy_stack![BudgetLayer, EstimationLayer, OutcomeProbe];
+type Subtree = policy_stack![BudgetModule, EstimationModule, OutcomeProbe];
 
 fn subtree_outcome(child: Option<Result<Response<()>, Status>>) -> bool {
     let parent = begin::<Subtree>("outcome", "Method", &inbound(None));

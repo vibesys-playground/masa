@@ -1,6 +1,6 @@
-// Predictive admission control layer — AIMD-based admission control.
+// Predictive admission control module — AIMD-based admission control.
 //
-// When `ac_pred` is enabled, this layer runs admission control at ingress
+// When `ac_pred` is enabled, this module runs admission control at ingress
 // (as reported by the estimation module). It rejects requests probabilistically based on an
 // AIMD-controlled admission probability (`admit_p`) that decreases when the
 // observed ER fraction exceeds a threshold and recovers additively when healthy.
@@ -15,23 +15,23 @@ use masa_core::Instant;
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
 use super::super::{
-    BudgetInfo, BudgetLayer, ChildOutcome, ChildState, Extensions, Layer, LayerServer,
-    MissingDependency, Outcome, Requires, ServerInit,
+    BudgetInfo, BudgetModule, ChildOutcome, ChildState, Extensions, MissingDependency, Module,
+    ModuleServer, Outcome, Requires, ServerInit,
 };
-use crate::layer::est::default_estimator::DefaultLatencyEstimator;
-use crate::layer::est::latency_map::{MethodKey, ParentToChildKey};
-use crate::layer::est::state::{is_early_return_response, LatencyEstimators};
-use crate::layer::est::{EstimationInfo, EstimationLayer, SubtreeHealth};
+use crate::module::est::default_estimator::DefaultLatencyEstimator;
+use crate::module::est::latency_map::{MethodKey, ParentToChildKey};
+use crate::module::est::state::{is_early_return_response, LatencyEstimators};
+use crate::module::est::{EstimationInfo, EstimationModule, SubtreeHealth};
 use crate::policy_params::PolicyParams;
 use crate::registry::MethodId;
 
 // ── Tunables specific to the BCF feasibility check ──────────────────────
 //
-// Generic decay primitives live in `crate::layer::est::state` so the
-// estimation layer (deadline tightening, priority assignment) can apply the
+// Generic decay primitives live in `crate::module::est::state` so the
+// estimation module (deadline tightening, priority assignment) can apply the
 // same staleness model.
 
-use crate::layer::est::state::{decay_factor, fast_exp_neg};
+use crate::module::est::state::{decay_factor, fast_exp_neg};
 
 /// Steepness of the probabilistic shed sigmoid: `shed_prob = 1 - exp(-LAMBDA * overshoot/time_left)`.
 /// At `ratio = 1.0` (overshoot equal to remaining budget), sheds ~86%; at 0.1, ~18%;
@@ -48,7 +48,7 @@ pub struct PredAdmissionServer {
     est: LatencyEstimators<DefaultLatencyEstimator>,
 }
 
-impl LayerServer for PredAdmissionServer {
+impl ModuleServer for PredAdmissionServer {
     fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
         // Admission decisions must use the same estimates the estimation
         // module maintains; a private copy would never be updated.
@@ -62,9 +62,9 @@ impl LayerServer for PredAdmissionServer {
 
 // ── Per-Request ─────────────────────────────────────────────────────────
 
-/// Per-request predictive admission layer state.
+/// Per-request predictive admission module state.
 #[derive(Debug)]
-pub struct PredAdmissionLayer {
+pub struct PredAdmissionModule {
     pred_admission: Arc<PredictiveAdmission>,
     est: LatencyEstimators<DefaultLatencyEstimator>,
     /// What estimation published about this request.
@@ -75,13 +75,15 @@ pub struct PredAdmissionLayer {
     admission_checked: AtomicBool,
 }
 
-impl Layer for PredAdmissionLayer {
+impl Module for PredAdmissionModule {
     type Server = PredAdmissionServer;
     const NAME: &'static str = "pred_admission";
     type Wire = ();
 
     fn requires(requires: &mut Requires) {
-        requires.module::<BudgetLayer>().module::<EstimationLayer>();
+        requires
+            .module::<BudgetModule>()
+            .module::<EstimationModule>();
     }
 
     fn new(
@@ -261,7 +263,7 @@ impl Layer for PredAdmissionLayer {
         // The child's own estimation report, read from the response wire: the
         // extensions hold only this request's data, not its children's.
         let report = response_wire
-            .get::<EstimationLayer>()
+            .get::<EstimationModule>()
             .unwrap_or_else(|err| panic!("{err}"))
             .and_then(|wire| wire.response);
         if let Some(report) = report {
@@ -306,7 +308,7 @@ impl Layer for PredAdmissionLayer {
     }
 }
 
-impl PredAdmissionLayer {
+impl PredAdmissionModule {
     /// Build the `BeforeChildFeasibility` early-return status. Factored out so
     /// both the floor-backstop and probabilistic-shed paths emit identical
     /// error envelopes.
@@ -517,7 +519,7 @@ impl PredictiveAdmission {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layer::est::state::RequestMetadataTracker;
+    use crate::module::est::state::RequestMetadataTracker;
     use masa_core::Context;
 
     fn test_root(service: &'static str) -> MethodId {
@@ -632,8 +634,8 @@ mod tests {
         );
     }
 
-    fn layer_with(info: EstimationInfo, ac: &Arc<PredictiveAdmission>) -> PredAdmissionLayer {
-        PredAdmissionLayer {
+    fn module_with(info: EstimationInfo, ac: &Arc<PredictiveAdmission>) -> PredAdmissionModule {
+        PredAdmissionModule {
             pred_admission: ac.clone(),
             est: LatencyEstimators::new(),
             info,
@@ -650,8 +652,8 @@ mod tests {
         ext
     }
 
-    fn finalize_with(layer: &PredAdmissionLayer, outcome: Outcome<'_>, ext: &Extensions) {
-        layer.finalize(
+    fn finalize_with(module: &PredAdmissionModule, outcome: Outcome<'_>, ext: &Extensions) {
+        module.finalize(
             &mut Ok(Response::new(())),
             outcome,
             &mut crate::wire::WireOut::new(),
@@ -659,18 +661,18 @@ mod tests {
         );
     }
 
-    fn finalize_ok(layer: &PredAdmissionLayer, ext: &Extensions) {
-        finalize_with(layer, Outcome::Handled, ext);
+    fn finalize_ok(module: &PredAdmissionModule, ext: &Extensions) {
+        finalize_with(module, Outcome::Handled, ext);
     }
 
     #[test]
     fn test_deadline_signal_records_single_ac_outcome() {
         let ac = Arc::new(PredictiveAdmission::new());
-        let layer = layer_with(EstimationInfo::for_test(0, None), &ac);
+        let module = module_with(EstimationInfo::for_test(0, None), &ac);
         let tally = RequestMetadataTracker::new();
         tally.mark_deadline_signal();
 
-        finalize_ok(&layer, &ext_with(tally));
+        finalize_ok(&module, &ext_with(tally));
 
         let root_id =
             crate::MethodRegistry::global().get_or_register(CowGrpcMethod::new("svc", "method"));
@@ -691,8 +693,8 @@ mod tests {
     #[test]
     fn test_subtree_early_return_counts_as_er_and_quiet_subtree_does_not() {
         let ac = Arc::new(PredictiveAdmission::new());
-        let layer = layer_with(EstimationInfo::for_test(0, None), &ac);
-        finalize_ok(&layer, &ext_with(RequestMetadataTracker::new()));
+        let module = module_with(EstimationInfo::for_test(0, None), &ac);
+        finalize_ok(&module, &ext_with(RequestMetadataTracker::new()));
         assert_eq!(ac.global_state.lock().unwrap().er_count, 0);
 
         // A child that returned early shows in the tally; the hop's own early
@@ -703,7 +705,7 @@ mod tests {
             &Err(Status::new(tonic::Code::DeadlineExceeded, "/EarlyReturn")),
             None,
         );
-        finalize_ok(&layer, &ext_with(tally));
+        finalize_ok(&module, &ext_with(tally));
         let global_state = ac.global_state.lock().unwrap();
         assert_eq!(global_state.window_total, 2);
         assert_eq!(global_state.er_count, 1);
@@ -712,8 +714,8 @@ mod tests {
     #[test]
     fn test_own_early_return_is_read_from_the_result() {
         let ac = Arc::new(PredictiveAdmission::new());
-        let layer = layer_with(EstimationInfo::for_test(0, None), &ac);
-        layer.finalize::<()>(
+        let module = module_with(EstimationInfo::for_test(0, None), &ac);
+        module.finalize::<()>(
             &mut Err(Status::new(tonic::Code::DeadlineExceeded, "/EarlyReturn")),
             Outcome::Handled,
             &mut crate::wire::WireOut::new(),
@@ -725,33 +727,33 @@ mod tests {
     #[test]
     fn test_own_rejection_is_not_recorded_but_another_modules_is() {
         let ac = Arc::new(PredictiveAdmission::new());
-        let layer = layer_with(EstimationInfo::for_test(0, None), &ac);
+        let module = module_with(EstimationInfo::for_test(0, None), &ac);
         let status = Status::new(tonic::Code::DeadlineExceeded, "/EarlyReturn");
         let ext = ext_with(RequestMetadataTracker::new());
 
         let own = Outcome::Rejected {
-            by: PredAdmissionLayer::NAME,
+            by: PredAdmissionModule::NAME,
             status: &status,
         };
-        finalize_with(&layer, own, &ext);
+        finalize_with(&module, own, &ext);
         assert_eq!(ac.global_state.lock().unwrap().window_total, 0);
 
         let other = Outcome::Rejected {
             by: "e2e_deadline_guard",
             status: &status,
         };
-        finalize_with(&layer, other, &ext);
+        finalize_with(&module, other, &ext);
         assert_eq!(ac.global_state.lock().unwrap().window_total, 1);
     }
 
     #[test]
     fn test_non_ingress_records_no_outcome() {
         let ac = Arc::new(PredictiveAdmission::new());
-        let layer = layer_with(EstimationInfo::for_test(1, None), &ac);
+        let module = module_with(EstimationInfo::for_test(1, None), &ac);
         let tally = RequestMetadataTracker::new();
         tally.mark_deadline_signal();
 
-        finalize_ok(&layer, &ext_with(tally));
+        finalize_ok(&module, &ext_with(tally));
 
         assert_eq!(ac.global_state.lock().unwrap().window_total, 0);
     }
@@ -761,12 +763,12 @@ mod tests {
     #[test]
     fn test_child_report_feeds_subtree_compute_at_ingress_only() {
         use crate::context_ext::MasaResponseExt;
-        use crate::layer::est::{EstimationResponseWire, EstimationWire};
+        use crate::module::est::{EstimationResponseWire, EstimationWire};
 
         let root = test_root("test_child_report_feeds_subtree_compute");
         let child = CowGrpcMethod::new("svc", "child");
         let mut resp = Response::new(());
-        resp.set_wire::<EstimationLayer>(&EstimationWire::response(EstimationResponseWire {
+        resp.set_wire::<EstimationModule>(&EstimationWire::response(EstimationResponseWire {
             accumulated_compute_us: 7_000,
             ..Default::default()
         }));
@@ -776,9 +778,9 @@ mod tests {
 
         // Some estimators need many samples before they give an estimate.
         for (hop_count, learns) in [(0, true), (1, false)] {
-            let layer = layer_with(EstimationInfo::for_test(hop_count, Some(root)), &ac);
+            let module = module_with(EstimationInfo::for_test(hop_count, Some(root)), &ac);
             for _ in 0..2_000 {
-                layer
+                module
                     .after_child_rpc(
                         &child,
                         ChildOutcome::Sent(&response),
@@ -788,7 +790,7 @@ mod tests {
                     )
                     .unwrap();
             }
-            let learned = layer.est.est_subtree_compute(MethodKey(root));
+            let learned = module.est.est_subtree_compute(MethodKey(root));
             assert_eq!(learned.is_some(), learns, "hop count {hop_count}");
         }
     }
@@ -800,7 +802,7 @@ mod tests {
             est: LatencyEstimators::new(),
         };
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            PredAdmissionLayer::new(
+            PredAdmissionModule::new(
                 &CowGrpcMethod::new("svc", "method"),
                 &server,
                 &WireIn::default(),
@@ -874,8 +876,8 @@ mod tests {
     //   - shed_path:  overshoot triggers the probabilistic shed (worst case)
     // ──────────────────────────────────────────────────────────────────────
 
-    use crate::layer::est::default_estimator::DefaultLatencyEstimator;
-    use crate::layer::est::state::LatencyEstimators;
+    use crate::module::est::default_estimator::DefaultLatencyEstimator;
+    use crate::module::est::state::LatencyEstimators;
     use std::time::Instant;
 
     fn build_estimators_with_observations(

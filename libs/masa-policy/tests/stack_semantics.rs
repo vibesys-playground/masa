@@ -9,9 +9,10 @@ use std::sync::{Arc, Mutex};
 
 use masa_core::{time_now, PriorityHint};
 use masa_policy::{
-    get_masa_context_from_metadata, policy_stack, BudgetLayer, ChildOutcome, ChildPriority,
-    ChildState, ContextBuilder, DecisionClosed, Extensions, Layer, LayerStack, MasaRequestExt,
-    MasaStack, Outcome, PolicyHooks, Requires, ServerContext, WireIn, WireOut, MASA_CONTEXT_HEADER,
+    get_masa_context_from_metadata, policy_stack, BudgetModule, ChildOutcome, ChildPriority,
+    ChildState, ContextBuilder, DecisionClosed, Extensions, MasaRequestExt, MasaStack, Module,
+    ModuleStack, Outcome, PolicyHooks, Requires, ServerContext, WireIn, WireOut,
+    MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
@@ -60,7 +61,7 @@ macro_rules! recorder {
             key: String,
         }
 
-        impl Layer for $ty {
+        impl Module for $ty {
             type Server = ();
             const NAME: &'static str = $name;
             type Wire = ();
@@ -178,7 +179,7 @@ fn inbound() -> http::Request<()> {
         .unwrap()
 }
 
-fn begin<S: LayerStack>(service: &'static str) -> Parent<S> {
+fn begin<S: ModuleStack>(service: &'static str) -> Parent<S> {
     Parent::<S>::begin(
         GrpcMethod::new(service, "Parent"),
         &inbound(),
@@ -191,7 +192,7 @@ fn child_method(service: &'static str) -> GrpcMethod {
 }
 
 /// Issue one child RPC: the outbound request, or why a module rejected it.
-fn issue<S: LayerStack>(
+fn issue<S: ModuleStack>(
     parent: &Parent<S>,
     service: &'static str,
 ) -> (Result<Request<()>, Status>, Child<S>) {
@@ -203,7 +204,7 @@ fn issue<S: LayerStack>(
     (result, child)
 }
 
-fn finish<S: LayerStack>(parent: &Parent<S>) -> Result<Response<()>, Status> {
+fn finish<S: ModuleStack>(parent: &Parent<S>) -> Result<Response<()>, Status> {
     let mut result = Ok(Response::new(()));
     parent.finalize_before_serialization(&mut result);
     result
@@ -313,7 +314,7 @@ struct InFlight {
     key: String,
 }
 
-impl Layer for InFlight {
+impl Module for InFlight {
     type Server = ();
     const NAME: &'static str = "in_flight";
     type Wire = ();
@@ -444,7 +445,7 @@ fn a_child_rpc_rejection_is_not_a_request_outcome() {
 #[derive(Debug)]
 struct Provider;
 
-impl Layer for Provider {
+impl Module for Provider {
     type Server = ();
     const NAME: &'static str = "provider";
     type Wire = ();
@@ -457,7 +458,7 @@ impl Layer for Provider {
 #[derive(Debug)]
 struct Needs;
 
-impl Layer for Needs {
+impl Module for Needs {
     type Server = ();
     const NAME: &'static str = "needs";
     type Wire = ();
@@ -516,7 +517,7 @@ struct Numbers {
 #[derive(Debug, PartialEq)]
 struct ChildNumber(u32);
 
-impl Layer for Numbers {
+impl Module for Numbers {
     type Server = ();
     const NAME: &'static str = "numbers";
     type Wire = ();
@@ -548,7 +549,7 @@ struct ReadsNumbers {
     key: String,
 }
 
-impl Layer for ReadsNumbers {
+impl Module for ReadsNumbers {
     type Server = ();
     const NAME: &'static str = "reads_numbers";
     type Wire = ();
@@ -575,7 +576,7 @@ impl Layer for ReadsNumbers {
     }
 }
 
-fn numbers_seen<S: LayerStack>(service: &'static str) -> Vec<String> {
+fn numbers_seen<S: ModuleStack>(service: &'static str) -> Vec<String> {
     let parent = begin::<S>(service);
     for _ in 0..2 {
         let (request, child) = issue::<S>(&parent, service);
@@ -634,7 +635,7 @@ macro_rules! proposer {
         #[derive(Debug)]
         struct $ty;
 
-        impl Layer for $ty {
+        impl Module for $ty {
             type Server = ();
             const NAME: &'static str = $name;
             type Wire = ();
@@ -674,7 +675,7 @@ macro_rules! owner {
         #[derive(Debug)]
         struct $ty;
 
-        impl Layer for $ty {
+        impl Module for $ty {
             type Server = ();
             const NAME: &'static str = $name;
             type Wire = Settled;
@@ -709,7 +710,7 @@ macro_rules! owner {
 owner!(LastWins, "last_wins", |p| p.last().map(|p| p.value.0));
 owner!(Cheapest, "cheapest", |p| p.iter().map(|p| p.value.0).min());
 
-fn settled<O: Layer<Wire = Settled>, S: LayerStack>(service: &'static str) -> Settled {
+fn settled<O: Module<Wire = Settled>, S: ModuleStack>(service: &'static str) -> Settled {
     let parent = begin::<S>(service);
     let (request, _child) = issue::<S>(&parent, service);
     request.unwrap().get_wire::<O>().expect("owner sealed")
@@ -755,7 +756,7 @@ fn a_later_module_can_read_what_earlier_ones_proposed() {
         key: String,
     }
 
-    impl Layer for Sees {
+    impl Module for Sees {
         type Server = ();
         const NAME: &'static str = "sees";
         type Wire = ();
@@ -799,7 +800,7 @@ struct Veto;
 #[derive(Debug)]
 struct Vetoes;
 
-impl Layer for Vetoes {
+impl Module for Vetoes {
     type Server = ();
     const NAME: &'static str = "vetoes";
     type Wire = ();
@@ -825,7 +826,7 @@ impl Layer for Vetoes {
 #[derive(Debug)]
 struct Refuses;
 
-impl Layer for Refuses {
+impl Module for Refuses {
     type Server = ();
     const NAME: &'static str = "refuses";
     type Wire = ();
@@ -884,7 +885,7 @@ fn without_a_veto_the_child_call_goes_out() {
 #[derive(Debug)]
 struct ProposesTooLate;
 
-impl Layer for ProposesTooLate {
+impl Module for ProposesTooLate {
     type Server = ();
     const NAME: &'static str = "proposes_too_late";
     type Wire = ();
@@ -955,13 +956,13 @@ fn decisions_of_different_types_are_independent() {
 #[derive(Debug)]
 struct PriorityFromHeader;
 
-impl Layer for PriorityFromHeader {
+impl Module for PriorityFromHeader {
     type Server = ();
     const NAME: &'static str = "priority_from_header";
     type Wire = ();
 
     fn requires(requires: &mut Requires) {
-        requires.module::<BudgetLayer>();
+        requires.module::<BudgetModule>();
     }
 
     fn new(_m: &CowGrpcMethod, _s: &(), _w: &WireIn<'_>, _e: &mut Extensions) -> Self {
@@ -991,7 +992,7 @@ impl Layer for PriorityFromHeader {
 #[derive(Debug)]
 struct Dawdles;
 
-impl Layer for Dawdles {
+impl Module for Dawdles {
     type Server = ();
     const NAME: &'static str = "dawdles";
     type Wire = ();
@@ -1015,7 +1016,7 @@ impl Layer for Dawdles {
 
 #[test]
 fn concurrent_child_rpcs_each_get_their_own_decision() {
-    type S = policy_stack![BudgetLayer, PriorityFromHeader, Dawdles];
+    type S = policy_stack![BudgetModule, PriorityFromHeader, Dawdles];
     let service = "atomic";
     let parent = Arc::new(begin::<S>(service));
 

@@ -11,8 +11,8 @@ pub mod agent;
 /// Masa context extension traits and helpers.
 pub mod context_ext;
 mod hooks;
-pub(crate) mod layer;
 mod masa_stack;
+pub(crate) mod module;
 /// Runtime-configurable policy parameters loaded from policy_param.json.
 pub mod policy_params;
 /// Method registry for mapping service/method strings to IDs.
@@ -32,35 +32,36 @@ pub use context_ext::{
     MasaStatusExt, MASA_CONTEXT_HEADER,
 };
 pub use hooks::{ChildContext, ParentContext, PolicyHooks, ServerContext};
-pub use layer::{
-    root_priority, BudgetInfo, BudgetLayer, ChildDeadline, ChildOutcome, ChildPriority, ChildState,
-    ContextBuilder, DecisionClosed, Early, Extensions, Layer, LayerServer, LayerStack,
-    MissingDependency, Outcome, Proposal, Proposals, Rejection, Requires, ServerInit, Stack,
-};
 pub use masa_stack::MasaStack;
+pub use module::{
+    root_priority, BudgetInfo, BudgetModule, ChildDeadline, ChildOutcome, ChildPriority,
+    ChildState, ContextBuilder, DecisionClosed, Early, Extensions, MissingDependency, Module,
+    ModuleServer, ModuleStack, Outcome, Proposal, Proposals, Rejection, Requires, ServerInit,
+    Stack,
+};
 pub use wire::{peek, WireError, WireIn, WireOut};
 
 /// Masa's built-in policy modules, for reuse in custom stacks. Each is
 /// available only when its feature is enabled.
 pub mod modules {
-    pub use crate::layer::BudgetLayer;
+    pub use crate::module::BudgetModule;
     #[cfg(feature = "abort_slo")]
-    pub use crate::layer::E2eDeadlineGuardLayer;
+    pub use crate::module::E2eDeadlineGuardModule;
     #[cfg(feature = "estimator")]
-    pub use crate::layer::EstimationLayer;
+    pub use crate::module::EstimationModule;
     #[cfg(feature = "sched_oracle")]
-    pub use crate::layer::OracleLayer;
+    pub use crate::module::OracleModule;
     #[cfg(feature = "ac_pred")]
-    pub use crate::layer::PredAdmissionLayer;
+    pub use crate::module::PredAdmissionModule;
     #[cfg(feature = "trace_queue_latency")]
-    pub use crate::layer::QueueLatencyLayer;
+    pub use crate::module::QueueLatencyModule;
     #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
-    pub use crate::layer::RajomonLayer;
+    pub use crate::module::RajomonModule;
 }
 #[cfg(feature = "trace_queue_latency")]
-pub use layer::QueueLatencyWire;
+pub use module::QueueLatencyWire;
 #[cfg(feature = "estimator")]
-pub use layer::{
+pub use module::{
     EstimationInfo, EstimationRequestWire, EstimationResponseWire, EstimationWire, RootMethod,
     SubtreeHealth,
 };
@@ -70,6 +71,6 @@ pub use policy_params::PolicyParams;
 
 // Re-export Rajomon public items when the feature is enabled.
 #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
-pub use layer::admission::rajomon::{
+pub use module::admission::rajomon::{
     ClientTokenBucket, RajomonSharedState, RajomonWire, CLIENT_TOKEN_BUCKET, RAJOMON_STATE,
 };

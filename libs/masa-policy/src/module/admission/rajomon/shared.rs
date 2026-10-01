@@ -95,7 +95,7 @@ impl RajomonSharedState {
     ///
     /// NOTE: The Go reference implementation's `"maximal"` mode stores
     /// `max(ownPrice, downstreamPrice)` instead, which is strictly weaker than
-    /// the paper's definition and causes false accepts at upper layers. We
+    /// the paper's definition and causes false accepts at upper modules. We
     /// deliberately diverge from Go here to match the paper.
     pub fn accumulated_price(&self, method: &CowGrpcMethod) -> u64 {
         let own = self.own_price.load(Ordering::Relaxed);

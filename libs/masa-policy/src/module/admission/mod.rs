@@ -7,7 +7,7 @@
 // controllers cannot coexist). Which one, if any, joins the default stack is
 // decided in `masa_stack.rs`. Estimation (latency tracking, deadline
 // tightening, feasibility checks) is handled by the separate
-// `EstimationLayer` and does not conflict with either AC module.
+// `EstimationModule` and does not conflict with either AC module.
 
 #[cfg(all(feature = "ac_pred", feature = "ac_rajomon"))]
 compile_error!(

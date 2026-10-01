@@ -1,8 +1,8 @@
-// Estimation layer — latency tracking, deadline tightening, reprioritization,
+// Estimation module — latency tracking, deadline tightening, reprioritization,
 // and local deadline checks (ABORT_SLACK / SIGNAL_SLACK).
 //
 // Active when the `estimator` feature is enabled. Runs independently of the
-// admission control layer (ac_pred / ac_rajomon / noop).
+// admission control module (ac_pred / ac_rajomon / noop).
 
 use crate::wire::{WireIn, WireOut};
 use std::sync::Arc;
@@ -12,8 +12,8 @@ use masa_core::{PriorityHint, ABORT_SLACK};
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
 use super::super::{
-    BudgetInfo, BudgetLayer, ChildDeadline, ChildOutcome, ChildPriority, ChildState, Extensions,
-    Layer, LayerServer, MissingDependency, Outcome, Requires, ServerInit,
+    BudgetInfo, BudgetModule, ChildDeadline, ChildOutcome, ChildPriority, ChildState, Extensions,
+    MissingDependency, Module, ModuleServer, Outcome, Requires, ServerInit,
 };
 use super::default_estimator::DefaultLatencyEstimator;
 use super::state::{
@@ -31,7 +31,7 @@ pub struct EstimationServer {
     pub(crate) est: LatencyEstimators<DefaultLatencyEstimator>,
 }
 
-impl LayerServer for EstimationServer {
+impl ModuleServer for EstimationServer {
     /// Publishes the latency estimators so later modules (e.g., predictive
     /// admission control) share this service's estimates.
     fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
@@ -43,27 +43,27 @@ impl LayerServer for EstimationServer {
 
 // ── Per-Request ─────────────────────────────────────────────────────────
 
-/// Per-request estimation layer state.
+/// Per-request estimation module state.
 ///
 /// Tracks latency distributions, tightens child deadlines (when `sched_pred`
 /// is enabled), handles local deadline checks (ABORT_SLACK aborts the request,
 /// SIGNAL_SLACK only signals admission control), and manages response metadata
 /// propagation.
 #[derive(Debug)]
-pub struct EstimationLayer {
+pub struct EstimationModule {
     pub(crate) estimation: EstimationTracker<DefaultLatencyEstimator>,
     rpc: CowGrpcMethod,
     info: EstimationInfo,
     budget: BudgetInfo,
 }
 
-impl Layer for EstimationLayer {
+impl Module for EstimationModule {
     type Server = EstimationServer;
     const NAME: &'static str = "estimation";
     type Wire = EstimationWire;
 
     fn requires(requires: &mut Requires) {
-        requires.module::<BudgetLayer>();
+        requires.module::<BudgetModule>();
     }
 
     fn new(
@@ -150,7 +150,7 @@ impl Layer for EstimationLayer {
     }
 
     /// Compute latency estimates, tighten child deadline, and begin child
-    /// RPC tracking. Feasibility checks are handled by the admission layer.
+    /// RPC tracking. Feasibility checks are handled by the admission module.
     #[inline]
     fn before_child_rpc<T>(
         &self,
@@ -199,7 +199,7 @@ impl Layer for EstimationLayer {
         // deadlines indefinitely, causing `abort_slack` to kill mid-flight
         // requests that could have completed (the same metastable trap the
         // BCF check now avoids).
-        let decay = crate::layer::est::state::decay_factor(
+        let decay = crate::module::est::state::decay_factor(
             masa_core::time_now(),
             self.estimation
                 .est
@@ -317,7 +317,7 @@ impl Layer for EstimationLayer {
     }
 }
 
-impl EstimationLayer {
+impl EstimationModule {
     /// This request's tally, inserted by `new`.
     fn tally(ext: &Extensions) -> &RequestMetadataTracker {
         ext.get::<RequestMetadataTracker>()

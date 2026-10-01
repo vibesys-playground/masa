@@ -1,4 +1,4 @@
-// E2E deadline guard layer — rejects requests that have exceeded their
+// E2E deadline guard module — rejects requests that have exceeded their
 // end-to-end SLO deadline, avoiding wasteful compute on responses that will
 // miss their SLO regardless.
 
@@ -11,8 +11,8 @@ use masa_core::time_now;
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
 use super::{
-    BudgetInfo, BudgetLayer, ChildOutcome, ChildState, Extensions, Layer, LayerServer,
-    MissingDependency, Requires, ServerInit,
+    BudgetInfo, BudgetModule, ChildOutcome, ChildState, Extensions, MissingDependency, Module,
+    ModuleServer, Requires, ServerInit,
 };
 
 // ── Core Handler ──────────────────────────────────────────────────────
@@ -107,7 +107,7 @@ impl SloAbortHandler {
 #[derive(Debug)]
 pub struct E2eDeadlineGuardServer;
 
-impl LayerServer for E2eDeadlineGuardServer {
+impl ModuleServer for E2eDeadlineGuardServer {
     fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
         Ok(Self)
     }
@@ -116,17 +116,17 @@ impl LayerServer for E2eDeadlineGuardServer {
 // ── Per-Request ─────────────────────────────────────────────────────────
 
 #[derive(Debug)]
-pub struct E2eDeadlineGuardLayer {
+pub struct E2eDeadlineGuardModule {
     handler: SloAbortHandler,
 }
 
-impl Layer for E2eDeadlineGuardLayer {
+impl Module for E2eDeadlineGuardModule {
     type Server = E2eDeadlineGuardServer;
     const NAME: &'static str = "e2e_deadline_guard";
     type Wire = ();
 
     fn requires(requires: &mut Requires) {
-        requires.module::<BudgetLayer>();
+        requires.module::<BudgetModule>();
     }
 
     fn new(

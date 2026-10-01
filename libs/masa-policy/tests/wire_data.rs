@@ -8,8 +8,8 @@ use std::sync::Arc;
 use masa_core::{time_now, Context};
 use masa_policy::ContextBuilder;
 use masa_policy::{
-    peek, policy_stack, ChildState, Extensions, Layer, LayerStack, MasaRequestExt, MasaResponseExt,
-    Outcome, PolicyHooks, WireIn, WireOut, MASA_CONTEXT_HEADER,
+    peek, policy_stack, ChildState, Extensions, MasaRequestExt, MasaResponseExt, Module,
+    ModuleStack, Outcome, PolicyHooks, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
@@ -47,7 +47,7 @@ fn arrives(request: &Request<()>) -> http::Request<()> {
         .unwrap()
 }
 
-fn begin<S: LayerStack>(server: &Arc<Server<S>>, request: &Request<()>) -> Parent<S> {
+fn begin<S: ModuleStack>(server: &Arc<Server<S>>, request: &Request<()>) -> Parent<S> {
     Parent::<S>::begin(
         GrpcMethod::new("wire.Service", "Hop"),
         &arrives(request),
@@ -55,7 +55,7 @@ fn begin<S: LayerStack>(server: &Arc<Server<S>>, request: &Request<()>) -> Paren
     )
 }
 
-fn call_child<S: LayerStack>(parent: &Parent<S>) -> Request<()> {
+fn call_child<S: ModuleStack>(parent: &Parent<S>) -> Request<()> {
     let method = GrpcMethod::new("wire.Service", "Child");
     let mut request = Request::new(());
     let mut child = Child::<S>::new(method, &request);
@@ -65,7 +65,7 @@ fn call_child<S: LayerStack>(parent: &Parent<S>) -> Request<()> {
     request
 }
 
-fn respond<S: LayerStack>(parent: &Parent<S>) -> Response<()> {
+fn respond<S: ModuleStack>(parent: &Parent<S>) -> Response<()> {
     let mut result = Ok(Response::new(()));
     parent.finalize_before_serialization(&mut result);
     result.unwrap()
@@ -84,7 +84,7 @@ struct Alpha {
     inbound: Option<AlphaWire>,
 }
 
-impl Layer for Alpha {
+impl Module for Alpha {
     type Server = ();
     const NAME: &'static str = "alpha";
     type Wire = AlphaWire;
@@ -137,7 +137,7 @@ struct Beta {
     inbound: Option<BetaWire>,
 }
 
-impl Layer for Beta {
+impl Module for Beta {
     type Server = ();
     const NAME: &'static str = "beta";
     type Wire = BetaWire;
@@ -185,7 +185,7 @@ impl Layer for Beta {
 #[derive(Debug)]
 struct Silent;
 
-impl Layer for Silent {
+impl Module for Silent {
     type Server = ();
     const NAME: &'static str = "silent";
     type Wire = u8;
@@ -323,7 +323,7 @@ fn peek_decodes_one_section_without_the_context() {
 #[derive(Debug)]
 struct AlphaTwin;
 
-impl Layer for AlphaTwin {
+impl Module for AlphaTwin {
     type Server = ();
     const NAME: &'static str = "alpha";
     type Wire = u8;
@@ -342,7 +342,7 @@ fn duplicate_wire_names_are_rejected() {
 #[derive(Debug)]
 struct BadName;
 
-impl Layer for BadName {
+impl Module for BadName {
     type Server = ();
     const NAME: &'static str = "has.dot";
     type Wire = u8;
@@ -363,26 +363,26 @@ fn wire_names_that_break_the_envelope_are_rejected() {
 #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
 mod rajomon {
     use super::*;
-    use masa_policy::modules::RajomonLayer;
+    use masa_policy::modules::RajomonModule;
     use masa_policy::RajomonWire;
 
-    type Stack = policy_stack![RajomonLayer];
+    type Stack = policy_stack![RajomonModule];
 
     fn tokens_sent_to_child(root: &Request<()>) -> Option<RajomonWire> {
         let server = Arc::new(Server::<Stack>::new("wire.Service"));
         let parent = begin::<Stack>(&server, root);
-        call_child::<Stack>(&parent).get_wire::<RajomonLayer>()
+        call_child::<Stack>(&parent).get_wire::<RajomonModule>()
     }
 
     #[test]
     fn tokens_travel_down_the_call_chain() {
-        let root = sent(|out| out.put::<RajomonLayer>(&RajomonWire::request(40)).unwrap());
+        let root = sent(|out| out.put::<RajomonModule>(&RajomonWire::request(40)).unwrap());
         let server = Arc::new(Server::<Stack>::new("wire.Service"));
 
         let parent = begin::<Stack>(&server, &root);
         let to_child = call_child::<Stack>(&parent);
         assert_eq!(
-            to_child.get_wire::<RajomonLayer>(),
+            to_child.get_wire::<RajomonModule>(),
             Some(RajomonWire::request(40))
         );
 
@@ -391,16 +391,16 @@ mod rajomon {
         // The response may also carry a propagated price; the echo is the
         // token budget.
         assert_eq!(
-            reply.get_wire::<RajomonLayer>().map(|wire| wire.tokens),
+            reply.get_wire::<RajomonModule>().map(|wire| wire.tokens),
             Some(40)
         );
     }
 
     #[test]
     fn zero_tokens_survive_the_round_trip_as_zero() {
-        let root = sent(|out| out.put::<RajomonLayer>(&RajomonWire::request(0)).unwrap());
+        let root = sent(|out| out.put::<RajomonModule>(&RajomonWire::request(0)).unwrap());
         assert_eq!(
-            root.get_wire::<RajomonLayer>(),
+            root.get_wire::<RajomonModule>(),
             Some(RajomonWire::request(0))
         );
         assert_eq!(tokens_sent_to_child(&root), Some(RajomonWire::request(0)));
@@ -409,13 +409,13 @@ mod rajomon {
     #[test]
     fn a_request_without_rajomon_data_is_given_the_default_budget() {
         let root = sent(|_| {});
-        assert_eq!(root.get_wire::<RajomonLayer>(), None);
+        assert_eq!(root.get_wire::<RajomonModule>(), None);
         assert_eq!(tokens_sent_to_child(&root), Some(RajomonWire::request(100)));
     }
 
     fn response_with(wire: RajomonWire) -> Response<()> {
         let mut response = Response::new(()).with_masa_context(&root_context());
-        response.set_wire::<RajomonLayer>(&wire);
+        response.set_wire::<RajomonModule>(&wire);
         response
     }
 
@@ -424,7 +424,7 @@ mod rajomon {
         for price in [0, 13] {
             let response = response_with(RajomonWire::response(7, price));
             assert_eq!(
-                response.get_wire::<RajomonLayer>(),
+                response.get_wire::<RajomonModule>(),
                 Some(RajomonWire::response(7, price))
             );
         }
@@ -441,6 +441,6 @@ mod rajomon {
             .unwrap();
         // {"tokens":7}, exactly what a request carries.
         assert!(value.ends_with(".rajomon:eyJ0b2tlbnMiOjd9"), "{value}");
-        assert_eq!(response.get_wire::<RajomonLayer>().unwrap().price, None);
+        assert_eq!(response.get_wire::<RajomonModule>().unwrap().price, None);
     }
 }

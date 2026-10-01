@@ -1,4 +1,4 @@
-// Queue latency tracking layer — observes queue latencies and propagates
+// Queue latency tracking module — observes queue latencies and propagates
 // them through the request tree.
 //
 // Included in the default stack only with `trace_queue_latency`. Tracks
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Response, Status};
 
 use super::{
-    ChildOutcome, ChildState, Extensions, Layer, LayerServer, MissingDependency, Outcome,
+    ChildOutcome, ChildState, Extensions, MissingDependency, Module, ModuleServer, Outcome,
     ServerInit,
 };
 
@@ -37,7 +37,7 @@ pub struct QueueLatencyWire {
 #[derive(Debug)]
 pub struct QueueLatencyServer;
 
-impl LayerServer for QueueLatencyServer {
+impl ModuleServer for QueueLatencyServer {
     fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
         Ok(Self)
     }
@@ -53,7 +53,7 @@ fn service_name() -> &'static str {
 }
 
 #[derive(Debug)]
-pub struct QueueLatencyLayer {
+pub struct QueueLatencyModule {
     initial_q_lat: AtomicU64,
     resume_q_lat: AtomicU64,
     is_first_poll: AtomicBool,
@@ -61,7 +61,7 @@ pub struct QueueLatencyLayer {
     child_queue_lengths: Mutex<HashMap<String, u64>>,
 }
 
-impl Layer for QueueLatencyLayer {
+impl Module for QueueLatencyModule {
     type Server = QueueLatencyServer;
     const NAME: &'static str = "queue_latency";
     type Wire = QueueLatencyWire;

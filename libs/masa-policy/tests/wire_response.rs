@@ -10,8 +10,8 @@ use std::sync::Arc;
 use masa_core::time_now;
 use masa_policy::ContextBuilder;
 use masa_policy::{
-    policy_stack, BudgetLayer, ChildOutcome, ChildState, Extensions, Layer, MasaResponseExt,
-    MasaStatusExt, Outcome, PolicyHooks, WireIn, WireOut, MASA_CONTEXT_HEADER,
+    policy_stack, BudgetModule, ChildOutcome, ChildState, Extensions, MasaResponseExt,
+    MasaStatusExt, Module, Outcome, PolicyHooks, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
@@ -37,7 +37,7 @@ struct Sum {
     seen_child_sections: AtomicU64,
 }
 
-impl Layer for Sum {
+impl Module for Sum {
     type Server = ();
     const NAME: &'static str = "sum";
     type Wire = SumWire;
@@ -89,7 +89,7 @@ impl Layer for Sum {
 #[derive(Debug)]
 struct Mute;
 
-impl Layer for Mute {
+impl Module for Mute {
     type Server = ();
     const NAME: &'static str = "mute";
     type Wire = u8;
@@ -99,7 +99,7 @@ impl Layer for Mute {
     }
 }
 
-type Stack = policy_stack![BudgetLayer, Sum, Mute];
+type Stack = policy_stack![BudgetModule, Sum, Mute];
 
 fn root_request() -> http::Request<()> {
     let now = time_now();
