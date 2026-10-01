@@ -13,15 +13,15 @@ use std::sync::{
     Arc,
 };
 
+#[cfg(any(feature = "abort_slo", feature = "trace_queue_latency"))]
 use masa::MasaRequestExt;
-#[cfg(feature = "trace_queue_latency")]
-use masa::MasaResponseExt;
-use masa_core::{time_now, ContextBuilder};
+use masa_core::time_now;
 use masa_integration_tests::pb::{
     child_service_client::ChildServiceClient,
     child_service_server::{ChildService, ChildServiceServer},
     Input1, Input2, Output1, Output2,
 };
+use masa_policy::ContextBuilder;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 
@@ -33,7 +33,7 @@ fn unused_local_addr() -> SocketAddr {
     listener.local_addr().expect("read ephemeral test port")
 }
 
-/// Install test-local Rajomon params before the process-wide `PolicyParams`
+/// Install test-local Rajomon params before the process-wide `RajomonParams`
 /// `OnceLock` is initialized. The production default (`init_price=0`,
 /// `price_freq=5`) was chosen to match the NSDI '25 paper's "no artificial
 /// floor" semantics, but that makes these admission/piggyback assertions
@@ -46,7 +46,7 @@ fn unused_local_addr() -> SocketAddr {
 /// retry loop). `latency_threshold_us=0` prevents the background price worker
 /// from decaying the test price back to zero between parallel tests. All other
 /// params take their built-in defaults via `#[serde(default)]` on
-/// `PolicyParams` / `RajomonParams`.
+/// `RajomonParams`.
 #[cfg(feature = "ac_rajomon")]
 fn ensure_test_rajomon_params() {
     use std::sync::Once;
@@ -62,8 +62,8 @@ fn ensure_test_rajomon_params() {
         std::env::set_var("MASA_POLICY_PARAMS_PATH", &path);
         // Force initialization of the OnceLock while we still hold exclusive
         // access via `Once::call_once`, so a concurrent rajomon test can't
-        // read `PolicyParams::global()` before our env var is in place.
-        let _ = masa_policy::PolicyParams::global();
+        // read `RajomonParams::global()` before our env var is in place.
+        let _ = masa_policy::RajomonParams::global();
     });
 }
 
@@ -124,12 +124,7 @@ async fn queue_latency_metadata_is_attached() {
     request.set_masa_context(&ctx);
 
     let response = client.rpc1(request).await.unwrap();
-    let masa_ctx = response
-        .get_masa_context()
-        .expect("response missing masa context");
-    let queue_latencies = masa_ctx
-        .queue_latencies()
-        .cloned()
+    let queue_latencies = masa::queue_latencies_from_metadata(response.metadata())
         .expect("queue latency metadata not injected");
     assert!(queue_latencies.initial < 5_000_000);
     assert!(queue_latencies.resume < 5_000_000);
@@ -247,26 +242,24 @@ async fn sufficient_tokens_executes_and_piggybacks_price() {
     // (= `own_price + max_downstream`) and should retain the positive
     // test floor.
     let now = time_now();
-    let rajomon_ctx = ContextBuilder::new("test.ChildService/Rpc1", 99)
-        .gateway_entry(now)
-        .slo(1_000_000)
-        .deadline(now + 1_000_000)
-        .tokens(1_000_000) // Plenty of tokens
-        .build();
+    let rajomon_ctx = masa::RootContext::from(
+        ContextBuilder::new("test.ChildService/Rpc1", 99)
+            .gateway_entry(now)
+            .slo(1_000_000)
+            .deadline(now + 1_000_000)
+            .build(),
+    )
+    .with_rajomon_tokens(1_000_000); // Plenty of tokens
 
-    let mut request = Request::new(Input1 {});
-    request.set_masa_context(&rajomon_ctx);
+    let request = rajomon_ctx.attach(Request::new(Input1 {}));
 
     let response = client
         .rpc1(request)
         .await
         .expect("request should have succeeded");
 
-    let header = response
-        .metadata()
-        .get("x-masa-rajomon-price")
-        .expect("price header should have been piggybacked");
-    let price = header.to_str().unwrap().parse::<u64>().unwrap();
+    let price = masa::rajomon_price_from_metadata(response.metadata())
+        .expect("price should have been piggybacked");
     assert!(price >= 1, "expected positive Rajomon price, got {price}");
 
     server.abort();
@@ -320,15 +313,16 @@ async fn insufficient_tokens_triggers_early_return() {
 
     let now = time_now();
     // Start with very few tokens
-    let rajomon_ctx = ContextBuilder::new("test.ChildService/Rpc1", 99)
-        .gateway_entry(now)
-        .slo(1_000_000)
-        .deadline(now + 1_000_000)
-        .tokens(0) // Not enough tokens to even afford baseline cost of 1
-        .build();
+    let rajomon_ctx = masa::RootContext::from(
+        ContextBuilder::new("test.ChildService/Rpc1", 99)
+            .gateway_entry(now)
+            .slo(1_000_000)
+            .deadline(now + 1_000_000)
+            .build(),
+    )
+    .with_rajomon_tokens(0); // Not enough tokens to even afford baseline cost of 1
 
-    let mut request = Request::new(Input1 {});
-    request.set_masa_context(&rajomon_ctx);
+    let request = rajomon_ctx.attach(Request::new(Input1 {}));
 
     let error = client
         .rpc1(request)

@@ -5,18 +5,13 @@ mod latency_estimator;
 mod priority;
 mod timing;
 mod typing;
+use rpcstack_wire as wire;
 
 pub use context::FutureSpan;
-#[cfg(feature = "ac_rajomon")]
-pub use context::RajomonContext;
 pub use context::{
-    invalid_context_header_metadata_message, Context, ContextBuilder, RequestContext,
-    MISSING_CONTEXT_HEADER_MESSAGE,
+    invalid_budget_section_message, invalid_context_header_metadata_message,
+    missing_budget_section_message, Context, BUDGET_SECTION, MISSING_CONTEXT_HEADER_MESSAGE,
 };
-#[cfg(feature = "estimator")]
-pub use context::{EstimatorContext, EstimatorResponse, ResponseMeta, RootMethod};
-#[cfg(feature = "trace_queue_latency")]
-pub use context::{QueueContext, QueueLatencies};
 pub use flag::{
     ABORT_SLACK, ABORT_SLO, RAJOMON, SCHED_FIFO, SCHED_ORACLE, SCHED_PRED, SCHED_SLO,
     SCHED_TAILCLIPPER, SIGNAL_SLACK,
@@ -26,11 +21,13 @@ pub use latency_estimator::{
     LatencyDistribution, LatencyEstimator, LatencyEwma, LatencyMeanVar, LatencyRms,
 };
 pub use priority::{Prioritize, PriorityHint};
-pub use timing::{time_now, LatencyTracker};
+#[cfg(feature = "test_clock")]
+pub use timing::test_clock;
+pub use timing::{time_now, Instant, LatencyTracker};
 pub use typing::{Address, Api, Latency, MethodId, RequestId, ServiceId, Timestamp};
 
 /// Header key for MASA context.
-pub const MASA_CONTEXT_HEADER: &str = "ctx";
+pub const MASA_CONTEXT_HEADER: &str = rpcstack_wire::HEADER_NAME;
 
 /// Oracle-only header carrying perfect child RPC wall-clock work in microseconds.
 pub const ORACLE_CHILD_WORK_US_HEADER: &str = "x-masa-oracle-child-work-us";

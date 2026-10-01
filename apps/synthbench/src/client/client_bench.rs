@@ -17,7 +17,7 @@ use app_utils::{
 };
 use frontend::frontend_client::FrontendClient;
 use masa::MasaRequestExt;
-use masa::{Context, ContextBuilder};
+use masa::{ContextBuilder, RootContext};
 
 struct SynthbenchClient;
 
@@ -68,7 +68,7 @@ impl HandlerOuter<SynthbenchClient> for RequestHandler {
         &self,
         rng: StdRng,
         client: FrontendClient<Channel>,
-        ctx: Context,
+        ctx: RootContext,
         trace: bool,
     ) -> String {
         match self {
@@ -116,9 +116,9 @@ impl RequestType<SynthbenchClient> for ARequest {
         &self,
         _rng: &mut StdRng,
         mut client: FrontendClient<Channel>,
-        ctx: &Context,
+        ctx: &RootContext,
     ) -> Result<Response<Self::ResponseType>, Status> {
-        let r = tonic::Request::new(frontend::ARequest {}).with_masa_context(ctx);
+        let r = ctx.attach(tonic::Request::new(frontend::ARequest {}));
         client.handle_a(r).await
     }
 
@@ -144,9 +144,9 @@ impl RequestType<SynthbenchClient> for BRequest {
         &self,
         _rng: &mut StdRng,
         mut client: FrontendClient<Channel>,
-        ctx: &Context,
+        ctx: &RootContext,
     ) -> Result<Response<Self::ResponseType>, Status> {
-        let r = tonic::Request::new(frontend::BRequest {}).with_masa_context(ctx);
+        let r = ctx.attach(tonic::Request::new(frontend::BRequest {}));
         client.handle_b(r).await
     }
 

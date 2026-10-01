@@ -2,7 +2,8 @@ use masa::{
     get_masa_context_from_metadata, read_context, set_masa_context_in_metadata, MasaRequestExt,
     MasaResponseExt, MasaStatusExt, MASA_CONTEXT_HEADER,
 };
-use masa_core::{Context, ContextBuilder};
+use masa_core::Context;
+use masa_policy::ContextBuilder;
 use tonic::{Request, Response, Status};
 
 fn test_context(request_id: u64) -> Context {

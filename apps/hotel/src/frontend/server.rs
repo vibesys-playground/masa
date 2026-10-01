@@ -21,10 +21,8 @@ pub mod hotel_tonic {
 
 use crate::config::HotelConfig;
 // use hotel_tonic::review::review_client::ReviewClient;
-use std::time::Instant;
 
 use masa::transport::LoadBalancedChannel;
-use masa::{MasaRequestExt, MasaResponseExt};
 use tonic::{Request, Response, Status};
 
 use hotel_tonic::{
@@ -37,9 +35,7 @@ use hotel::profile_layer::extract_latency_traces;
 
 #[cfg(feature = "trace_queue_latency")]
 fn queueing_latency<T>(response: &Response<T>) -> u64 {
-    response
-        .get_masa_context()
-        .and_then(|ctx| ctx.queue_latencies().cloned())
+    masa::queue_latencies_from_metadata(response.metadata())
         .map(|ql| ql.initial + ql.resume)
         .unwrap_or(0)
 }
@@ -129,8 +125,6 @@ impl Frontend for FrontendImpl {
     ) -> Result<Response<frontend::SearchResponse>, Status> {
         use masa::time_now;
 
-        let start = Instant::now();
-        let mut ctx = request.get_masa_context().unwrap();
         let request = request.into_inner();
 
         let mut child_traces = Vec::new();
@@ -225,19 +219,13 @@ impl Frontend for FrontendImpl {
             reservation_queueing_latency: reservation_q_lat,
             profile_queueing_latency: profile_q_lat,
         };
-        let mut response = Response::new(response);
-        ctx.set_frontend_elapse(start.elapsed().as_micros() as u64);
-        response.set_masa_context(&ctx);
-
-        Ok(response)
+        Ok(Response::new(response))
     }
 
     async fn handle_reservation(
         &self,
         request: Request<frontend::ReservationRequest>,
     ) -> Result<Response<frontend::ReservationResponse>, Status> {
-        let start = Instant::now();
-        let mut ctx = request.get_masa_context().unwrap();
         let request = request.into_inner();
 
         let mut user_client = self.user_client.clone();
@@ -277,11 +265,7 @@ impl Frontend for FrontendImpl {
             reservation_queueing_latency: res_q_lat,
         };
 
-        let mut response = Response::new(response);
-        ctx.set_frontend_elapse(start.elapsed().as_micros() as u64);
-        response.set_masa_context(&ctx);
-
-        Ok(response)
+        Ok(Response::new(response))
     }
 
     // async fn handle_review(

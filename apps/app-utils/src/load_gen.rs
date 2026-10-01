@@ -30,7 +30,7 @@ use crate::{
     logging::init_logging_file,
     timing::{get_timestamp, time_now},
 };
-use masa::Context;
+use masa::{Context, RootContext};
 use tonic::Response;
 use tonic::Status;
 
@@ -312,21 +312,17 @@ pub struct TraceRecord {
     pub additional_metrics: Vec<String>,
 }
 
-/// Read the Rajomon `x-masa-rajomon-price` header from response metadata and
-/// update the client-side cached price for `api`. Shared between
+/// Read the price Rajomon propagated in the response's wire data and update
+/// the client-side cached price for `api`. Shared between
 /// `Handler::send_request` and bespoke loadgens (e.g. tracebench) so the same
 /// Ok+Err-aware parsing is applied everywhere. See
 /// `apps/app-utils/src/load_gen.rs:406-418` for the reasoning behind reading
 /// from error responses too.
 #[cfg(feature = "ac_rajomon")]
 pub fn update_rajomon_price_from_metadata(md: &tonic::metadata::MetadataMap, api: &str) {
-    if let Some(h) = md.get("x-masa-rajomon-price") {
-        if let Ok(s) = h.to_str() {
-            if let Ok(price) = s.parse::<u64>() {
-                let method = tonic::CowGrpcMethod::new("", api.to_string());
-                masa::update_rajomon_price(&method, price);
-            }
-        }
+    if let Some(price) = masa::rajomon_price_from_metadata(md) {
+        let method = tonic::CowGrpcMethod::new("", api.to_string());
+        masa::update_rajomon_price(&method, price);
     }
 }
 
@@ -415,17 +411,14 @@ struct QueueLatencyTraceFields {
 
 #[cfg(feature = "trace_queue_latency")]
 fn queue_latency_from_metadata(metadata: &MetadataMap) -> QueueLatencyTraceFields {
-    if let Some(ctx_str) = metadata.get("ctx").and_then(|v| v.to_str().ok()) {
-        let ctx = Context::from_header_string(ctx_str);
-        if let Some(ql) = ctx.queue_latencies() {
-            return QueueLatencyTraceFields {
-                initial_us: ql.initial,
-                resume_us: ql.resume,
-                queue_lengths_json: format_queue_lengths(&ql.queue_lengths),
-            };
-        }
+    match masa::queue_latencies_from_metadata(metadata) {
+        Some(ql) => QueueLatencyTraceFields {
+            initial_us: ql.initial,
+            resume_us: ql.resume,
+            queue_lengths_json: format_queue_lengths(&ql.queue_lengths),
+        },
+        None => QueueLatencyTraceFields::default(),
     }
-    QueueLatencyTraceFields::default()
 }
 
 #[cfg(not(feature = "trace_queue_latency"))]
@@ -524,7 +517,7 @@ where
         &self,
         mut rng: StdRng,
         client: C::FrontendClient,
-        ctx: Context,
+        ctx: RootContext,
         trace: bool,
     ) -> String {
         let latency;
@@ -567,7 +560,7 @@ where
 
         let (response, error) = map_response(response, latency <= self.slo);
 
-        let stats = RequestStats::new(ctx, latency, error.clone(), response);
+        let stats = RequestStats::new(ctx.into_context(), latency, error.clone(), response);
 
         if trace {
             self.trace_tx.as_ref().unwrap().send(stats).unwrap();
@@ -615,7 +608,7 @@ where
         &self,
         rng: &mut StdRng,
         client: C::FrontendClient,
-        ctx: &Context,
+        ctx: &RootContext,
     ) -> impl Future<Output = Result<Response<Self::ResponseType>, Status>>;
 
     fn response_output_headers(&self) -> Vec<String>;
@@ -674,7 +667,7 @@ where
         &self,
         rng: StdRng,
         client: C::FrontendClient,
-        ctx: Context,
+        ctx: RootContext,
         trace: bool,
     ) -> impl Future<Output = String> + Send;
 
@@ -819,10 +812,10 @@ where
                 }
             };
             #[cfg(not(feature = "ac_rajomon"))]
-            let ctx = masa::create_context(
+            let ctx = RootContext::from(masa::create_context(
                 handler.api(),
                 std::time::Duration::from_micros(handler.slo()),
-            );
+            ));
 
             let client = self.client.clone();
             let ctrs = Arc::clone(&counters);

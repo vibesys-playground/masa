@@ -45,7 +45,7 @@ Application Cargo.toml (e.g., apps/hotel --features sched_slo)
        +-- libs/tokio/tokio/Cargo.toml sched_prio selects the priority queue
 
 libs/masa/Cargo.toml also enables `masa-policy/sched_slo`, which selects the
-concrete `PolicyHooks` layers. Keeping that policy selection in `masa` avoids a
+concrete `PolicyHooks` modules. Keeping that policy selection in `masa` avoids a
 direct `tonic` dependency on `masa-policy`.
 ```
 
@@ -63,11 +63,11 @@ The `masa::DefaultHooks` type alias (in `libs/masa/src/lib.rs`) is resolved by f
 `PolicyHooks<S>` runs the policy module stack `S`. The default, `MasaStack`, is
 defined in `libs/masa-policy/src/masa_stack.rs`, the only place where features
 choose modules. Each slot holds a built-in module or `()` (disabled):
-- **E2E deadline guard**: `E2eDeadlineGuardLayer` (`abort_slo`)
-- **Estimation**: `EstimationLayer` (`estimator`)
-- **Oracle**: `OracleLayer` (`sched_oracle`)
-- **Admission control** (mutually exclusive): `PredAdmissionLayer` (`ac_pred`) or `RajomonLayer` (`ac_rajomon`)
-- **Queue latency**: `QueueLatencyLayer` (`trace_queue_latency`)
+- **E2E deadline guard**: `E2eDeadlineGuardModule` (`abort_slo`)
+- **Estimation**: `EstimationModule` (`estimator`)
+- **Oracle**: `OracleModule` (`sched_oracle`)
+- **Admission control** (mutually exclusive): `PredAdmissionModule` (`ac_pred`) or `RajomonModule` (`ac_rajomon`)
+- **Queue latency**: `QueueLatencyModule` (`trace_queue_latency`)
 
 New policies are new modules composed into a new stack; see
 [`POLICY_MODULES.md`](POLICY_MODULES.md). The `stack_custom` feature replaces
@@ -101,15 +101,14 @@ The `masa` crate defines the fundamental types shared across the system.
 *   `gateway_entry`: Timestamp when the request entered the system (microseconds since UNIX epoch).
 *   `deadline`: The computed deadline for this RPC hop (microseconds since UNIX epoch). Not necessarily the end-to-end deadline.
 *   `prio_hint`: The priority value used by the scheduler.
-*   `frontend_elapse`: Optional elapsed time at frontend.
+
+`Context` is the wire data of the budget module (the `budget` section of the `ctx` header; see `docs/POLICY_MODULES.md`).
 
 `Context` also provides `e2e_deadline()`, computed as `gateway_entry + slo`, which is the absolute end-to-end deadline.
 
-`ContextBuilder` creates `Context` instances. If no explicit `prio_hint` is provided, it defaults to `PriorityHint::new(deadline)` — using the per-hop deadline as the priority value. Under `sched_pred`, the default is converted to relative time-left (`deadline - time_now()`) so initial H2 stream priority uses the same scale as dynamic reprioritization.
+`masa_policy::ContextBuilder` creates root `Context` instances. If no explicit `prio_hint` is provided, it uses `masa_policy::root_priority`, which defaults to `PriorityHint::new(deadline)` — using the per-hop deadline as the priority value. Under `sched_pred`, the default is converted to relative time-left (`deadline - time_now()`) so initial H2 stream priority uses the same scale as dynamic reprioritization; under `sched_tailclipper` it is the gateway entry time.
 
-Serialization:
-*   `to_json()` / `from_json()`: JSON format (used for logging/debugging).
-*   `to_header_string()` / `from_header_string()`: **Bincode + base64** format (used for HTTP/2 header transport — compact binary, not human-readable).
+Serialization: `to_header_string()` / `from_header_string()` produce and read a `ctx` header value holding the `budget` section (the `Context` as a `bincode` tuple, base64-encoded; see `libs/rpcstack-wire/src/lib.rs`).
 
 ### `PriorityHint`
 
@@ -176,13 +175,13 @@ For a complete request lifecycle:
 10. `finalize_after_serialization()` — after response is serialized (e.g., inject `x-queue-latency` header).
 
 ### Policy Implementation
-All scheduling policies are unified into `PolicyHooks<S>` (`libs/masa-policy/src/hooks.rs`), which owns context plumbing and dispatches every lifecycle hook through the module stack `S` in order (first `Err` short-circuits). Stacks are built with `policy_stack!` (`layer/mod.rs`); `MasaStack` (`masa_stack.rs`) is the feature-selected default:
-*   **`E2eDeadlineGuardLayer`** (`layer/e2e_deadline_guard.rs`): Checks deadline in `before_poll`/`after_poll`; aborts past-deadline requests. Enabled by `abort_slo` feature.
-*   **`EstimationLayer`** (`layer/est/layer.rs`): Latency tracking, deadline tightening, reprioritization, local deadline checks. Enabled by `estimator` feature. Publishes its estimators through `ServerInit` for later modules.
-*   **`OracleLayer`** (`layer/oracle.rs`): Perfect-information child deadline and priority. Enabled by `sched_oracle` feature.
-*   **`PredAdmissionLayer`** (`layer/admission/predictive/mod.rs`): Predictive admission control using the estimation module's estimators. Enabled by `ac_pred` feature.
-*   **`RajomonLayer`** (`layer/admission/rajomon/mod.rs`): Token-bucket admission control with server-side price signals. Enabled by `ac_rajomon` feature.
-*   **`QueueLatencyLayer`** (`layer/queue_latency.rs`): Tracks queue latency across the call graph via `x-queue-latency` headers. Enabled by `trace_queue_latency` feature.
+All scheduling policies are unified into `PolicyHooks<S>` (`libs/rpcstack-tonic/src/hooks.rs`, re-exported by `masa-policy` with `MasaStack` as the default `S`), which owns context plumbing and dispatches every lifecycle hook through the module stack `S` in order (first `Err` short-circuits). Stacks are built with `policy_stack!` (`libs/rpcstack/src/module.rs`); `MasaStack` (`masa_stack.rs`) is the feature-selected default:
+*   **`E2eDeadlineGuardModule`** (`module/e2e_deadline_guard.rs`): Checks deadline in `before_poll`/`after_poll`; aborts past-deadline requests. Enabled by `abort_slo` feature.
+*   **`EstimationModule`** (`module/est/module.rs`): Latency tracking, deadline tightening, reprioritization, local deadline checks. Enabled by `estimator` feature. Publishes its estimators through `ServerInit` for later modules.
+*   **`OracleModule`** (`module/oracle.rs`): Perfect-information child deadline and priority. Enabled by `sched_oracle` feature.
+*   **`PredAdmissionModule`** (`module/admission/predictive/mod.rs`): Predictive admission control using the estimation module's estimators. Enabled by `ac_pred` feature.
+*   **`RajomonModule`** (`libs/rajomon`, re-exported by `masa-policy`): Token-bucket admission control with server-side price signals. Enabled by `ac_rajomon` feature.
+*   **`QueueLatencyModule`** (`module/queue_latency.rs`): Tracks queue latency across the call graph via `x-queue-latency` headers. Enabled by `trace_queue_latency` feature.
 *   **`()`**: The empty module, used for every disabled slot.
 *   **`NoopHooks`** (`libs/tonic/tonic/src/masa/noop.rs`): Selected when no scheduling feature is active.
 
@@ -198,11 +197,11 @@ All scheduling policies are unified into `PolicyHooks<S>` (`libs/masa-policy/src
 The parent context is obtained from thread-local storage via `unsafe { tonic::masa::client::get_parent_ctx::<M>() }`, which is implemented in Tonic's Masa module and set by the poll hooks (see Section 6).
 
 ### Header Injection
-The `Context` is serialized using **bincode** (compact binary format) and **base64-encoded**, then added to the HTTP/2 headers with the key `ctx`. This propagates the deadline and priority information to the next hop. The format is not human-readable; use `Context::to_json()` for debugging.
+The child's `Context` is written by the budget modules as the `budget` section of the `ctx` header (base64 JSON, after the other modules' sections). This propagates the deadline and priority information to the next hop. The format is not human-readable without decoding.
 
 ### Method Name Override
 
-The `x-masa-method-name` header (`libs/masa-policy/src/context_ext.rs`, exposed through Masa-owned request helpers) allows overriding the gRPC method name for latency tracking. This is used by applications where a generic endpoint (e.g., `invoke`) handles multiple logical methods (e.g., the synthbench and tracebench applications).
+The `x-rpcstack-method-name` header (`libs/rpcstack-tonic/src/metadata.rs`, exposed through `MasaRequestExt`) allows overriding the gRPC method name for latency tracking. This is used by applications where a generic endpoint (e.g., `invoke`) handles multiple logical methods (e.g., the synthbench and tracebench applications).
 
 ## 4. Transport Layer (`libs/hyper`)
 
@@ -211,14 +210,14 @@ Masa modifies `hyper` to be priority-aware on the server side.
 ### Server-Side Request Handling
 In `libs/hyper/src/proto/h2/server.rs`, when `hyper` receives a new HTTP/2 stream (request):
 1.  It checks for the `ctx` header.
-2.  **If present**: It calls `.to_str().unwrap()`, then `MasaContext::from_header_string()` (base64 decode → bincode deserialize) to extract the propagated priority hint. Note: these `.unwrap()` calls will **panic** on malformed input (see `docs/MASA_IMPROVEMENTS.md`).
+2.  **If present**: It calls `masa_core::read_priority_from_headers`, which finds the `budget` section of the header and reads only its priority: it decodes the section into a stack buffer and scans the JSON array for its last element, without allocating, and falls back to the general decoder for anything the scan does not recognize, so values and errors are those of a full decode. This runs for every stream (about 230 ns, against about 470 ns for deserializing the section; `libs/masa-policy/tests/wire_bench.rs`). Note: these `.unwrap()` calls will **panic** on malformed input (see `docs/MASA_IMPROVEMENTS.md`).
 3.  It calls `exec.execute_h2stream_with_prio(future, prio)`.
 4.  **If absent**: It calls `exec.execute_h2stream(future)`, which defaults to `PriorityHint::infra()` (highest priority, value 0). This means requests without a `ctx` header are treated as infrastructure and always execute first.
 
 Hyper intentionally consumes the serialized `ctx.prio_hint()` directly. The context/policy
-layer is responsible for putting this value on the same relative time-left scale used by
+module is responsible for putting this value on the same relative time-left scale used by
 `sched_pred` reprioritization (`ctx.deadline() - time_now()`). `ContextBuilder` handles the
-root/default case; `EstimationLayer::child_deadline_and_prio` handles child RPCs with
+root/default case; `EstimationModule::child_deadline_and_prio` handles child RPCs with
 estimated downstream work. Mixing absolute deadline-like values with relative
 reprioritization values makes newly spawned, never-polled streams look much lower priority
 than already-polled tasks, because smaller `PriorityHint` values win. Under overload this
@@ -360,7 +359,7 @@ This means the tonic `before_poll`/`after_poll` closures (installed on the top-l
 
 Early Return uses poll hooks to abort requests that have already missed their deadline, avoiding wasteful computation. It is gated by the compile-time `abort_slo` feature flag (`libs/masa-core/src/flag.rs`: `pub const ABORT_SLO: bool = cfg!(feature = "abort_slo")`).
 
-The `E2eDeadlineGuardLayer` (`libs/masa-policy/src/layer/e2e_deadline_guard.rs`) tracks whether a request should be aborted:
+The `E2eDeadlineGuardModule` (`libs/masa-policy/src/module/e2e_deadline_guard.rs`) tracks whether a request should be aborted:
 
 *   `before_poll`: Compares the current time against `ctx.e2e_deadline()`. If expired, returns a `DeadlineExceeded` error to abort the request immediately.
 *   `after_poll`: Only checks when the poll returned `Pending` (the handler is blocked on I/O or a child RPC). If the deadline has passed while waiting, aborts rather than waiting for the next wake-up. When the poll is `Ready`, the request is already done so no check is needed.
@@ -369,18 +368,18 @@ SLO abort is composable with any scheduling policy via the `abort_slo` feature f
 
 ### Queue Latency Tracking
 
-The `QueueLatencyLayer` (`libs/masa-policy/src/layer/queue_latency.rs`) accumulates queue latency — the time a task spent in the ready queue before being polled. It calls `tokio::task::obtain_task_queue_latency()` during `before_poll` to read the current task's queue wait time from its `TraceTimer` in the task header. This value is accumulated across all polls and child RPC responses (via the `x-queue-latency` response header), then injected into the outgoing response in `finalize`.
+The `QueueLatencyModule` (`libs/masa-policy/src/module/queue_latency.rs`) accumulates queue latency — the time a task spent in the ready queue before being polled. It calls `tokio::task::obtain_task_queue_latency()` during `before_poll` to read the current task's queue wait time from its `TraceTimer` in the task header. This value is accumulated across all polls and child RPC responses (via the `x-queue-latency` response header), then injected into the outgoing response in `finalize`.
 
 Queue latency tracking joins `MasaStack` when `trace_queue_latency` is enabled.
 
-### Per-Layer Summary
+### Per-Module Summary
 
-| Layer | `before_poll` | `after_poll` | `before_child_rpc` | `finalize` |
+| Module | `before_poll` | `after_poll` | `before_child_rpc` | `finalize` |
 |---|---|---|---|---|
-| `E2eDeadlineGuardLayer` | Deadline check → abort | Deadline check on `Pending` | — | — |
-| `PredAdmissionLayer` | — | — | Tighten deadline, admission check | Update estimates |
-| `RajomonLayer` | — | — | Token deduction | — |
-| `QueueLatencyLayer` | Accumulate queue latency | — | — | Inject `x-queue-latency` header |
+| `E2eDeadlineGuardModule` | Deadline check → abort | Deadline check on `Pending` | — | — |
+| `PredAdmissionModule` | — | — | Tighten deadline, admission check | Update estimates |
+| `RajomonModule` | — | — | Token deduction | — |
+| `QueueLatencyModule` | Accumulate queue latency | — | — | Inject `x-queue-latency` header |
 | `()` (disabled slot) | No-op | No-op | No-op | No-op |
 | `NoopHooks` | No-op | No-op | No-op | No-op |
 
@@ -403,7 +402,7 @@ Services connect to downstream replicas using `masa::transport::LoadBalancedChan
 
 ### `x-queue-latency` Response Header
 
-The `QueueLatencyLayer` propagates accumulated queue wait times in the `x-queue-latency` response header. It aggregates:
+The `QueueLatencyModule` propagates accumulated queue wait times in the `x-queue-latency` response header. It aggregates:
 *   The current task's queue latency (from `tokio::task::obtain_task_queue_latency()`).
 *   Queue latency reported by child RPCs (parsed from their `x-queue-latency` response headers).
 
@@ -412,9 +411,9 @@ The total is injected into the outgoing response in `finalize()`, creating a rec
 ## Summary of Data Flow
 
 1.  **Origin**: Request starts with a default or assigned priority/deadline.
-2.  **Client (Upstream)**: `ParentHooks::before_child_rpc` calculates child deadline/priority, serializes `Context` to bincode+base64, and sets the `ctx` HTTP/2 header.
+2.  **Client (Upstream)**: `ParentHooks::before_child_rpc` calculates child deadline/priority, the budget modules write the child's `budget` section, and the framework sets the `ctx` HTTP/2 header from the sections the modules wrote.
 3.  **Network**: Request travels with `ctx` header.
-4.  **Server (Downstream) Hyper**: Parses `ctx` header (base64 → bincode → `Context`), extracts `PriorityHint`.
+4.  **Server (Downstream) Hyper**: Reads the `budget` section of the `ctx` header, extracts `PriorityHint`.
 5.  **Server Executor**: Under `hyper/masa`, `Exec::Default` calls `tokio::task::spawn_with_prio(handler_future, priority)` for HTTP/2 request streams.
 6.  **Tokio Runtime**: Enqueues task in priority queue (binary heap, round-robin, or FIFO depending on feature flags).
 7.  **CPU**: Picks highest priority task (lowest `PriorityHint` value) to execute.

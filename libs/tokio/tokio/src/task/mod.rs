@@ -321,6 +321,7 @@
 //! [`task::unconstrained`]: crate::task::unconstrained()
 //! [`poll`]: method@std::future::Future::poll
 
+pub use crate::masa::meta::{meta_for_unannotated_spawn, Meta};
 pub(crate) use crate::masa::priority::TaskPrioritize;
 pub use crate::masa::priority::TaskPriority;
 
@@ -333,7 +334,7 @@ cfg_rt! {
 
     mod spawn;
     pub use spawn::spawn;
-    pub use spawn::spawn_with_prio;
+    pub use spawn::{spawn_with_meta, spawn_with_prio};
     pub use spawn::reprioritize;
 
     mod poll_hook;

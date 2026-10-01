@@ -1,7 +1,7 @@
 use crate::future::Future;
 use crate::runtime::task::core::{Core, Trailer};
 use crate::runtime::task::{Cell, Harness, Header, Id, Schedule, State};
-use crate::task::TaskPriority;
+use crate::task::Meta;
 
 use std::ptr::NonNull;
 use std::task::{Poll, Waker};
@@ -158,7 +158,7 @@ const fn get_id_offset(
 }
 
 impl RawTask {
-    pub(super) fn new<T, S>(task: T, scheduler: S, id: Id, priority: TaskPriority) -> RawTask
+    pub(super) fn new<T, S>(task: T, scheduler: S, id: Id, priority: Meta) -> RawTask
     where
         T: Future,
         S: Schedule,

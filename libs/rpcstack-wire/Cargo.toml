@@ -1,0 +1,12 @@
+[package]
+name = "rpcstack-wire"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Header section codec of the rpcstack module framework"
+
+# Leaf crate: must not depend on tonic, http, hyper, tokio or any masa crate.
+[dependencies]
+serde = "1"
+bincode = "1.3"
+base64 = "0.21"

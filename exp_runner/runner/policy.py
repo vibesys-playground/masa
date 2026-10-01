@@ -66,6 +66,13 @@ _STACK_MAP: dict[str, str] = {
     "stack_custom": "custom",
 }
 
+# Run-queue override: `sched_custom` runs `custom::Queue` in
+# libs/rpcstack-sched/src/custom.rs instead of the queue the scheduling flag
+# selects, so that flag no longer describes the scheduler on its own.
+_SCHED_MAP: dict[str, str] = {
+    "sched_custom": "custom",
+}
+
 # Flags that do not affect plotting/display metadata.
 _IGNORED_FLAGS = {"deadline_equals_slack", "estimator", "trace_queue_latency"}
 
@@ -140,6 +147,7 @@ class Policy:
         drop: Drop mechanism — "e2e_slo" (abort past-SLO requests).
         ac:   Admission control — "slack" or "rajomon".
         stack: Policy stack override — "custom" for the agent-owned stack.
+        sched: Run-queue override — "custom" for the agent-owned queue.
     """
 
     raw: str
@@ -149,6 +157,7 @@ class Policy:
     ac: str | None
     deadline_equals_slack: bool
     stack: str | None = None
+    sched: str | None = None
 
     # ── construction ───────────────────────────────────────────────────
 
@@ -184,6 +193,12 @@ class Policy:
                 stack = val
                 break
 
+        sched: str | None = None
+        for flag, val in _SCHED_MAP.items():
+            if flag in flags:
+                sched = val
+                break
+
         # Estimator — only relevant when any slack-related flag is present.
         uses_slack = prio == "slack" or ac == "slack"
         est: str | None = None
@@ -214,6 +229,7 @@ class Policy:
             ac=ac,
             deadline_equals_slack="deadline_equals_slack" in flags,
             stack=stack,
+            sched=sched,
         )
 
     # ── display ────────────────────────────────────────────────────────
@@ -236,8 +252,17 @@ class Policy:
         if self.prio is None:
             return self.raw
 
-        if self.stack == "custom":
-            return self._format_display_name("Custom stack", [_PRIO_DISPLAY[self.prio]])
+        custom_parts = [
+            name
+            for name, is_custom in (
+                ("stack", self.stack == "custom"),
+                ("scheduler", self.sched == "custom"),
+            )
+            if is_custom
+        ]
+        if custom_parts:
+            base = " + ".join(f"Custom {part}" for part in custom_parts)
+            return self._format_display_name(base, [_PRIO_DISPLAY[self.prio]])
 
         if self.ac == "slack":
             deviations: list[str] = []
@@ -330,9 +355,11 @@ class Policy:
             ("e2e_slo_mt_mq", "e2e_slo"): "#0072B2",
             ("e2e_slo_mt_mq", "slack"): "#009E73",
         }
-        # A custom stack must not share a color with the Masa policy its flags
-        # would otherwise describe.
-        color = None if self.stack else _color_map.get((self.prio, self.drop))
+        # A custom stack or scheduler must not share a color with the Masa
+        # policy its flags would otherwise describe.
+        color = (
+            None if self.stack or self.sched else _color_map.get((self.prio, self.drop))
+        )
         if color is not None:
             return color
         return _FALLBACK_COLORS[_stable_index(self.raw, len(_FALLBACK_COLORS))]
@@ -345,7 +372,9 @@ class Policy:
         the same color still get a distinct point symbol. Unrecognized policies
         fall back to a stable marker indexed by the raw policy string.
         """
-        marker = None if self.stack else _MARKER_MAP.get((self.prio, self.ac))
+        marker = (
+            None if self.stack or self.sched else _MARKER_MAP.get((self.prio, self.ac))
+        )
         if marker is not None:
             return marker
         return _FALLBACK_MARKERS[_stable_index(self.raw, len(_FALLBACK_MARKERS))]

@@ -5,7 +5,7 @@ use crate::runtime::{
     blocking, driver,
     task::{self, JoinHandle},
 };
-use crate::task::TaskPriority;
+use crate::task::Meta;
 use crate::util::RngSeedGenerator;
 
 use std::fmt;
@@ -39,7 +39,7 @@ impl Handle {
         me: &Arc<Self>,
         future: F,
         id: task::Id,
-        priority: TaskPriority,
+        priority: Meta,
     ) -> JoinHandle<F::Output>
     where
         F: crate::future::Future + Send + 'static,
@@ -56,7 +56,7 @@ impl Handle {
         me: &Arc<Self>,
         future: T,
         id: task::Id,
-        priority: TaskPriority,
+        priority: Meta,
     ) -> JoinHandle<T::Output>
     where
         T: Future + Send + 'static,

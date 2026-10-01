@@ -19,6 +19,7 @@ known = [
   "trace_queue_latency",
   "deadline_equals_slack",
   "stack_custom",
+  "sched_custom",
 ]
 
 [implies]
@@ -59,6 +60,8 @@ check = [
   "sched_mt_multiqueue,abort_slo",
   "sched_slo,stack_custom",
   "sched_pred,abort_slack,ac_pred,est_mean_var,stack_custom",
+  "sched_slo,sched_custom",
+  "sched_pred,abort_slack,ac_pred,est_mean_var,sched_custom",
 ]
 test = [
   "sched_slo,trace_queue_latency",
@@ -66,6 +69,7 @@ test = [
   "sched_slo,ac_rajomon",
   "sched_pred,abort_slo,ac_pred,est_mean_var",
   "sched_slo,stack_custom",
+  "sched_slo,sched_custom",
 ]
 
 [app_crates]
@@ -96,6 +100,7 @@ est_mean_var = ["masa/est_mean_var"]
 trace_queue_latency = ["masa/trace_queue_latency"]
 deadline_equals_slack = ["masa/deadline_equals_slack"]
 stack_custom = ["masa/stack_custom"]
+sched_custom = ["masa/sched_custom"]
 
 [python_policy.prio]
 sched_fifo = "fifo"
@@ -134,6 +139,9 @@ ac_rajomon = "rajomon"
 
 [python_policy.stack]
 stack_custom = "custom"
+
+[python_policy.sched]
+sched_custom = "custom"
 
 [cargo."libs/masa-core/Cargo.toml"]
 features = [
@@ -194,7 +202,7 @@ signal_slack = ["masa", "estimator", "ac_pred", "masa-core/signal_slack"]
 estimator = ["masa-core/estimator", "tokio"]
 sched_pred = ["estimator", "sched_slo", "masa-core/sched_pred"]
 ac_pred = ["estimator", "masa-core/ac_pred"]
-ac_rajomon = ["masa", "masa-core/ac_rajomon", "tokio"]
+ac_rajomon = ["masa", "masa-core/ac_rajomon", "tokio", "dep:rajomon"]
 deadline_equals_slack = ["sched_pred"]
 stack_custom = ["masa"]
 
@@ -219,6 +227,7 @@ features = [
   "trace_queue_latency",
   "deadline_equals_slack",
   "stack_custom",
+  "sched_custom",
 ]
 
 [cargo."libs/masa/Cargo.toml".deps]
@@ -299,3 +308,4 @@ trace_queue_latency = [
 ]
 deadline_equals_slack = ["sched_pred", "masa-policy/deadline_equals_slack"]
 stack_custom = ["hyper/masa", "tonic/masa", "masa-policy/stack_custom"]
+sched_custom = ["hyper/masa", "tonic/masa", "tokio/sched_custom"]

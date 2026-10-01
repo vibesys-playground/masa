@@ -1,0 +1,14 @@
+[package]
+name = "rpcstack"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Module framework for RPC policy stacks: module trait, stack composition, extensions, decision points, outcomes and wire data"
+
+# Must not depend on any masa crate, hyper, or a tokio runtime policy crate.
+[dependencies]
+rpcstack-wire = { path = "../rpcstack-wire" }
+tonic = { path = "../tonic/tonic", default-features = false, features = ["transport"] }
+http = "0.2"
+serde = "1"
+smallvec = "1"

@@ -16,7 +16,7 @@ use app_utils::{
 };
 use gen::{get_compose_post_request, get_register_user_request};
 use masa::MasaRequestExt;
-use masa::{Context, ContextBuilder};
+use masa::{ContextBuilder, RootContext};
 use socialnet::frontend;
 use socialnet::frontend::frontend_service_client::FrontendServiceClient;
 
@@ -71,7 +71,7 @@ impl HandlerOuter<SocialnetClient> for RequestHandler {
         &self,
         rng: StdRng,
         client: FrontendServiceClient<Channel>,
-        ctx: Context,
+        ctx: RootContext,
         trace: bool,
     ) -> String {
         match self {
@@ -115,9 +115,9 @@ impl RequestType<SocialnetClient> for ComposePostRequestType {
         &self,
         rng: &mut StdRng,
         mut client: FrontendServiceClient<Channel>,
-        ctx: &Context,
+        ctx: &RootContext,
     ) -> Result<Response<Self::ResponseType>, Status> {
-        let r = tonic::Request::new(get_compose_post_request(rng)).with_masa_context(ctx);
+        let r = ctx.attach(tonic::Request::new(get_compose_post_request(rng)));
         client.compose_post(r).await
     }
 
@@ -143,9 +143,9 @@ impl RequestType<SocialnetClient> for RegisterUserRequestType {
         &self,
         rng: &mut StdRng,
         mut client: FrontendServiceClient<Channel>,
-        ctx: &Context,
+        ctx: &RootContext,
     ) -> Result<Response<Self::ResponseType>, Status> {
-        let r = tonic::Request::new(get_register_user_request(rng)).with_masa_context(ctx);
+        let r = ctx.attach(tonic::Request::new(get_register_user_request(rng)));
         client.register_user(r).await
     }
 

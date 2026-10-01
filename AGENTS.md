@@ -87,12 +87,15 @@ Key policy flags:
 **Policy stack override:**
 - `stack_custom`: Replaces the feature-selected `MasaStack` with the agent-owned `AgentStack` in `libs/masa-policy/src/agent/`, for every app. Requires a scheduling feature. Starts equal to `MasaStack`. See `docs/POLICY_MODULES.md`.
 
-`scripts/check.sh` checks: default (no features), `sched_fifo`, `sched_fifo,abort_slo`, `sched_slo`, `sched_slo,abort_slo`, `sched_tailclipper,abort_slo`, `sched_slo,ac_rajomon`, `sched_slo,ac_pred,est_mean_var`, `sched_pred,abort_slo,ac_pred,est_mean_var`, `sched_pred,abort_slack,est_mean_var`, `sched_pred,signal_slack,ac_pred,est_mean_var`, `sched_pred,abort_slack,ac_pred,est_mean_var,deadline_equals_slack`, `sched_mt`, `sched_mt,abort_slo`, `sched_mt,ac_rajomon`, `sched_mt_multiqueue`, `sched_mt_multiqueue,abort_slo`, `sched_slo,stack_custom`, `sched_pred,abort_slack,ac_pred,est_mean_var,stack_custom`.
+**Run queue override:**
+- `sched_custom`: Makes the current-thread Tokio runtime use `rpcstack_sched::custom::Queue` (`libs/rpcstack-sched/src/custom.rs`) instead of the queue the scheduling feature selects. Requires a scheduling feature (`compile_error!` otherwise) so that Hyper passes priorities; composes with `stack_custom` and all modifiers; ignored by `sched_mt*`. Starts as a copy of the priority-heap queue. See `docs/POLICY_MODULES.md`.
+
+`scripts/check.sh` checks: default (no features), `sched_fifo`, `sched_fifo,abort_slo`, `sched_slo`, `sched_slo,abort_slo`, `sched_tailclipper,abort_slo`, `sched_slo,ac_rajomon`, `sched_slo,ac_pred,est_mean_var`, `sched_pred,abort_slo,ac_pred,est_mean_var`, `sched_pred,abort_slack,est_mean_var`, `sched_pred,signal_slack,ac_pred,est_mean_var`, `sched_pred,abort_slack,ac_pred,est_mean_var,deadline_equals_slack`, `sched_mt`, `sched_mt,abort_slo`, `sched_mt,ac_rajomon`, `sched_mt_multiqueue`, `sched_mt_multiqueue,abort_slo`, `sched_slo,stack_custom`, `sched_pred,abort_slack,ac_pred,est_mean_var,stack_custom`, `sched_slo,sched_custom`, `sched_pred,abort_slack,ac_pred,est_mean_var,sched_custom`.
 
 ## Architecture
 
 ### Data Flow
-1. Client's `Hooks` calculates child deadline/priority, serializes `Context` to JSON in HTTP/2 header (`ctx` key)
+1. Client's `Hooks` run the module stack; Masa's budget modules write the child's `Context` (deadline/priority) as the `budget` section of the HTTP/2 `ctx` header, beside the other modules' sections
 2. Server-side `hyper` parses `ctx` header, extracts `PriorityHint`
 3. Under the `hyper/masa` feature, Hyper's default HTTP/2 stream executor calls `tokio::spawn_with_prio(handler_future, priority)`
 4. Modified `tokio` runtime enqueues task in a priority queue (binary heap); lower `PriorityHint` value = higher priority
@@ -104,20 +107,29 @@ Key policy flags:
 
 ### libs/masa & libs/masa-core
 Application-facing Masa API and core types:
-- `libs/masa-core`: `Context`/`ContextBuilder`, `PriorityHint`, `Prioritize`, and latency distribution utilities
+- `libs/masa-core`: `Context` (the budget module's wire data), `PriorityHint`, `Prioritize`, and latency distribution utilities
 - `libs/masa`: `DefaultHooks` selection by feature flag, context creation helpers, load-balanced transport, and policy-facing reexports from `masa-policy`
 - `DefaultHooks`: `tonic::masa::noop::NoopHooks` with no scheduling features; `masa_policy::PolicyHooks` (= `PolicyHooks<MasaStack>`) when scheduling features are enabled; `PolicyHooks<AgentStack>` with `stack_custom`
 
+### libs/rpcstack-wire, libs/rpcstack & libs/rpcstack-tonic
+The module framework. It owns every mechanism and has no policy (no deadlines, priorities or tokens; a request is known only by service and method name), and depends on no Masa crate, hyper or tokio runtime policy crate (`scripts/validate_rpcstack_boundary.py`). Each crate has a README listing its public surface:
+- `libs/rpcstack-wire`: leaf crate with the `ctx` header section codec (`sections`, `find_section`, `encode_payload`, `decode_payload`, `push_section`, `describe`, `HEADER_NAME`); each section is `<name>:<base64 bincode>`; `masa-core` uses it so Hyper can read one section selectively
+- `libs/rpcstack`: `Module` (with `requires`), `ModuleServer`, `ServerInit`, `build_server` (checks that `Module::NAME` is unique across the stack and dependencies are met), `Extensions`/`ChildState` (typed per-request and per-child maps, with typed decision points: `propose`/`proposals`/`resolve`), `Outcome`/`ChildOutcome`, `Stack`, `policy_stack!`, and the wire codec (`WireIn`, `WireOut`, `EncodedSection`, `peek`, `describe`). `Module::POLL_HOOKS` (default `true`) lets a module that keeps both poll hooks at their defaults opt out, so a stack with no poll hooks skips the per-poll lock; debug builds panic if a module declares `false` and overrides one. It owns hook order: pre-hooks head first and short-circuiting; `seal_child_rpc`, `after_child_rpc` and `finalize` tail first, only for modules whose pre-hook ran; `after_poll` head first
+- `libs/rpcstack-tonic`: `PolicyHooks<S>` — tonic's `Hooks` for any stack; owns request plumbing and dispatches every hook through the module stack `S`. Also `RequestExt`/`ResponseExt`/`StatusExt` for module wire data and method-name overrides
+- Tests of the framework use toy modules and no Masa types: `libs/rpcstack/tests`, `libs/rpcstack-tonic/tests`
+
+### libs/rajomon
+Rajomon admission control (feature `ac_rajomon`) as a module built on the framework alone: `RajomonModule`, `RajomonWire`, the process-wide `RAJOMON_STATE` (prices, price-update worker), the client-side `CLIENT_TOKEN_BUCKET`, and `RajomonParams`. It depends on `rpcstack` and generic libraries, never on a Masa crate or hyper, and no framework crate depends on it (`scripts/validate_rpcstack_boundary.py`). `libs/rajomon/tests/toy_stack.rs` runs it in a stack of the framework alone. `masa-policy` depends on it under `ac_rajomon` and re-exports its public items. See `libs/rajomon/README.md`
+
 ### libs/masa-policy/
-Concrete policy hook implementation and metadata helpers:
-- `hooks.rs`: `PolicyHooks<S>` — unified hook implementation; owns context plumbing and dispatches every hook through the module stack `S`
-- `layer/mod.rs`: Public policy module API — `Layer`, `LayerServer`, `LayerChild`, `ChildRpcContext`, `ServerInit`, `Stack`, `policy_stack!`
+Masa's own policy, written against the framework; it re-exports the framework under the same paths (`masa_policy::Module`, `policy_stack!`, `PolicyHooks<S = MasaStack>`):
+- `hooks.rs`: `PolicyHooks<S = MasaStack>` and the contexts as aliases of the `rpcstack-tonic` types
 - `masa_stack.rs`: `MasaStack`, the only place where features choose modules (disabled slots are `()`)
 - `agent/`: `AgentStack`, the agent-owned stack selected by `stack_custom`; new policies for apps and experiments go here
-- `layer/`: Built-in modules — `e2e_deadline_guard.rs`, `oracle.rs`, `queue_latency.rs`, `est/` (estimation), `admission/` (predictive + rajomon)
-- To add a policy, write a new module implementing `Layer` and compose a stack; do not add branches to `hooks.rs`. See `docs/POLICY_MODULES.md`
-- `context_ext.rs`: Context serialization helpers and `MasaRequestExt`/`MasaResponseExt`/`MasaStatusExt`
-- Depends on `tonic` for hook traits and gRPC boundary types; vendored tonic does not depend on `masa-policy`
+- `module/`: Built-in modules — `budget.rs` (request facts, and the child budget as a decision the budget module resolves; `ContextBuilder` and the root priority formula), `e2e_deadline_guard.rs`, `oracle.rs`, `queue_latency.rs`, `est/` (estimation), `admission/` (predictive; Rajomon lives in `libs/rajomon`)
+- To add a policy, write a new module implementing `Module` and compose a stack; do not add branches to the hook adapter. See `docs/POLICY_MODULES.md`
+- `context_ext.rs`: Context (budget section) helpers and `MasaRequestExt`/`MasaResponseExt`/`MasaStatusExt` (the framework's request helpers plus the Masa context)
+- Depends on `rpcstack`, `rpcstack-tonic`, `tonic` and, under `ac_rajomon`, `rajomon`; vendored tonic does not depend on `masa-policy` or on the framework crates
 
 ### libs/tonic/tonic/src/masa/
 Tonic-specific glue:

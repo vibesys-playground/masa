@@ -27,11 +27,13 @@ default = []
 
 scheduler_trace = []
 static = []
-sched_prio = []
-tailclipper = ["sched_prio"]
+sched_prio = ["rpcstack-sched/sched_prio"]
+tailclipper = ["sched_prio", "rpcstack-sched/tailclipper"]
 sched_mt = ["sched_prio"]
 sched_mt_multiqueue = ["sched_mt", "dep:multiqueue-prio-queue"]
 sched_fifo = []
+sched_custom = ["rpcstack-sched/sched_custom"]
+lifecycle_trace = ["rpcstack-sched/lifecycle_trace"]
 # enable everything
 full = [
   "fs",
@@ -99,6 +101,7 @@ time = []
 tokio-macros = { version = "~2.2.0", optional = true }
 
 pin-project-lite = "0.2.11"
+rpcstack-sched = { path = "../../rpcstack-sched" }
 
 # Everything else is optional...
 bytes = { version = "1.0.0", optional = true }

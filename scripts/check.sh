@@ -9,6 +9,7 @@ PYTHON_BIN="${PYTHON:-python3}"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/validate_policy_matrix.py"
 "$PYTHON_BIN" "$REPO_ROOT/scripts/validate_tonic_masa_boundary.py"
+"$PYTHON_BIN" "$REPO_ROOT/scripts/validate_rpcstack_boundary.py"
 
 flag_combos=(
     "sched_fifo"
@@ -31,6 +32,8 @@ flag_combos=(
     "sched_mt_multiqueue,abort_slo"
     "sched_slo,stack_custom"
     "sched_pred,abort_slack,ac_pred,est_mean_var,stack_custom"
+    "sched_slo,sched_custom"
+    "sched_pred,abort_slack,ac_pred,est_mean_var,sched_custom"
 )
 
 CONTINUE_ON_ERROR=false
@@ -79,9 +82,14 @@ check_tests() {
     echo "Checking tests for Masa crates and apps"
     # List of packages to check tests for (excluding forked libs that fail strict checks)
     local packages=(
+        "rpcstack-wire"
+        "rpcstack"
+        "rpcstack-tonic"
+        "rajomon"
         "masa"
         "masa-core"
         "masa-policy"
+        "masa-semantics"
         "masa-integration-tests"
         "hotel"
         "socialnet"
@@ -111,9 +119,36 @@ check_tests() {
             *) continue ;;
         esac
 
+        # sched_custom selects Tokio's run queue; masa-policy has no such feature.
+        flags="${flags/,sched_custom/}"
         local featured_cmd="cargo check --tests --quiet -p masa-policy --features $flags"
         echo "Running: $featured_cmd"
         cargo check --tests --quiet -p masa-policy --features "$flags" || return $?
+    done
+
+    # The benchmarks are never run here (too noisy and slow), only compiled so
+    # they cannot rot. Queue features select Tokio's run queue, which the
+    # benchmark crate's `spawn_poll` measures.
+    echo "========================================================="
+    echo "Checking the masa-bench benchmarks"
+    local bench_flags
+    for bench_flags in \
+        "" \
+        "sched_slo,ac_rajomon,queue_custom" \
+        "sched_pred,abort_slack,ac_pred,est_mean_var,trace_queue_latency,queue_tailclipper"; do
+        echo "Running: cargo check --quiet -p masa-bench --benches --all-targets --features '$bench_flags'"
+        cargo check --quiet -p masa-bench --benches --all-targets --features "$bench_flags" || return $?
+    done
+
+    echo "========================================================="
+    echo "Checking masa-semantics tests for every flag combination"
+    for flags in "${flag_combos[@]}"; do
+        case "$flags" in
+            *sched_mt*) continue ;;
+        esac
+
+        echo "Running: cargo check --tests --quiet -p masa-semantics --features $flags"
+        cargo check --tests --quiet -p masa-semantics --features "$flags" || return $?
     done
 
     return 0

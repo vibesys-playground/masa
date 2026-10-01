@@ -1,0 +1,15 @@
+[package]
+name = "rpcstack-tonic"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Runs an rpcstack module stack as tonic's request hooks"
+
+# Must not depend on any masa crate, hyper, or a tokio runtime policy crate.
+[dependencies]
+rpcstack = { path = "../rpcstack" }
+tonic = { path = "../tonic/tonic", default-features = false, features = ["transport"] }
+http = "0.2"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }

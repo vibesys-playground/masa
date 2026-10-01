@@ -9,7 +9,7 @@ use std::{
 };
 
 use masa::MasaRequestExt;
-use masa_core::{time_now, ContextBuilder};
+use masa_core::time_now;
 use masa_integration_tests::pb::{
     child_service_client::ChildServiceClient,
     child_service_server::{ChildService, ChildServiceServer},
@@ -17,6 +17,7 @@ use masa_integration_tests::pb::{
     parent_service_server::*,
     Input1, Input2, Output1, Output2,
 };
+use masa_policy::ContextBuilder;
 use tonic::{
     masa::{ClientHooks, Hooks, ParentHooks, ServerHooks},
     transport::Server,

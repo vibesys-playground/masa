@@ -17,13 +17,16 @@ use std::time::Duration;
 use masa::MasaRequestExt;
 #[cfg(feature = "stack_custom")]
 use masa::MasaResponseExt;
-use masa_core::{time_now, Context, ContextBuilder};
+use masa_core::time_now;
 use masa_integration_tests::pb::{
     child_service_client::ChildServiceClient,
     child_service_server::{ChildService, ChildServiceServer},
     Input1, Input2, Output1, Output2,
 };
-use masa_policy::{policy_stack, Layer, PolicyHooks};
+use masa_policy::{
+    policy_stack, BudgetInfo, BudgetModule, ContextBuilder, Extensions, Module, Outcome,
+    PolicyHooks, Requires, WireIn, WireOut,
+};
 use tonic::metadata::MetadataValue;
 use tonic::transport::Server;
 use tonic::{Code, CowGrpcMethod, Request, Response, Status};
@@ -69,18 +72,28 @@ impl ChildService for RecordingSvc {
 
 /// Rejects one request id before the handler is first polled.
 #[derive(Debug)]
-struct RejectBlocked;
+struct RejectBlocked(BudgetInfo);
 
-impl Layer for RejectBlocked {
+impl Module for RejectBlocked {
     type Server = ();
-    type Child = ();
+    const NAME: &'static str = "RejectBlocked";
+    type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context) -> Self {
-        Self
+    fn requires(requires: &mut Requires) {
+        requires.module::<BudgetModule>();
     }
 
-    fn before_poll<Ret>(&self, ctx: &Context) -> Result<(), Result<Response<Ret>, Status>> {
-        if ctx.request_id() == BLOCKED_REQUEST_ID {
+    fn new(
+        _method: &CowGrpcMethod,
+        _server: &(),
+        _wire: &WireIn<'_>,
+        ext: &mut Extensions,
+    ) -> Self {
+        Self(BudgetInfo::of(ext))
+    }
+
+    fn before_poll<Ret>(&self, _ext: &mut Extensions) -> Result<(), Result<Response<Ret>, Status>> {
+        if self.0.request_id() == BLOCKED_REQUEST_ID {
             return Err(Err(Status::resource_exhausted("rejected by custom stack")));
         }
         Ok(())
@@ -91,15 +104,27 @@ impl Layer for RejectBlocked {
 #[derive(Debug)]
 struct StampResponse;
 
-impl Layer for StampResponse {
+impl Module for StampResponse {
     type Server = ();
-    type Child = ();
+    const NAME: &'static str = "StampResponse";
+    type Wire = ();
 
-    fn new(_method: &CowGrpcMethod, _server: &(), _ctx: &mut Context) -> Self {
+    fn new(
+        _method: &CowGrpcMethod,
+        _server: &(),
+        _wire: &WireIn<'_>,
+        _ext: &mut Extensions,
+    ) -> Self {
         Self
     }
 
-    fn finalize<Ret>(&self, _ctx: &mut Context, result: &mut Result<Response<Ret>, Status>) {
+    fn finalize<Ret>(
+        &self,
+        result: &mut Result<Response<Ret>, Status>,
+        _outcome: Outcome<'_>,
+        _wire: &mut WireOut,
+        _ext: &Extensions,
+    ) {
         if let Ok(response) = result {
             response
                 .metadata_mut()
@@ -108,7 +133,7 @@ impl Layer for StampResponse {
     }
 }
 
-type TestStack = policy_stack![RejectBlocked, StampResponse];
+type TestStack = policy_stack![BudgetModule, RejectBlocked, StampResponse];
 
 // ── Tests ───────────────────────────────────────────────────────────────
 

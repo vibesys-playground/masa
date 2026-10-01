@@ -1,4 +1,4 @@
-use crate::task::{JoinHandle, TaskPriority};
+use crate::task::{meta_for_unannotated_spawn, JoinHandle, Meta, TaskPriority};
 
 use std::future::Future;
 
@@ -166,12 +166,25 @@ cfg_rt! {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        spawn_with_prio(future, TaskPriority::infra())
+        let meta = meta_for_unannotated_spawn(crate::runtime::task::current_task_meta().as_ref());
+        spawn_with_meta(future, meta)
     }
 
     /// Like spawn(), but associates the task with a priority.
+    ///
+    /// Equivalent to [`spawn_with_meta`].
     #[track_caller]
     pub fn spawn_with_prio<F>(future: F, priority: TaskPriority) -> JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        spawn_with_meta(future, priority)
+    }
+
+    /// Like spawn(), but associates the task with scheduling metadata.
+    #[track_caller]
+    pub fn spawn_with_meta<F>(future: F, priority: Meta) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
@@ -221,7 +234,7 @@ cfg_rt! {
     pub(super) fn spawn_inner<T>(
         future: T,
         name: Option<&str>,
-        priority: TaskPriority,
+        priority: Meta,
     ) -> JoinHandle<T::Output>
     where
         T: Future + Send + 'static,

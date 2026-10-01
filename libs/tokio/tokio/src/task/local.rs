@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::Poll;
 
-use crate::task::TaskPriority;
+use crate::task::{meta_for_unannotated_spawn, Meta};
 use pin_project_lite::pin_project;
 
 cfg_rt! {
@@ -368,7 +368,8 @@ cfg_rt! {
         F: Future + 'static,
         F::Output: 'static,
     {
-        spawn_local_inner(future, None, TaskPriority::infra())
+        let meta = meta_for_unannotated_spawn(crate::runtime::task::current_task_meta().as_ref());
+        spawn_local_inner(future, None, meta)
     }
 
 
@@ -376,7 +377,7 @@ cfg_rt! {
     pub(super) fn spawn_local_inner<F>(
         future: F,
         name: Option<&str>,
-        priority: TaskPriority,
+        priority: Meta,
     ) -> JoinHandle<F::Output>
     where F: Future + 'static,
           F::Output: 'static
@@ -650,7 +651,8 @@ impl LocalSet {
         F: Future + 'static,
         F::Output: 'static,
     {
-        let handle = self.context.spawn(future, name, TaskPriority::infra());
+        let meta = meta_for_unannotated_spawn(crate::runtime::task::current_task_meta().as_ref());
+        let handle = self.context.spawn(future, name, meta);
 
         // Because a task was spawned from *outside* the `LocalSet`, wake the
         // `LocalSet` future to execute the new task, if it hasn't been woken.
@@ -941,7 +943,7 @@ impl Context {
         &self,
         future: F,
         name: Option<&str>,
-        priority: TaskPriority,
+        priority: Meta,
     ) -> JoinHandle<F::Output>
     where
         F: Future + 'static,

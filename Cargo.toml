@@ -32,7 +32,14 @@ members = [
   "libs/masa-core",
   "libs/masa-policy",
   "libs/masa",
+  "libs/masa-semantics",
   "libs/multiqueue-prio-queue",
+  "libs/rpcstack-sched",
+  "libs/rpcstack",
+  "libs/rpcstack-tonic",
+  "libs/rpcstack-wire",
+  "libs/rajomon",
+  "libs/masa-bench",
 
   # evaluation applications
   "apps/hotel",

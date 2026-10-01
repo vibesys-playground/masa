@@ -15,12 +15,12 @@ use crate::server::server::{new_svc::NewSvcTask, Watcher};
 #[cfg(all(feature = "server", any(feature = "http1", feature = "http2")))]
 use crate::service::HttpService;
 use http::HeaderMap;
-use tokio::task::TaskPriority;
+use tokio::task::{meta_for_unannotated_spawn, TaskPriority};
 
 #[cfg(feature = "server")]
 pub trait ConnStreamExec<F, B: HttpBody>: Clone {
     fn h2_stream_priority(&self, _headers: &HeaderMap) -> TaskPriority {
-        TaskPriority::infra()
+        meta_for_unannotated_spawn(None)
     }
 
     fn execute_h2stream_with_prio(&mut self, fut: H2Stream<F, B>, prio: TaskPriority);
@@ -99,7 +99,7 @@ where
             Exec::Default => {
                 TaskPriority::new(masa_core::read_priority_from_headers(headers).value())
             }
-            Exec::Executor(_) => TaskPriority::infra(),
+            Exec::Executor(_) => meta_for_unannotated_spawn(None),
         }
     }
 
@@ -168,16 +168,21 @@ mod h2_priority_tests {
     fn default_executor_uses_infra_priority() {
         let headers = HeaderMap::new();
 
-        assert_eq!(default_priority(&headers), TaskPriority::infra(),);
+        assert_eq!(default_priority(&headers), meta_for_unannotated_spawn(None));
     }
 
     #[test]
     #[cfg(feature = "masa")]
     fn default_executor_reads_context_priority_header() {
         let mut headers = HeaderMap::new();
-        let ctx = masa_core::ContextBuilder::new("test.Service/Rpc", 7)
-            .prio_hint(masa_core::PriorityHint::new(42))
-            .build();
+        let ctx = masa_core::Context::new(
+            "test.Service/Rpc",
+            7,
+            0,
+            0,
+            0,
+            masa_core::PriorityHint::new(42),
+        );
         headers.insert(
             masa_core::MASA_CONTEXT_HEADER,
             ctx.to_header_string().parse().unwrap(),
