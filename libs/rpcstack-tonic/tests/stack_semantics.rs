@@ -1,19 +1,17 @@
 // The framework's composition rules, shown with toy modules that only record
 // what the framework tells them: which modules run each hook and in what
 // order, who learns about a rejection, how decisions are proposed and
-// resolved, and what a stack must declare. None of these modules is a Masa
+// resolved, and what a stack must declare. None of these modules is a real
 // policy; the rules hold for any stack.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use masa_core::{time_now, PriorityHint};
-use masa_policy::{
-    get_masa_context_from_metadata, policy_stack, BudgetModule, ChildOutcome, ChildPriority,
-    ChildState, ContextBuilder, DecisionClosed, Extensions, MasaRequestExt, MasaStack, Module,
-    ModuleStack, Outcome, PolicyHooks, Requires, ServerContext, WireIn, WireOut,
-    MASA_CONTEXT_HEADER,
+use rpcstack::{
+    policy_stack, ChildOutcome, ChildState, DecisionClosed, Extensions, Module, ModuleStack,
+    Outcome, Requires, WireIn, WireOut,
 };
+use rpcstack_tonic::{PolicyHooks, RequestExt, ServerContext};
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
 use tonic::{Code, CowGrpcMethod, GrpcMethod, Request, Response, Status};
@@ -167,17 +165,7 @@ recorder!(RejectsPoll, "rejects_poll", reject_poll);
 // ── Driving a request ───────────────────────────────────────────────────
 
 fn inbound() -> http::Request<()> {
-    let now = time_now();
-    let ctx = ContextBuilder::new("stack-api", 1)
-        .slo(1_000_000)
-        .gateway_entry(now)
-        .deadline(now + 1_000_000)
-        .prio_hint(PriorityHint::new(now + 1_000_000))
-        .build();
-    http::Request::builder()
-        .header(MASA_CONTEXT_HEADER, ctx.to_header_string())
-        .body(())
-        .unwrap()
+    http::Request::new(())
 }
 
 fn begin<S: ModuleStack>(service: &'static str) -> Parent<S> {
@@ -694,7 +682,7 @@ macro_rules! owner {
                 _ext: &mut Extensions,
             ) -> Result<(), Status> {
                 let proposals = child.resolve::<Cost>();
-                let rule: fn(&[masa_policy::Proposal<Cost>]) -> Option<u64> = $rule;
+                let rule: fn(&[rpcstack::Proposal<Cost>]) -> Option<u64> = $rule;
                 child_wire
                     .put::<Self>(&Settled {
                         cost: rule(&proposals),
@@ -953,17 +941,17 @@ fn decisions_of_different_types_are_independent() {
 
 // ── Atomicity across concurrent children ────────────────────────────────
 
-/// Proposes the priority carried in the request's `x-priority` header.
+/// Proposes the cost carried in the request's `x-cost` header.
 #[derive(Debug)]
-struct PriorityFromHeader;
+struct CostFromHeader;
 
-impl Module for PriorityFromHeader {
+impl Module for CostFromHeader {
     type Server = ();
-    const NAME: &'static str = "priority_from_header";
+    const NAME: &'static str = "cost_from_header";
     type Wire = ();
 
     fn requires(requires: &mut Requires) {
-        requires.module::<BudgetModule>();
+        requires.module::<LastWins>();
     }
 
     fn new(_m: &CowGrpcMethod, _s: &(), _w: &WireIn<'_>, _e: &mut Extensions) -> Self {
@@ -978,13 +966,13 @@ impl Module for PriorityFromHeader {
         _child_wire: &mut WireOut,
         _ext: &mut Extensions,
     ) -> Result<(), Status> {
-        let priority: u64 = request
+        let cost: u64 = request
             .metadata()
-            .get("x-priority")
+            .get("x-cost")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse().ok())
-            .expect("the test sets x-priority");
-        child.propose(ChildPriority(PriorityHint::new(priority)))?;
+            .expect("the test sets x-cost");
+        child.propose(Cost(cost))?;
         Ok(())
     }
 }
@@ -1017,7 +1005,7 @@ impl Module for Dawdles {
 
 #[test]
 fn concurrent_child_rpcs_each_get_their_own_decision() {
-    type S = policy_stack![BudgetModule, PriorityFromHeader, Dawdles];
+    type S = policy_stack![LastWins, CostFromHeader, Dawdles];
     let service = "atomic";
     let parent = Arc::new(begin::<S>(service));
 
@@ -1030,14 +1018,13 @@ fn concurrent_child_rpcs_each_get_their_own_decision() {
                     let mut request = Request::new(());
                     request
                         .metadata_mut()
-                        .insert("x-priority", wanted.to_string().parse().unwrap());
+                        .insert("x-cost", wanted.to_string().parse().unwrap());
                     let mut child = Child::<S>::new(child_method(service), &request);
                     parent
                         .before_child_rpc(child_method(service), &mut request, &mut child)
                         .unwrap();
-                    let sent = get_masa_context_from_metadata(request.metadata())
-                        .expect("child carries a budget");
-                    assert_eq!(sent.prio_hint(), PriorityHint::new(wanted));
+                    let sent = request.get_wire::<LastWins>().expect("owner sealed");
+                    assert_eq!(sent.cost, Some(wanted));
                 }
             })
         })
@@ -1045,35 +1032,4 @@ fn concurrent_child_rpcs_each_get_their_own_decision() {
     for thread in threads {
         thread.join().unwrap();
     }
-}
-
-// ── Masa's default stack needs no writer module ─────────────────────────
-
-#[test]
-fn the_default_stack_sends_the_child_a_budget() {
-    let service = "masa-default";
-    let now = time_now();
-    let ctx = ContextBuilder::new("stack-api", 1)
-        .slo(1_000_000)
-        .gateway_entry(now)
-        .deadline(now + 1_000_000)
-        .build();
-    let req = http::Request::builder()
-        .header(MASA_CONTEXT_HEADER, ctx.to_header_string())
-        .body(())
-        .unwrap();
-    let parent = Parent::<MasaStack>::begin(
-        GrpcMethod::new(service, "Parent"),
-        &req,
-        Arc::new(Server::<MasaStack>::new(service)),
-    );
-    let mut request = Request::new(());
-    let mut child = Child::<MasaStack>::new(child_method(service), &request);
-    parent
-        .before_child_rpc(child_method(service), &mut request, &mut child)
-        .unwrap();
-
-    let sent = request.get_masa_context().expect("child carries a budget");
-    assert_eq!(sent.request_id(), 1);
-    assert_eq!(sent.slo(), 1_000_000);
 }

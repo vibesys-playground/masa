@@ -7,12 +7,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use masa_core::time_now;
-use masa_policy::ContextBuilder;
-use masa_policy::{
-    policy_stack, BudgetModule, ChildOutcome, ChildState, Extensions, MasaResponseExt,
-    MasaStatusExt, Module, Outcome, PolicyHooks, WireIn, WireOut, MASA_CONTEXT_HEADER,
+use rpcstack::{
+    policy_stack, ChildOutcome, ChildState, Extensions, Module, Outcome, WireIn, WireOut,
+    HEADER_NAME,
 };
+use rpcstack_tonic::{PolicyHooks, ResponseExt, StatusExt};
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
 use tonic::{CowGrpcMethod, GrpcMethod, Request, Response, Status};
@@ -99,19 +98,10 @@ impl Module for Mute {
     }
 }
 
-type Stack = policy_stack![BudgetModule, Sum, Mute];
+type Stack = policy_stack![Sum, Mute];
 
 fn root_request() -> http::Request<()> {
-    let now = time_now();
-    let ctx = ContextBuilder::new("wire-api", 1)
-        .slo(1_000_000)
-        .gateway_entry(now)
-        .deadline(now + 1_000_000)
-        .build();
-    http::Request::builder()
-        .header(MASA_CONTEXT_HEADER, ctx.to_header_string())
-        .body(())
-        .unwrap()
+    http::Request::new(())
 }
 
 fn begin(
@@ -135,11 +125,12 @@ fn send_to_child(
     parent
         .before_child_rpc(method, &mut request, &mut child)
         .unwrap();
-    let value = request.metadata().get(MASA_CONTEXT_HEADER).unwrap();
-    let arrived = http::Request::builder()
-        .header(MASA_CONTEXT_HEADER, value.to_str().unwrap())
-        .body(())
-        .unwrap();
+    let mut arrived = http::Request::new(());
+    if let Some(value) = request.metadata().get(HEADER_NAME) {
+        arrived
+            .headers_mut()
+            .insert(HEADER_NAME, value.to_str().unwrap().parse().unwrap());
+    }
     (arrived, child)
 }
 

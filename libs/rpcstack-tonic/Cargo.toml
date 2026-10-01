@@ -10,3 +10,6 @@ description = "Runs an rpcstack module stack as tonic's request hooks"
 rpcstack = { path = "../rpcstack" }
 tonic = { path = "../tonic/tonic", default-features = false, features = ["transport"] }
 http = "0.2"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }

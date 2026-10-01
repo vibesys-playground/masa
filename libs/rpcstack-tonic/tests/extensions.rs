@@ -3,13 +3,11 @@
 
 use std::sync::Arc;
 
-use masa_core::time_now;
-use masa_policy::ContextBuilder;
-use masa_policy::{
-    policy_stack, ChildOutcome, ChildState, Extensions, MasaResponseExt, MissingDependency, Module,
-    ModuleServer, ModuleStack, Outcome, PolicyHooks, ServerContext, ServerInit, WireIn, WireOut,
-    MASA_CONTEXT_HEADER,
+use rpcstack::{
+    policy_stack, ChildOutcome, ChildState, Extensions, MissingDependency, Module, ModuleServer,
+    ModuleStack, Outcome, ServerInit, WireIn, WireOut,
 };
+use rpcstack_tonic::{PolicyHooks, ResponseExt, ServerContext};
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
 use tonic::{CowGrpcMethod, GrpcMethod, Request, Response, Status};
@@ -19,16 +17,7 @@ type Parent<S> = <PolicyHooks<S> as Hooks>::ParentContext;
 type Child<S> = <PolicyHooks<S> as Hooks>::ChildContext;
 
 fn root_request() -> http::Request<()> {
-    let now = time_now();
-    let ctx = ContextBuilder::new("ext-api", 1)
-        .slo(1_000_000)
-        .gateway_entry(now)
-        .deadline(now + 1_000_000)
-        .build();
-    http::Request::builder()
-        .header(MASA_CONTEXT_HEADER, ctx.to_header_string())
-        .body(())
-        .unwrap()
+    http::Request::new(())
 }
 
 // ── Per-request extensions ──────────────────────────────────────────────

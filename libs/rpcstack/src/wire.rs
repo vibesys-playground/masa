@@ -42,7 +42,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 use rpcstack_wire as codec;
-use rpcstack_wire::HEADER_NAME;
+pub use rpcstack_wire::HEADER_NAME;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tonic::metadata::{Ascii, MetadataMap, MetadataValue};
