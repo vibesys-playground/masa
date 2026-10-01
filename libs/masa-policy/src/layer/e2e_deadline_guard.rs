@@ -11,8 +11,8 @@ use masa_core::time_now;
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
 use super::{
-    require_budget, BudgetInfo, Extensions, Layer, LayerChild, LayerServer, MissingDependency,
-    ServerInit,
+    BudgetInfo, BudgetLayer, ChildOutcome, ChildState, Extensions, Layer, LayerServer,
+    MissingDependency, Requires, ServerInit,
 };
 
 // ── Core Handler ──────────────────────────────────────────────────────
@@ -108,8 +108,7 @@ impl SloAbortHandler {
 pub struct E2eDeadlineGuardServer;
 
 impl LayerServer for E2eDeadlineGuardServer {
-    fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
-        require_budget(init)?;
+    fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
         Ok(Self)
     }
 }
@@ -123,9 +122,12 @@ pub struct E2eDeadlineGuardLayer {
 
 impl Layer for E2eDeadlineGuardLayer {
     type Server = E2eDeadlineGuardServer;
-    type Child = E2eDeadlineGuardChild;
     const NAME: &'static str = "e2e_deadline_guard";
     type Wire = ();
+
+    fn requires(requires: &mut Requires) {
+        requires.module::<BudgetLayer>();
+    }
 
     fn new(
         method: &CowGrpcMethod,
@@ -150,7 +152,7 @@ impl Layer for E2eDeadlineGuardLayer {
     fn before_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _child_ctx: &mut E2eDeadlineGuardChild,
+        _child: &mut ChildState,
         _request: &mut tonic::Request<T>,
         _child_wire: &mut WireOut,
         _ext: &mut Extensions,
@@ -165,12 +167,15 @@ impl Layer for E2eDeadlineGuardLayer {
     fn after_child_rpc<T>(
         &self,
         child_method: &CowGrpcMethod,
-        _response: &Result<Response<T>, Status>,
+        outcome: ChildOutcome<'_, T>,
         _response_wire: &WireIn<'_>,
-        _child_ctx: &E2eDeadlineGuardChild,
+        _child: &ChildState,
         _ext: &Extensions,
     ) -> Result<(), Status> {
-        self.handler.set_last_child(child_method.clone());
+        // A rejected child was never sent, so it is not the request's last child.
+        if outcome.sent().is_some() {
+            self.handler.set_last_child(child_method.clone());
+        }
         Ok(())
     }
 
@@ -186,17 +191,6 @@ impl Layer for E2eDeadlineGuardLayer {
             }
         }
         Ok(())
-    }
-}
-
-// ── Per-Child-RPC ───────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub struct E2eDeadlineGuardChild;
-
-impl LayerChild for E2eDeadlineGuardChild {
-    fn new() -> Self {
-        Self
     }
 }
 

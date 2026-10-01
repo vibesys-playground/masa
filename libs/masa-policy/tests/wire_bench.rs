@@ -35,7 +35,6 @@ macro_rules! bench_module {
 
         impl Layer for $name {
             type Server = ();
-            type Child = ();
             const NAME: &'static str = $key;
             type Wire = $wire;
 

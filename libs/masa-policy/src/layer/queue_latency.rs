@@ -14,7 +14,10 @@ use std::sync::{Mutex, OnceLock};
 use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Response, Status};
 
-use super::{Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit};
+use super::{
+    ChildOutcome, ChildState, Extensions, Layer, LayerServer, MissingDependency, Outcome,
+    ServerInit,
+};
 
 // ── Wire data ───────────────────────────────────────────────────────────
 
@@ -60,7 +63,6 @@ pub struct QueueLatencyLayer {
 
 impl Layer for QueueLatencyLayer {
     type Server = QueueLatencyServer;
-    type Child = QueueLatencyChild;
     const NAME: &'static str = "queue_latency";
     type Wire = QueueLatencyWire;
 
@@ -99,15 +101,16 @@ impl Layer for QueueLatencyLayer {
     fn after_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        response: &Result<Response<T>, Status>,
+        outcome: ChildOutcome<'_, T>,
         response_wire: &WireIn<'_>,
-        _child_ctx: &QueueLatencyChild,
+        _child: &ChildState,
         _ext: &Extensions,
     ) -> Result<(), Status> {
-        // Only successful responses have ever contributed to the totals.
-        if response.is_err() {
+        // Only successful responses have ever contributed to the totals; a
+        // rejected child was never sent.
+        let Some(Ok(_)) = outcome.sent() else {
             return Ok(());
-        }
+        };
         let child = response_wire
             .get::<Self>()
             .unwrap_or_else(|err| panic!("{err}"));
@@ -131,6 +134,7 @@ impl Layer for QueueLatencyLayer {
     fn finalize<Ret>(
         &self,
         _result: &mut Result<Response<Ret>, Status>,
+        _outcome: Outcome<'_>,
         wire: &mut WireOut,
         _ext: &Extensions,
     ) {
@@ -145,14 +149,5 @@ impl Layer for QueueLatencyLayer {
             queue_lengths,
         })
         .unwrap_or_else(|err| panic!("{err}"));
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct QueueLatencyChild;
-
-impl LayerChild for QueueLatencyChild {
-    fn new() -> Self {
-        Self
     }
 }

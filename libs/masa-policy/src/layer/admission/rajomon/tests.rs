@@ -384,9 +384,9 @@ fn test_layer_records_child_price_response_and_updates_parent_max() {
     crate::layer::Layer::after_child_rpc(
         &layer,
         &child,
-        &response,
+        crate::layer::ChildOutcome::Sent(&response),
         &response_wire,
-        &RajomonChild,
+        &crate::layer::ChildState::new(),
         &crate::layer::Extensions::new(),
     )
     .unwrap();

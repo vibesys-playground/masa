@@ -13,9 +13,9 @@ use masa_policy::modules::EstimationLayer;
 use masa_policy::ContextBuilder;
 use masa_policy::{
     get_wire_from_metadata, policy_stack, set_masa_context_in_metadata, set_wire_in_metadata,
-    BudgetChildWriter, BudgetLayer, EstimationInfo, EstimationRequestWire, EstimationResponseWire,
-    EstimationWire, Extensions, Layer, MasaRequestExt, MasaResponseExt, MasaStatusExt, PolicyHooks,
-    RootMethod, WireIn, WireOut, MASA_CONTEXT_HEADER,
+    BudgetLayer, EstimationInfo, EstimationRequestWire, EstimationResponseWire, EstimationWire,
+    Extensions, Layer, LayerStack, MasaRequestExt, MasaResponseExt, MasaStatusExt, Outcome,
+    PolicyHooks, RootMethod, SubtreeHealth, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
@@ -57,7 +57,7 @@ fn request_with(metadata: &MetadataMap) -> http::Request<()> {
 
 /// Begin `method` on a fresh server, call one child, and return the outbound
 /// child request.
-fn call_child<S: Layer + 'static>(
+fn call_child<S: LayerStack>(
     service: &'static str,
     method: &'static str,
     req: &http::Request<()>,
@@ -66,7 +66,7 @@ fn call_child<S: Layer + 'static>(
     issue_child(&parent).0
 }
 
-fn begin<S: Layer + 'static>(
+fn begin<S: LayerStack>(
     service: &'static str,
     method: &'static str,
     req: &http::Request<()>,
@@ -81,7 +81,7 @@ fn child_method() -> GrpcMethod {
 
 /// Issue a child RPC from `parent`; returns the outbound request and the child
 /// context to hand back with the response.
-fn issue_child<S: Layer + 'static>(parent: &Parent<S>) -> (Request<()>, Child<S>) {
+fn issue_child<S: LayerStack>(parent: &Parent<S>) -> (Request<()>, Child<S>) {
     let mut request = Request::new(());
     // The oracle refuses child RPCs that lack its headers.
     #[cfg(feature = "sched_oracle")]
@@ -231,7 +231,6 @@ struct Probe(Seen);
 
 impl Layer for Probe {
     type Server = ();
-    type Child = ();
     const NAME: &'static str = "probe";
     type Wire = Seen;
 
@@ -252,6 +251,7 @@ impl Layer for Probe {
     fn finalize<Ret>(
         &self,
         _result: &mut Result<Response<Ret>, Status>,
+        _outcome: Outcome<'_>,
         wire: &mut WireOut,
         _ext: &Extensions,
     ) {
@@ -259,7 +259,7 @@ impl Layer for Probe {
     }
 }
 
-type Probed = policy_stack![BudgetLayer, EstimationLayer, Probe, BudgetChildWriter];
+type Probed = policy_stack![BudgetLayer, EstimationLayer, Probe];
 
 fn probe(req: &http::Request<()>) -> Seen {
     let server = Arc::new(Server::<Probed>::new("probed"));
@@ -313,13 +313,15 @@ mod ordering {
 
     #[test]
     fn admission_before_estimation_is_reported_at_construction() {
-        type Misordered = policy_stack![PredAdmissionLayer, EstimationLayer];
+        type Misordered = policy_stack![BudgetLayer, PredAdmissionLayer, EstimationLayer];
         let err = masa_policy::ServerContext::<Misordered>::try_new("misordered")
             .expect_err("admission needs estimation earlier in the stack");
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("PredAdmissionServer"),
-            "message names the module: {err}"
+            message.contains("PredAdmissionLayer") && message.contains("EstimationLayer"),
+            "message names both modules: {message}"
         );
+        assert!(message.contains("comes later"), "{message}");
     }
 
     #[test]
@@ -523,45 +525,40 @@ fn a_report_makes_a_grandparent_see_the_whole_subtree() {
 
 // ── The subtree outcome through extensions ──────────────────────────────
 
-/// Reports, at finalize, whether estimation's published info saw an early
-/// return or signal in the subtree.
+/// Reports, at finalize, whether estimation recorded an early return or
+/// signal in the subtree. Estimation finalizes after this module (post-hooks
+/// run in reverse stack order), so the tally must already be complete.
 #[derive(Debug)]
-struct OutcomeProbe(EstimationInfo);
+struct OutcomeProbe;
 
 impl Layer for OutcomeProbe {
     type Server = ();
-    type Child = ();
     const NAME: &'static str = "outcome_probe";
     type Wire = bool;
 
-    fn new(_m: &CowGrpcMethod, _s: &(), _w: &WireIn<'_>, ext: &mut Extensions) -> Self {
-        Self(
-            ext.get::<EstimationInfo>()
-                .expect("estimation runs first")
-                .clone(),
-        )
+    fn requires(requires: &mut masa_policy::Requires) {
+        requires.module::<EstimationLayer>();
+    }
+
+    fn new(_m: &CowGrpcMethod, _s: &(), _w: &WireIn<'_>, _ext: &mut Extensions) -> Self {
+        Self
     }
 
     fn finalize<Ret>(
         &self,
         _result: &mut Result<Response<Ret>, Status>,
+        _outcome: Outcome<'_>,
         wire: &mut WireOut,
-        _ext: &Extensions,
+        ext: &Extensions,
     ) {
-        wire.put::<Self>(&self.0.subtree_had_early_return_or_signal())
-            .unwrap();
+        wire.put::<Self>(&SubtreeHealth::of(ext).any()).unwrap();
     }
 }
 
-type Outcome = policy_stack![
-    BudgetLayer,
-    EstimationLayer,
-    OutcomeProbe,
-    BudgetChildWriter
-];
+type Subtree = policy_stack![BudgetLayer, EstimationLayer, OutcomeProbe];
 
 fn subtree_outcome(child: Option<Result<Response<()>, Status>>) -> bool {
-    let parent = begin::<Outcome>("outcome", "Method", &inbound(None));
+    let parent = begin::<Subtree>("outcome", "Method", &inbound(None));
     if let Some(mut response) = child {
         let (_request, child_ctx) = issue_child(&parent);
         // `sched_pred` passes a failed child's status on; what it does with

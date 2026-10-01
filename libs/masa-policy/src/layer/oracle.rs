@@ -10,16 +10,15 @@ use masa_core::{PriorityHint, ORACLE_CHILD_WORK_US_HEADER, ORACLE_REMAINING_AFTE
 use tonic::{CowGrpcMethod, Request, Status};
 
 use super::{
-    require_budget, BudgetInfo, ChildBudget, Extensions, Layer, LayerChild, LayerServer,
-    MissingDependency, ServerInit,
+    BudgetInfo, BudgetLayer, ChildDeadline, ChildPriority, ChildState, Extensions, Layer,
+    LayerServer, MissingDependency, Requires, ServerInit,
 };
 
 #[derive(Debug)]
 pub struct OracleServer;
 
 impl LayerServer for OracleServer {
-    fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
-        require_budget(init)?;
+    fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
         Ok(Self)
     }
 }
@@ -31,9 +30,12 @@ pub struct OracleLayer {
 
 impl Layer for OracleLayer {
     type Server = OracleServer;
-    type Child = OracleChild;
     const NAME: &'static str = "oracle";
     type Wire = ();
+
+    fn requires(requires: &mut Requires) {
+        requires.module::<BudgetLayer>();
+    }
 
     fn new(
         _method: &CowGrpcMethod,
@@ -49,10 +51,10 @@ impl Layer for OracleLayer {
     fn before_child_rpc<T>(
         &self,
         child_method: &CowGrpcMethod,
-        _child_ctx: &mut OracleChild,
+        child: &mut ChildState,
         request: &mut Request<T>,
         _child_wire: &mut WireOut,
-        ext: &mut Extensions,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
         let hint = OracleHint::from_request(request, child_method)?;
         let completion_deadline = self
@@ -61,20 +63,10 @@ impl Layer for OracleLayer {
             .saturating_sub(hint.remaining_after_us);
         let latest_start = completion_deadline.saturating_sub(hint.child_work_us);
 
-        let child = ChildBudget::of(ext);
-        child.deadline = completion_deadline;
-        child.prio_hint = PriorityHint::new(latest_start);
+        child.propose(ChildDeadline(completion_deadline))?;
+        child.propose(ChildPriority(PriorityHint::new(latest_start)))?;
 
         Ok(())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct OracleChild;
-
-impl LayerChild for OracleChild {
-    fn new() -> Self {
-        Self
     }
 }
 

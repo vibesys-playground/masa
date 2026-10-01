@@ -13,52 +13,144 @@ policy is a new module, composed into a new stack. It does not need edits to
 | Item | Role |
 |---|---|
 | `Layer` | Per-request state and lifecycle hooks. All hooks default to no-ops. |
-| `Layer::Server: LayerServer` | Per-service state, built once by `LayerServer::new(&mut ServerInit)`, which returns `Err(MissingDependency)` when a prerequisite module is missing or misordered. |
-| `Layer::Child: LayerChild` | Per-child-RPC state, created before `before_child_rpc` and passed back to `after_child_rpc`. |
-| `BudgetLayer`, `BudgetChildWriter` | Masa's budget modules: the request's facts and time budget, and the child's. They bracket the stack. See "Budget modules". |
-| `Layer::NAME`, `Layer::Wire` | The module's own wire data: a serde type and the unique name of its section in the `ctx` header. `()` means none. See "Wire data". |
+| `Layer::Server: LayerServer` | Per-service state, built once by `LayerServer::new(&mut ServerInit)`, which returns `Err(MissingDependency)` when the server state it needs is missing. |
+| `Layer::requires` | Declares the modules that must precede this one in the stack; checked when the server state is built. |
+| `ChildState` | A typed map for one child RPC (like `Extensions`, but per child): what a module keeps for that child, keyed by type. |
+| `Extensions::propose` / `proposals` / `resolve` | Typed decision points: many modules propose, the owner resolves. See "Decisions". |
+| `Outcome`, `ChildOutcome` | How the request, or one child RPC, ended; passed to `finalize` and `after_child_rpc`. |
+| `BudgetLayer` | Masa's budget module: the request's facts and time budget, and the child's. Owns the `ChildDeadline` and `ChildPriority` decisions. See "Budget module". |
+| `Layer::NAME`, `Layer::Wire` | The module's name (in `Outcome` and the wire envelope) and its own wire data: a serde type whose section is named `NAME` in the `ctx` header. `()` means none. See "Wire data". |
 | `WireIn` / `WireOut` | Typed access to the wire sections: `wire.get::<Self>()` on an inbound message (a request, or a child's response), `out.put::<Self>(&value)` on an outbound one. |
 | `Extensions` | A per-request typed map (one value per type) that the hooks of all modules share; the framework never reads or fills it. |
 | `ServerInit` | Service name plus a typed store: `provide::<T>()` publishes server state, `get::<T>()` and `require::<T>()` read state from an earlier module. |
-| `()` | The empty module. Terminates stacks and fills disabled slots. |
+| `()` | The empty module. Fills disabled slots. |
 
-Lifecycle, per inbound request:
+### Hook order
 
-| Hook | When | Can |
-|---|---|---|
-| `Layer::new` | Request arrives | Read the inbound wire data (`wire.get::<Self>()`, `None` if absent); read or insert into `Extensions` |
-| `before_poll` | Before each handler poll | Abort (`Err`), reprioritize the task (`tokio::task::reprioritize`) |
-| `before_child_rpc` | Before each outbound RPC | Reject the child (`Err`), write the child's wire data, share per-child decisions through `Extensions` (the child's deadline and priority: `ChildBudget`) |
-| `after_child_rpc` | Child response received | Record latencies, read the child response's wire data (`response_wire.get::<Self>()`) |
-| `after_poll` | After each handler poll | Abort (`Err`), e.g. on `Pending` past deadline |
-| `finalize` | Before response serialization | Write the response's wire data |
+The framework, not the module, decides in which order a stack's modules run a
+hook and which of them run it. With a stack `[A, B, C]`:
 
-Modules run in stack order and the first `Err` short-circuits the rest.
-`Extensions` is passed mutably to `new`, `before_poll` and `before_child_rpc`,
-and shared to the `after_*` hooks and `finalize`. No hook receives a request
-context: the framework carries no request, child or response data of its own,
-so a child request or a response carries exactly the sections the modules
-`put`.
+| Hook | When | Order | Modules that run it |
+|---|---|---|---|
+| `new` | Request arrives | A, B, C | all |
+| `before_poll` | Before each handler poll | A, B, C | until the first `Err`, which ends the request |
+| `before_child_rpc` | Before each outbound RPC | A, B, C | until the first `Err`, which rejects the child |
+| `seal_child_rpc` | Once per child, after every `before_child_rpc` accepted it | C, B, A | until the first `Err`, which rejects the child |
+| `after_child_rpc` | The child is over: answered (`ChildOutcome::Sent`) or rejected, not sent (`ChildOutcome::Rejected`) | C, B, A | every module whose `before_child_rpc` ran, whichever way the child ended |
+| `after_poll` | After each handler poll | A, B, C | until the first `Err`, which ends the request |
+| `finalize` | Before response serialization | C, B, A | all |
+
+Two rules explain the table.
+
+- **Pre-hooks go head first, post-hooks tail first, and a module gets a
+  post-hook only if its pre-hook ran.** A child RPC rejected by `B` is
+  reported to `B` (the rejecter included) and then to `A`, never to `C`, whose
+  `before_child_rpc` did not run. So a module that counts a child in
+  `before_child_rpc` always sees it end in `after_child_rpc`, sent or not, and
+  a module nearer the head of the stack wraps everything after it. `finalize`
+  pairs with `new`, which cannot reject, so every module finalizes; the
+  `Outcome` it is given says which module, if any, ended the request.
+- **A hook that decides goes in stack order, a hook that reports goes in
+  reverse.** `before_poll` and `after_poll` decide whether the request goes on;
+  the first module in stack order to say no wins, before and after the poll
+  alike (`after_poll` is not reversed: a poll has no nesting to unwind, and
+  reversing it would change which module's rejection wins). Only the hooks that
+  close what a pre-hook opened are reversed.
+
+`Extensions` is passed mutably to `new`, `before_poll`, `before_child_rpc` and
+`seal_child_rpc`, and shared to the other hooks. `ChildState` is passed mutably
+to the first two child hooks and shared to the rest. The request-level map is
+guarded by a lock held for a whole `before_child_rpc` plus `seal_child_rpc`
+call, so each child is set up atomically. No hook receives a request context:
+the framework carries no request, child or response data of its own, so a child
+request or a response carries exactly the sections the modules `put`.
+
+An `Err` from `after_child_rpc` does not skip the other modules' hooks. For a
+sent child the first `Err` in hook order (the tail-most module's) fails the
+child RPC at the handler; for a rejected child the rejection stands.
+
+`Outcome` is `Handled` (the handler produced the result, which may itself be an
+error, such as a status built from a rejected child), `Rejected { by, status }`
+(a module's `before_poll` or `after_poll` ended the request with a status; `by`
+is that module's `NAME`) or `Replied { by }` (it ended the request with a
+response). It is recorded when the module ends the request and does not change
+if a module rewrites the result in `finalize`, so an observer sees both the
+cause (`outcome`) and the final `result`.
+
+## Dependencies between modules
+
+A module that reads what another module provides declares it:
+
+```rust
+impl Layer for MyAdmission {
+    // ...
+    fn requires(requires: &mut Requires) {
+        requires.module::<BudgetLayer>().module::<EstimationLayer>();
+    }
+}
+```
+
+`ServerContext::try_new` (called by `ServerHooks::new`, which panics with the
+same message) walks the stack and fails if a required module is absent or comes
+later, with an error naming both: *module `MyAdmission` requires module
+`EstimationLayer` earlier in the stack, but it comes later; move
+`EstimationLayer` before `MyAdmission`*. A module placed in an illegal position
+therefore fails when the server is built, never at the first request. Server
+resources (`ServerInit::provide`/`require`) are for state that a module's
+server shares with another's, such as estimation's latency estimators; their
+`MissingDependency` error names the missing type and the module that needed it.
+
+## Decisions
+
+Several modules often contribute to one decision: the deadline a child
+request carries, say. The framework supplies the mechanism and no rule:
+
+1. The *owner* defines the decision type, usually a newtype, and documents how
+   it combines proposals (`ChildDeadline(Timestamp)`, owned by `BudgetLayer`).
+2. Any module proposes with `child.propose(value)?` (or `ext.propose` on the
+   request map) while the child is being set up. The framework records the value
+   with the proposing module's `NAME`, in the order the proposals were made.
+   `propose` borrows the map only for the call, so it never conflicts with
+   other reads.
+3. A module that runs later can read what earlier ones proposed with
+   `proposals::<T>()`, which returns the values with their provenance
+   (`Proposal { by, value }`).
+4. The owner calls `resolve::<T>()` once, in `seal_child_rpc`, which the
+   framework runs after every `before_child_rpc` (in reverse order, so a module
+   near the head of the stack, the budget module, sees what all the others
+   proposed). It applies its own rule to the proposals: last wins, the
+   smallest, or `Err` to veto the child call. `resolve` closes the decision.
+5. A proposal that arrives after `resolve` (a module before the owner proposing
+   in its own `seal_child_rpc`) fails with `DecisionClosed`, which converts into
+   a `Status::internal` naming the proposer, the owner and the type.
+
+Per-child decisions live in `ChildState`, so they belong to one child however
+many are in flight, and are dropped with it, including when the child is
+rejected.
 
 ## Example
 
 ```rust
 use masa_core::PriorityHint;
 use masa_policy::{
-    policy_stack, BudgetChildWriter, BudgetLayer, ChildBudget, Extensions, Layer, PolicyHooks,
-    WireIn, WireOut,
+    policy_stack, BudgetLayer, ChildDeadline, ChildPriority, ChildState, Extensions, Layer,
+    PolicyHooks, Requires, WireIn, WireOut,
 };
 use tonic::{CowGrpcMethod, Request, Status};
 
-/// Earliest-deadline-first for children: child priority = child deadline.
+/// Earliest-deadline-first for children: propose the child's priority from the
+/// deadline the parent has (here: the parent's own, read from the budget module).
 #[derive(Debug)]
 pub struct ChildEdf;
 
 impl Layer for ChildEdf {
     type Server = ();
-    type Child = ();
     const NAME: &'static str = "child_edf";
     type Wire = ();
+
+    fn requires(requires: &mut Requires) {
+        requires.module::<BudgetLayer>();
+    }
 
     fn new(
         _m: &CowGrpcMethod,
@@ -71,30 +163,51 @@ impl Layer for ChildEdf {
 
     fn before_child_rpc<T>(
         &self,
-        _child: &CowGrpcMethod,
-        _child_ctx: &mut (),
+        _child_method: &CowGrpcMethod,
+        child: &mut ChildState,
         _req: &mut Request<T>,
         _child_wire: &mut WireOut,
         ext: &mut Extensions,
     ) -> Result<(), Status> {
-        let child = ChildBudget::of(ext);
-        child.prio_hint = PriorityHint::new(child.deadline);
+        let deadline = masa_policy::BudgetInfo::of(ext).deadline();
+        child.propose(ChildDeadline(deadline))?;
+        child.propose(ChildPriority(PriorityHint::new(deadline)))?;
         Ok(())
     }
 }
 
-// Reuse Masa's budget pair and estimation module, replace everything else.
+// Reuse Masa's budget and estimation modules, add the new one. The module
+// nearest the end of the stack wins a decision under the budget module's rule.
 pub type MyStack = policy_stack![
     BudgetLayer,
     masa_policy::modules::EstimationLayer,
     ChildEdf,
-    BudgetChildWriter,
 ];
 pub type MyHooks = PolicyHooks<MyStack>;
 ```
 
-`libs/masa-policy/tests/custom_stack.rs` has runnable modules covering
-priority assignment, ordering, short-circuiting, and shared server state.
+An observer is a module that implements only the post-hooks. Placed first, it
+finalizes last and sees every module's rejection:
+
+```rust
+fn finalize<Ret>(
+    &self,
+    result: &mut Result<Response<Ret>, Status>,
+    outcome: Outcome<'_>,
+    _wire: &mut WireOut,
+    _ext: &Extensions,
+) {
+    if let Outcome::Rejected { by, status } = outcome {
+        metrics::rejected(by, status.code());
+    }
+}
+```
+
+`libs/masa-policy/tests/stack_semantics.rs` has runnable toy modules for every
+rule above (order, symmetry, outcome, dependencies, per-child state, decisions
+with different owner rules and a veto, concurrent children), and
+`libs/masa-policy/tests/custom_stack.rs` has modules covering priority
+assignment, ordering, short-circuiting, and shared server state.
 
 ## Wire data
 
@@ -131,7 +244,8 @@ or a response has wire data only for modules that `put` it, including values
 received from the parent or from a child. A module that aggregates over its
 children (Masa's queue-latency module sums the totals in the children's
 responses and reports the sum) reads the child's section in `after_child_rpc`
-and writes its own in `finalize`. The response is read-only there because
+(from `ChildOutcome::Sent`; a rejected child has no response) and writes its own
+in `finalize`. The response is read-only there because
 `response_wire` borrows from it; the error status of a failed child carries
 wire sections the same way a successful response does.
 Each section travels in the `ctx` header as `<NAME>:<base64 JSON>`, joined by
@@ -162,29 +276,34 @@ init.provide(estimators.clone());
 let est = init.require::<LatencyEstimators<_>>()?;
 ```
 
-`PredAdmissionLayer` reads `EstimationLayer`'s estimators this way. A stack
-that orders them wrongly fails when the server is constructed, not while it
-serves requests: `ServerContext::try_new` returns the `MissingDependency`
-error (naming the missing type and the requiring module), and the hooks'
-`ServerHooks::new` panics with its message. Published values should be cheap
-handles (`Arc`-backed) so producer and consumer share one instance.
+`PredAdmissionLayer` reads `EstimationLayer`'s estimators this way. Published
+values should be cheap handles (`Arc`-backed) so producer and consumer share one
+instance.
 
 Per-request data that several modules share goes in `Extensions` instead: a
 module inserts a value in `new`, and modules later in the stack see it in `new`
 and every module sees it in later hooks. Its type is the key, so a module that
-wants private data defines a private type for it. The `after_*` hooks and
-`finalize` get `Extensions` shared, so a value that changes during the request
-is published as a handle with interior mutability (an `Arc` of atomics), not
-re-inserted.
+wants private data defines a private type for it. Values with interior
+mutability (atomics) can change during the request even though the `after_*`
+hooks and `finalize` get `Extensions` shared.
 
-Estimation uses both mechanisms for predictive admission. Estimation's server
-publishes the marker `PublishesEstimationInfo`, which admission's server
-requires, so a stack that puts admission first fails at construction. In `new`,
-estimation inserts an `EstimationInfo` (hop count and ingress flag, root
-method and its registry id, and a live view of the subtree's early-return and
-deadline-signal state); admission reads it in `new`.
+Estimation and predictive admission use both mechanisms. Estimation inserts an
+`EstimationInfo` (hop count and ingress flag, root method and its registry id)
+in `new`, and keeps its running tally of the request's polls and children in
+`Extensions` too. Admission declares `EstimationLayer` in `requires`, reads the
+`EstimationInfo` in `new`, and in `finalize` takes a `SubtreeHealth::of(ext)`
+snapshot: whether a child returned early and whether any hop tripped
+`signal_slack`. Post-hooks run in reverse order, so admission finalizes before
+estimation; that is safe because the tally is updated while the request runs
+(`before_poll`, `after_poll`, `after_child_rpc`), not in estimation's
+`finalize`, so it is complete whichever module finalizes first. What the
+tally cannot hold is this hop's own early return, which only exists once the
+result does: admission reads it from the `result` it is given in `finalize`
+(estimation does the same to decide whether to flush), and recognizes its own
+ingress rejection from `Outcome::Rejected { by: "pred_admission", .. }` rather
+than keeping a flag.
 
-### Budget modules
+### Budget module
 
 A request's API, id, SLO, gateway entry time, deadline and priority (the
 `masa_core::Context`) are the wire data of `BudgetLayer`, in the `budget`
@@ -195,28 +314,23 @@ section. The framework neither reads nor forwards them. `BudgetLayer`:
   inserts a read-only `BudgetInfo` into `Extensions`: API, request id, SLO,
   gateway entry, this hop's deadline, the end-to-end deadline
   (`gateway_entry + slo`) and priority. The guard, estimation, oracle and
-  predictive admission read it in their own `new` and keep a clone. Their
-  servers `require` the `PublishesBudgetInfo` marker, so a stack that puts
-  one of them before `BudgetLayer` fails at construction (`require_budget`).
-- opens a `ChildBudget { deadline, prio_hint }` in `Extensions` at the start
-  of each `before_child_rpc`, set to the parent's own deadline and priority.
-  Modules that decide the child's deadline or priority (estimation, oracle)
-  overwrite its fields with `ChildBudget::of(ext)`; the last writer wins, as
-  the stack order says. Nothing is copied by the framework: a module that
-  writes neither leaves the parent's values.
-- writes the request's own section into the response in `finalize`.
+  predictive admission read it in their own `new` and keep a clone. They
+  declare `BudgetLayer` in `requires`, so a stack that puts one of them before
+  it, or omits it, fails at construction.
+- owns the child's `ChildDeadline` and `ChildPriority` decisions. Modules that
+  decide them (estimation, oracle) `propose` in `before_child_rpc`;
+  `BudgetLayer` resolves both in `seal_child_rpc` with the rule *the last
+  proposal wins* (so the module nearest the end of the stack decides), and the
+  parent's own value when nobody proposed. The two decisions resolve
+  independently, so a module that proposes only a priority leaves the deadline
+  alone. It then writes the child's `budget` section; a child whose deadline and
+  priority equal the parent's gets the parent's encoded section verbatim.
+- writes the request's own section into the response in `finalize`, again
+  reusing the encoded inbound section.
 
-`BudgetChildWriter` writes the child request's `budget` section from the
-parent's facts and the final `ChildBudget`, and removes the `ChildBudget`.
-Hooks run in stack order, so one module cannot both open the child's budget
-before the others and write it after them; hence the pair. **Ordering
-requirement**: `BudgetLayer` first, then every module that reads the budget or
-sets the child's budget, then `BudgetChildWriter` last. A module that calls
-`ChildBudget::of` before `BudgetLayer` or after `BudgetChildWriter` panics on
-its first child RPC with a message saying so. A stack without the pair sends no
-`budget` section to children (the framework sends nothing by default), which
-Masa's next hop cannot serve. When the stack gains reverse-order hooks, the
-pair becomes one module.
+A stack needs no writer module: any stack that starts with `BudgetLayer` sends
+its children a budget section. A stack without it sends none (the framework
+sends nothing by default), which Masa's next hop cannot serve.
 
 Root clients build a `Context` with `masa::ContextBuilder`
 (`masa_policy::ContextBuilder`), which sets the root priority with
@@ -276,9 +390,9 @@ To try a policy:
 1. Write modules as files under `libs/masa-policy/src/agent/` and declare them
    in `agent/mod.rs`.
 2. Set `AgentStack` in `agent/mod.rs`, e.g.
-   `pub type AgentStack = policy_stack![crate::modules::BudgetLayer, crate::modules::EstimationLayer, my_policy::MyAdmission, crate::modules::BudgetChildWriter];`.
-   Keep the budget pair around your modules (see "Budget modules"): without it
-   requests carry no deadline or priority to the next hop.
+   `pub type AgentStack = policy_stack![crate::modules::BudgetLayer, crate::modules::EstimationLayer, my_policy::MyAdmission];`.
+   Keep `BudgetLayer` first (see "Budget module"): without it requests carry no
+   deadline or priority to the next hop.
    It starts as `crate::MasaStack`, so `<features>,stack_custom` behaves like
    `<features>` until you change it.
 3. Build with a scheduling feature plus `stack_custom`, and add the features

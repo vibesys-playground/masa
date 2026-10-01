@@ -33,9 +33,9 @@ pub use context_ext::{
 };
 pub use hooks::{ChildContext, ParentContext, PolicyHooks, ServerContext};
 pub use layer::{
-    require_budget, root_priority, BudgetChildWriter, BudgetInfo, BudgetLayer, ChildBudget,
-    ContextBuilder, Extensions, Layer, LayerChild, LayerServer, MissingDependency,
-    PublishesBudgetInfo, ServerInit, Stack,
+    root_priority, BudgetInfo, BudgetLayer, ChildDeadline, ChildOutcome, ChildPriority, ChildState,
+    ContextBuilder, DecisionClosed, Early, Extensions, Layer, LayerServer, LayerStack,
+    MissingDependency, Outcome, Proposal, Proposals, Rejection, Requires, ServerInit, Stack,
 };
 pub use masa_stack::MasaStack;
 pub use wire::{peek, WireError, WireIn, WireOut};
@@ -43,6 +43,7 @@ pub use wire::{peek, WireError, WireIn, WireOut};
 /// Masa's built-in policy modules, for reuse in custom stacks. Each is
 /// available only when its feature is enabled.
 pub mod modules {
+    pub use crate::layer::BudgetLayer;
     #[cfg(feature = "abort_slo")]
     pub use crate::layer::E2eDeadlineGuardLayer;
     #[cfg(feature = "estimator")]
@@ -55,14 +56,13 @@ pub mod modules {
     pub use crate::layer::QueueLatencyLayer;
     #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
     pub use crate::layer::RajomonLayer;
-    pub use crate::layer::{BudgetChildWriter, BudgetLayer};
 }
 #[cfg(feature = "trace_queue_latency")]
 pub use layer::QueueLatencyWire;
 #[cfg(feature = "estimator")]
 pub use layer::{
-    EstimationInfo, EstimationRequestWire, EstimationResponseWire, EstimationWire,
-    PublishesEstimationInfo, RootMethod,
+    EstimationInfo, EstimationRequestWire, EstimationResponseWire, EstimationWire, RootMethod,
+    SubtreeHealth,
 };
 pub use registry::{MethodId, MethodRegistry};
 

@@ -38,6 +38,7 @@
 //! turn into a panic, as for a malformed header. Sections for modules not
 //! in the stack are ignored.
 
+use std::borrow::Cow;
 use std::fmt;
 
 use masa_core::{wire as codec, MASA_CONTEXT_HEADER};
@@ -125,6 +126,13 @@ impl<'a> WireIn<'a> {
         self.decode_present(M::NAME)
     }
 
+    /// Module `M`'s section exactly as the sender encoded it, or `None` if the
+    /// sender attached none. Together with [`WireOut::put_encoded`] it
+    /// forwards a section without decoding and re-encoding it.
+    pub fn get_encoded<M: Layer>(&self) -> Option<&'a str> {
+        codec::find_section(self.sections, M::NAME)
+    }
+
     fn decode_present<W: DeserializeOwned>(&self, name: &str) -> Result<Option<W>, WireError> {
         let Some(payload) = codec::find_section(self.sections, name) else {
             return Ok(None);
@@ -138,7 +146,7 @@ impl<'a> WireIn<'a> {
 /// The outbound module wire sections of one message, encoded.
 #[derive(Debug, Clone, Default)]
 pub struct WireOut {
-    sections: Vec<(String, String)>,
+    sections: Vec<(Cow<'static, str>, String)>,
 }
 
 impl WireOut {
@@ -152,7 +160,7 @@ impl WireOut {
         let input = WireIn::from_metadata(metadata)?;
         Ok(Self {
             sections: codec::sections(input.sections)
-                .map(|(name, payload)| (name.to_owned(), payload.to_owned()))
+                .map(|(name, payload)| (Cow::Owned(name.to_owned()), payload.to_owned()))
                 .collect(),
         })
     }
@@ -162,16 +170,39 @@ impl WireOut {
         self.put_named(M::NAME, wire)
     }
 
-    fn put_named<W: Serialize>(&mut self, name: &str, wire: &W) -> Result<(), WireError> {
+    /// Set module `M`'s section to `payload`, an encoded payload obtained
+    /// from [`WireIn::get_encoded`] for a section of the same type. Nothing
+    /// is validated: a payload that is not `M::Wire` is a [`WireError`] for
+    /// whoever reads it.
+    pub fn put_encoded<M: Layer>(&mut self, payload: &str) {
+        self.set(Cow::Borrowed(M::NAME), payload.to_owned());
+    }
+
+    fn put_named<W: Serialize>(&mut self, name: &'static str, wire: &W) -> Result<(), WireError> {
         let payload = codec::encode_payload(wire)
             .map_err(|err| WireError::new(format_args!("{name}: {err}")))?;
-        self.sections.retain(|(existing, _)| existing != name);
-        self.sections.push((name.to_owned(), payload));
+        self.set(Cow::Borrowed(name), payload);
         Ok(())
     }
 
+    fn set(&mut self, name: Cow<'static, str>, payload: String) {
+        match self
+            .sections
+            .iter_mut()
+            .find(|(existing, _)| *existing == name)
+        {
+            Some(section) => section.1 = payload,
+            None => self.sections.push((name, payload)),
+        }
+    }
+
     pub(crate) fn header_value(&self) -> String {
-        let mut value = String::new();
+        let len = self
+            .sections
+            .iter()
+            .map(|(name, payload)| name.len() + payload.len() + 2)
+            .sum();
+        let mut value = String::with_capacity(len);
         for (name, payload) in &self.sections {
             codec::push_section(&mut value, name, payload);
         }

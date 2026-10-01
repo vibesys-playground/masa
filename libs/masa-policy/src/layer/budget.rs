@@ -1,4 +1,4 @@
-// Budget modules — Masa's request facts and time budget.
+// Budget module — Masa's request facts and time budget.
 //
 // A request's API, id, SLO, gateway entry time, deadline and priority are the
 // wire data of the budget module (`BudgetLayer`, the `budget` section of the
@@ -6,20 +6,18 @@
 // the inbound request, shares a read-only view with the modules after it, and
 // writes the child's and the response's sections itself.
 //
-// Stack order: `BudgetLayer` first, `BudgetChildWriter` last, everything that
-// reads or tightens the budget in between. The two halves exist because a
-// child request's deadline and priority are decided in `before_child_rpc` by
-// several modules (estimation, oracle), and hooks run in stack order: the
-// first half must open the decision with the parent's values before anyone
-// tightens them, and the second must write the child's section after everyone
-// has. Reverse-order post-hooks would let one module do both.
+// A child request's deadline and priority are decided by several modules
+// (estimation, oracle). They propose values (`ChildDeadline`, `ChildPriority`)
+// in `before_child_rpc`; `BudgetLayer`, the owner of both decisions, resolves
+// them in `seal_child_rpc`, which the framework runs after all of them. Its
+// rule is that the last proposal wins; the framework has no rule.
 
 use std::sync::Arc;
 
 use masa_core::{Api, Context, Latency, PriorityHint, RequestId, Timestamp, BUDGET_SECTION};
 use tonic::{CowGrpcMethod, Response, Status};
 
-use super::{Extensions, Layer, LayerServer, MissingDependency, ServerInit};
+use super::{ChildState, Extensions, Layer, LayerServer, MissingDependency, Outcome, ServerInit};
 use crate::wire::{WireIn, WireOut};
 
 // ── Root priority ───────────────────────────────────────────────────────
@@ -121,17 +119,6 @@ impl ContextBuilder {
 
 // ── Shared with later modules ───────────────────────────────────────────
 
-/// Published by [`BudgetLayer`]'s server so that the modules that read
-/// [`BudgetInfo`] can require it at construction.
-#[derive(Debug, Clone, Copy)]
-pub struct PublishesBudgetInfo;
-
-/// Fail server construction unless [`BudgetLayer`] precedes the module being
-/// built.
-pub fn require_budget(init: &ServerInit) -> Result<(), MissingDependency> {
-    init.require::<PublishesBudgetInfo>().map(|_| ())
-}
-
 /// What the budget module knows about the request being served, read-only:
 /// the facts the sender attached. Inserted into [`Extensions`] by
 /// [`BudgetLayer::new`], so modules after it read it in their own `new`.
@@ -146,8 +133,8 @@ impl From<Context> for BudgetInfo {
 
 impl BudgetInfo {
     /// The view the budget module published for this request. Panics if the
-    /// module is missing; a server that `require`d [`PublishesBudgetInfo`]
-    /// cannot hit that.
+    /// module is missing; a module that declares [`BudgetLayer`] in
+    /// [`Layer::requires`] cannot hit that.
     pub fn of(ext: &Extensions) -> Self {
         ext.get::<Self>()
             .unwrap_or_else(|| {
@@ -191,30 +178,20 @@ impl BudgetInfo {
     }
 }
 
-/// The deadline and priority the next child request will carry. [`BudgetLayer`]
-/// opens it in `before_child_rpc` with the parent's values; modules after it
-/// (estimation, oracle) overwrite the fields they decide, the last writer
-/// winning; [`BudgetChildWriter`] then writes the child's budget section from
-/// it. Reach it with [`ChildBudget::of`].
+/// The deadline the child request will carry: a decision point owned by
+/// [`BudgetLayer`], which resolves it in `seal_child_rpc`. Modules that decide
+/// the child's deadline (estimation, oracle) `propose` a value in
+/// `before_child_rpc`; the budget module takes the last proposal, so the module
+/// nearest the end of the stack wins, and falls back to the parent's own
+/// deadline when nobody proposed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChildBudget {
-    pub deadline: Timestamp,
-    pub prio_hint: PriorityHint,
-}
+pub struct ChildDeadline(pub Timestamp);
 
-impl ChildBudget {
-    /// The child budget being decided in this `before_child_rpc`. Panics if
-    /// the module asking runs before [`BudgetLayer`] or after
-    /// [`BudgetChildWriter`], where it would be ignored or never see it.
-    pub fn of(ext: &mut Extensions) -> &mut Self {
-        ext.get_mut::<Self>().unwrap_or_else(|| {
-            panic!(
-                "no `ChildBudget` is open; a module that sets a child's deadline or priority \
-                 must sit after `BudgetLayer` and before `BudgetChildWriter` in the policy stack"
-            )
-        })
-    }
-}
+/// The priority the child request will carry: a decision point owned by
+/// [`BudgetLayer`], resolved like [`ChildDeadline`] and independently of it, so
+/// a module that decides only one of the two leaves the other alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChildPriority(pub PriorityHint);
 
 // ── Budget ──────────────────────────────────────────────────────────────
 
@@ -222,14 +199,13 @@ impl ChildBudget {
 pub struct BudgetServer;
 
 impl LayerServer for BudgetServer {
-    fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
-        init.provide(PublishesBudgetInfo);
+    fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
         Ok(Self)
     }
 }
 
-/// Reads the request's budget section, shares it, and reports it back in the
-/// response.
+/// Reads the request's budget section, shares it, writes the child's section
+/// and reports the request's own back in the response.
 ///
 /// The request must carry a budget section: every Masa client attaches one, and
 /// a request without it is a misconfigured sender, so `new` panics with a
@@ -237,11 +213,14 @@ impl LayerServer for BudgetServer {
 #[derive(Debug)]
 pub struct BudgetLayer {
     info: BudgetInfo,
+    /// The inbound section as the sender encoded it. The response carries the
+    /// request's own facts unchanged, and so does a child whose budget no
+    /// module changed, so both reuse it instead of encoding the context again.
+    encoded: String,
 }
 
 impl Layer for BudgetLayer {
     type Server = BudgetServer;
-    type Child = ();
     const NAME: &'static str = BUDGET_SECTION;
     type Wire = Context;
 
@@ -255,102 +234,60 @@ impl Layer for BudgetLayer {
             .get::<Self>()
             .unwrap_or_else(|err| panic!("{err}"))
             .unwrap_or_else(|| panic!("{}", masa_core::missing_budget_section_message()));
+        let encoded = wire
+            .get_encoded::<Self>()
+            .unwrap_or_else(|| panic!("{}", masa_core::missing_budget_section_message()))
+            .to_owned();
         let info = BudgetInfo::from(request);
         ext.insert(info.clone());
-        Self { info }
+        Self { info, encoded }
     }
 
-    fn before_child_rpc<T>(
+    fn seal_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _child_ctx: &mut (),
+        child: &mut ChildState,
         _request: &mut tonic::Request<T>,
-        _child_wire: &mut WireOut,
-        ext: &mut Extensions,
+        child_wire: &mut WireOut,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
-        let open = ChildBudget {
-            deadline: self.info.deadline(),
-            prio_hint: self.info.prio_hint(),
-        };
-        match ext.get_mut::<ChildBudget>() {
-            Some(slot) => *slot = open,
-            None => {
-                ext.insert(open);
-            }
+        // The rule for both decisions: the last proposal wins, and with none
+        // the child inherits the parent's own value.
+        let deadline = child
+            .resolve::<ChildDeadline>()
+            .last()
+            .map_or(self.info.deadline(), |proposal| proposal.value.0);
+        let prio_hint = child
+            .resolve::<ChildPriority>()
+            .last()
+            .map_or(self.info.prio_hint(), |proposal| proposal.value.0);
+
+        if deadline == self.info.deadline() && prio_hint == self.info.prio_hint() {
+            child_wire.put_encoded::<Self>(&self.encoded);
+            return Ok(());
         }
+        let context = Context::new(
+            self.info.api().clone(),
+            self.info.request_id(),
+            self.info.slo(),
+            self.info.gateway_entry(),
+            deadline,
+            prio_hint,
+        );
+        child_wire
+            .put::<Self>(&context)
+            .unwrap_or_else(|err| panic!("{err}"));
         Ok(())
     }
 
     fn finalize<Ret>(
         &self,
         _result: &mut Result<Response<Ret>, Status>,
+        _outcome: Outcome<'_>,
         wire: &mut WireOut,
         _ext: &Extensions,
     ) {
-        wire.put::<Self>(&self.info.0)
-            .unwrap_or_else(|err| panic!("{err}"));
-    }
-}
-
-// ── Child budget writer ─────────────────────────────────────────────────
-
-#[derive(Debug)]
-pub struct BudgetChildWriterServer;
-
-impl LayerServer for BudgetChildWriterServer {
-    fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
-        require_budget(init)?;
-        Ok(Self)
-    }
-}
-
-/// Writes the child request's budget section from the parent's facts and the
-/// [`ChildBudget`] that the modules between [`BudgetLayer`] and this one left.
-#[derive(Debug)]
-pub struct BudgetChildWriter {
-    info: BudgetInfo,
-}
-
-impl Layer for BudgetChildWriter {
-    type Server = BudgetChildWriterServer;
-    type Child = ();
-    const NAME: &'static str = "budget_child_writer";
-    type Wire = ();
-
-    fn new(
-        _method: &CowGrpcMethod,
-        _server: &BudgetChildWriterServer,
-        _wire: &WireIn<'_>,
-        ext: &mut Extensions,
-    ) -> Self {
-        Self {
-            info: BudgetInfo::of(ext),
-        }
-    }
-
-    fn before_child_rpc<T>(
-        &self,
-        _child_method: &CowGrpcMethod,
-        _child_ctx: &mut (),
-        _request: &mut tonic::Request<T>,
-        child_wire: &mut WireOut,
-        ext: &mut Extensions,
-    ) -> Result<(), Status> {
-        let child = ext.remove::<ChildBudget>().unwrap_or_else(|| {
-            panic!("`BudgetChildWriter` found no open `ChildBudget`; `BudgetLayer` must precede it")
-        });
-        let context = Context::new(
-            self.info.api().clone(),
-            self.info.request_id(),
-            self.info.slo(),
-            self.info.gateway_entry(),
-            child.deadline,
-            child.prio_hint,
-        );
-        child_wire
-            .put::<BudgetLayer>(&context)
-            .unwrap_or_else(|err| panic!("{err}"));
-        Ok(())
+        wire.put_encoded::<Self>(&self.encoded);
     }
 }
 

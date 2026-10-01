@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Response, Status};
 
 use super::shared::{RajomonSharedState, RAJOMON_STATE};
-use crate::layer::{Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit};
+use crate::layer::{
+    ChildOutcome, ChildState, Extensions, Layer, LayerServer, MissingDependency, Outcome,
+    ServerInit,
+};
 use crate::policy_params::PolicyParams;
 use crate::wire::{WireIn, WireOut};
 
@@ -69,7 +72,6 @@ pub struct RajomonLayer {
 
 impl Layer for RajomonLayer {
     type Server = RajomonServer;
-    type Child = RajomonChild;
     const NAME: &'static str = "rajomon";
     type Wire = RajomonWire;
 
@@ -134,7 +136,7 @@ impl Layer for RajomonLayer {
     fn before_child_rpc<T>(
         &self,
         child_method: &CowGrpcMethod,
-        _child_ctx: &mut RajomonChild,
+        _child: &mut ChildState,
         _request: &mut tonic::Request<T>,
         child_wire: &mut WireOut,
         _ext: &mut Extensions,
@@ -179,11 +181,15 @@ impl Layer for RajomonLayer {
     fn after_child_rpc<T>(
         &self,
         child_method: &CowGrpcMethod,
-        _response: &Result<Response<T>, Status>,
+        outcome: ChildOutcome<'_, T>,
         response_wire: &WireIn<'_>,
-        _child_ctx: &RajomonChild,
+        _child: &ChildState,
         _ext: &Extensions,
     ) -> Result<(), Status> {
+        // A rejected child was never sent, so no price came back.
+        if outcome.sent().is_none() {
+            return Ok(());
+        }
         // Extract and cache downstream prices from the child's response, which
         // may be an error status: the price is read regardless of outcome.
         let price = response_wire
@@ -216,6 +222,7 @@ impl Layer for RajomonLayer {
     fn finalize<Ret>(
         &self,
         _result: &mut Result<Response<Ret>, Status>,
+        _outcome: Outcome<'_>,
         wire: &mut WireOut,
         _ext: &Extensions,
     ) {
@@ -284,16 +291,5 @@ impl RajomonLayer {
             1 => true,
             n => rand::thread_rng().gen_range(0..n) == 0,
         }
-    }
-}
-
-// ── Per-Child-RPC ───────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub struct RajomonChild;
-
-impl LayerChild for RajomonChild {
-    fn new() -> Self {
-        Self
     }
 }

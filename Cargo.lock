@@ -3047,6 +3047,7 @@ dependencies = [
  "rand_distr 0.4.3",
  "serde",
  "serde_json",
+ "smallvec",
  "tokio",
  "tonic",
 ]

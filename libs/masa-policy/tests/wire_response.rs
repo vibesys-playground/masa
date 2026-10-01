@@ -10,8 +10,8 @@ use std::sync::Arc;
 use masa_core::time_now;
 use masa_policy::ContextBuilder;
 use masa_policy::{
-    policy_stack, BudgetChildWriter, BudgetLayer, Extensions, Layer, MasaResponseExt,
-    MasaStatusExt, PolicyHooks, WireIn, WireOut, MASA_CONTEXT_HEADER,
+    policy_stack, BudgetLayer, ChildOutcome, ChildState, Extensions, Layer, MasaResponseExt,
+    MasaStatusExt, Outcome, PolicyHooks, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
@@ -39,7 +39,6 @@ struct Sum {
 
 impl Layer for Sum {
     type Server = ();
-    type Child = ();
     const NAME: &'static str = "sum";
     type Wire = SumWire;
 
@@ -59,9 +58,9 @@ impl Layer for Sum {
     fn after_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _response: &Result<Response<T>, Status>,
+        _outcome: ChildOutcome<'_, T>,
         response_wire: &WireIn<'_>,
-        _child_ctx: &(),
+        _child: &ChildState,
         _ext: &Extensions,
     ) -> Result<(), Status> {
         if let Some(wire) = response_wire.get::<Self>().unwrap() {
@@ -74,6 +73,7 @@ impl Layer for Sum {
     fn finalize<Ret>(
         &self,
         _result: &mut Result<Response<Ret>, Status>,
+        _outcome: Outcome<'_>,
         wire: &mut WireOut,
         _ext: &Extensions,
     ) {
@@ -91,7 +91,6 @@ struct Mute;
 
 impl Layer for Mute {
     type Server = ();
-    type Child = ();
     const NAME: &'static str = "mute";
     type Wire = u8;
 
@@ -100,7 +99,7 @@ impl Layer for Mute {
     }
 }
 
-type Stack = policy_stack![BudgetLayer, Sum, Mute, BudgetChildWriter];
+type Stack = policy_stack![BudgetLayer, Sum, Mute];
 
 fn root_request() -> http::Request<()> {
     let now = time_now();
