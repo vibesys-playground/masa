@@ -142,7 +142,7 @@ prepare_worktree() {
         sed -i 's#^members = \[#members = [\n  "libs/masa-bench",#' "$dir/Cargo.toml"
     fi
     if [[ ! -d "$dir/libs/rpcstack-sched" ]]; then
-        sed -i '/BEGIN rpcstack-only/,/END rpcstack-only/d' "$dir/libs/masa-bench/Cargo.toml"
+        sed -i '/^# BEGIN rpcstack-only$/,/^# END rpcstack-only$/d' "$dir/libs/masa-bench/Cargo.toml"
     fi
     if grep -q 'pub struct RootContext' "$dir/libs/masa/src/lib.rs"; then
         echo ""
@@ -155,7 +155,8 @@ prepare_worktree() {
 # Binaries are named <bench>.<variant>, where the variant is the feature set
 # (commas replaced by +) or the queue.
 build_side() {
-    local side="$1" dir="$WORKDIR/$side" compat="$2"
+    local side="$1" compat="$2"
+    local dir="$WORKDIR/$side"
     local target="$WORKDIR/target-$side"
     local log="$WORKDIR/build-$side.log"
     local has_sched=true

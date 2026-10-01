@@ -9,8 +9,8 @@ description = "Dev-only benchmark suite for the Masa RPC stack: per-RPC hook cos
 # `harness = false` binary that prints `key value` lines; see README.md and
 # `scripts/bench.sh`.
 #
-# Lines between `BEGIN rpcstack-only` and `END rpcstack-only` need crates that
-# older refs do not have; `scripts/bench.sh` deletes them for such refs.
+# Blocks fenced by the rpcstack-only markers below need crates that older refs
+# do not have; `scripts/bench.sh` deletes them for such refs.
 [dependencies]
 masa = { path = "../masa" }
 tonic = { path = "../tonic/tonic" }

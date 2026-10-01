@@ -126,6 +126,20 @@ check_tests() {
         cargo check --tests --quiet -p masa-policy --features "$flags" || return $?
     done
 
+    # The benchmarks are never run here (too noisy and slow), only compiled so
+    # they cannot rot. Queue features select Tokio's run queue, which the
+    # benchmark crate's `spawn_poll` measures.
+    echo "========================================================="
+    echo "Checking the masa-bench benchmarks"
+    local bench_flags
+    for bench_flags in \
+        "" \
+        "sched_slo,ac_rajomon,queue_custom" \
+        "sched_pred,abort_slack,ac_pred,est_mean_var,trace_queue_latency,queue_tailclipper"; do
+        echo "Running: cargo check --quiet -p masa-bench --benches --all-targets --features '$bench_flags'"
+        cargo check --quiet -p masa-bench --benches --all-targets --features "$bench_flags" || return $?
+    done
+
     echo "========================================================="
     echo "Checking masa-semantics tests for every flag combination"
     for flags in "${flag_combos[@]}"; do
