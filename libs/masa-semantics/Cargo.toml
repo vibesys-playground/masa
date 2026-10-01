@@ -12,7 +12,6 @@ http = "0.2"
 rand = "0.8"
 masa = { path = "../masa" }
 masa-core = { path = "../masa-core", features = ["test_clock"] }
-masa-policy = { path = "../masa-policy" }
 tokio = { path = "../tokio/tokio", features = ["rt", "macros", "time", "test-util"] }
 tonic = { path = "../tonic/tonic" }
 
