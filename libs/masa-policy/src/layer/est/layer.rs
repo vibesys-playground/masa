@@ -12,15 +12,15 @@ use masa_core::{PriorityHint, ABORT_SLACK};
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
 use super::super::{
-    require_budget, BudgetInfo, ChildBudget, Extensions, Layer, LayerChild, LayerServer,
-    MissingDependency, ServerInit,
+    BudgetInfo, BudgetLayer, ChildBudget, ChildState, Extensions, Layer, LayerServer,
+    MissingDependency, Outcome, Requires, ServerInit,
 };
 use super::default_estimator::DefaultLatencyEstimator;
 use super::state::{
     child_report, is_early_return_response, ChildRPCTracker, EstimationTracker, LatencyEstimators,
     RequestMetadataTracker,
 };
-use super::wire::{EstimationInfo, EstimationWire, PublishesEstimationInfo, RootMethod};
+use super::wire::{EstimationInfo, EstimationWire, RootMethod};
 use crate::MethodRegistry;
 
 // ── Server ──────────────────────────────────────────────────────────────
@@ -35,10 +35,8 @@ impl LayerServer for EstimationServer {
     /// Publishes the latency estimators so later modules (e.g., predictive
     /// admission control) share this service's estimates.
     fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
-        require_budget(init)?;
         let est = LatencyEstimators::<DefaultLatencyEstimator>::new();
         init.provide(est.clone());
-        init.provide(PublishesEstimationInfo);
         Ok(Self { est })
     }
 }
@@ -54,7 +52,6 @@ impl LayerServer for EstimationServer {
 #[derive(Debug)]
 pub struct EstimationLayer {
     pub(crate) estimation: EstimationTracker<DefaultLatencyEstimator>,
-    request_metadata: Arc<RequestMetadataTracker>,
     rpc: CowGrpcMethod,
     info: EstimationInfo,
     budget: BudgetInfo,
@@ -62,9 +59,12 @@ pub struct EstimationLayer {
 
 impl Layer for EstimationLayer {
     type Server = EstimationServer;
-    type Child = EstimationChild;
     const NAME: &'static str = "estimation";
     type Wire = EstimationWire;
+
+    fn requires(requires: &mut Requires) {
+        requires.module::<BudgetLayer>();
+    }
 
     fn new(
         method: &CowGrpcMethod,
@@ -96,21 +96,22 @@ impl Layer for EstimationLayer {
             });
             (root.map(Arc::new), id)
         };
-        let request_metadata = Arc::new(RequestMetadataTracker::new());
         let info = EstimationInfo {
             hop_count,
             root_method,
             root_method_id,
-            meta: request_metadata.clone(),
         };
         ext.insert(info.clone());
+        // The tally of this request's polls and children lives in the
+        // extensions, where modules after estimation read it as
+        // `SubtreeHealth`, rather than behind a handle shared with them.
+        ext.insert(RequestMetadataTracker::new());
         Self {
             estimation: EstimationTracker::new(
                 resolved_method_id,
                 root_method_id,
                 server.est.clone(),
             ),
-            request_metadata,
             rpc: method.clone(),
             info,
             budget: BudgetInfo::of(ext),
@@ -120,7 +121,8 @@ impl Layer for EstimationLayer {
     /// Reprioritize the current task and check the local deadline
     /// (ABORT_SLACK aborts; SIGNAL_SLACK marks the soft signal).
     #[inline]
-    fn before_poll<Ret>(&self, _ext: &mut Extensions) -> Result<(), Result<Response<Ret>, Status>> {
+    fn before_poll<Ret>(&self, ext: &mut Extensions) -> Result<(), Result<Response<Ret>, Status>> {
+        let request_metadata = Self::tally(ext);
         if ABORT_SLACK {
             let local_deadline = self.budget.deadline();
             if local_deadline != 0 && masa_core::time_now() > local_deadline {
@@ -135,7 +137,7 @@ impl Layer for EstimationLayer {
             }
         }
 
-        super::signal_slack::mark_if_late(&self.budget, &self.request_metadata);
+        super::signal_slack::mark_if_late(&self.budget, request_metadata);
 
         #[cfg(feature = "sched_pred")]
         {
@@ -143,7 +145,7 @@ impl Layer for EstimationLayer {
             tokio::task::reprioritize(tokio::task::TaskPriority::new(remaining));
         }
 
-        self.request_metadata.start_poll();
+        request_metadata.start_poll();
         Ok(())
     }
 
@@ -153,10 +155,10 @@ impl Layer for EstimationLayer {
     fn before_child_rpc<T>(
         &self,
         child_method_name: &CowGrpcMethod,
-        child_ctx: &mut EstimationChild,
+        child: &mut ChildState,
         _request: &mut tonic::Request<T>,
         child_wire: &mut WireOut,
-        ext: &mut Extensions,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
         // Each hop below ingress is one further from it; the root is passed on.
         child_wire
@@ -208,11 +210,11 @@ impl Layer for EstimationLayer {
 
         let (deadline, prio_hint) =
             Self::child_deadline_and_prio(&self.budget, decayed_full, decayed_floor);
-        let child = ChildBudget::of(ext);
-        child.deadline = deadline;
-        child.prio_hint = prio_hint;
+        let budget = ChildBudget::of(child);
+        budget.deadline = deadline;
+        budget.prio_hint = prio_hint;
 
-        child_ctx.child_tracker = Some(child_tracker);
+        child.insert(child_tracker);
 
         Ok(())
     }
@@ -224,10 +226,10 @@ impl Layer for EstimationLayer {
         _child_method: &CowGrpcMethod,
         response: &Result<Response<T>, Status>,
         response_wire: &WireIn<'_>,
-        child_ctx: &EstimationChild,
-        _ext: &Extensions,
+        child: &ChildState,
+        ext: &Extensions,
     ) -> Result<(), Status> {
-        if let Some(child_tracker) = child_ctx.child_tracker.as_ref() {
+        if let Some(child_tracker) = child.get::<ChildRPCTracker>() {
             let report = child_report(
                 response,
                 response_wire
@@ -237,8 +239,7 @@ impl Layer for EstimationLayer {
             );
             self.estimation
                 .record_child_complete(child_tracker, response, report.as_ref());
-            self.request_metadata
-                .absorb_child(response, report.as_ref());
+            Self::tally(ext).absorb_child(response, report.as_ref());
         }
 
         #[cfg(feature = "sched_pred")]
@@ -258,9 +259,10 @@ impl Layer for EstimationLayer {
     fn after_poll<Ret>(
         &self,
         poll: &Poll<Result<Response<Ret>, Status>>,
-        _ext: &Extensions,
+        ext: &Extensions,
     ) -> Result<(), Result<Response<Ret>, Status>> {
-        self.request_metadata.end_poll();
+        let request_metadata = Self::tally(ext);
+        request_metadata.end_poll();
         if let Poll::Pending = poll {
             if ABORT_SLACK {
                 let local_deadline = self.budget.deadline();
@@ -276,7 +278,7 @@ impl Layer for EstimationLayer {
                 }
             }
         }
-        super::signal_slack::mark_if_late(&self.budget, &self.request_metadata);
+        super::signal_slack::mark_if_late(&self.budget, request_metadata);
         Ok(())
     }
 
@@ -296,22 +298,28 @@ impl Layer for EstimationLayer {
     fn finalize<Ret>(
         &self,
         result: &mut Result<Response<Ret>, Status>,
+        _outcome: Outcome<'_>,
         wire: &mut WireOut,
-        _ext: &Extensions,
+        ext: &Extensions,
     ) {
+        let request_metadata = Self::tally(ext);
         if is_early_return_response(result) {
-            self.request_metadata.mark_early_return();
-        } else if !super::signal_slack::should_skip_flush(&self.request_metadata) {
+            request_metadata.mark_early_return();
+        } else if !super::signal_slack::should_skip_flush(request_metadata) {
             self.estimation.flush();
         }
-        wire.put::<Self>(&EstimationWire::response(
-            self.request_metadata.response_wire(),
-        ))
-        .unwrap_or_else(|err| panic!("{err}"));
+        wire.put::<Self>(&EstimationWire::response(request_metadata.response_wire()))
+            .unwrap_or_else(|err| panic!("{err}"));
     }
 }
 
 impl EstimationLayer {
+    /// This request's tally, inserted by `new`.
+    fn tally(ext: &Extensions) -> &RequestMetadataTracker {
+        ext.get::<RequestMetadataTracker>()
+            .expect("estimation inserts its tally in `new`")
+    }
+
     /// Compute child deadline and priority hint.
     ///
     /// When `sched_pred` is enabled, tightens the deadline by subtracting
@@ -367,21 +375,5 @@ mod tests {
     #[test]
     fn default_deadline_uses_conservative_estimate() {
         assert_eq!(hard_deadline_estimate(90, 40), 40);
-    }
-}
-
-// ── Per-Child-RPC ───────────────────────────────────────────────────────
-
-/// Per-child-RPC estimation layer state.
-#[derive(Debug, Clone)]
-pub struct EstimationChild {
-    pub(crate) child_tracker: Option<ChildRPCTracker>,
-}
-
-impl LayerChild for EstimationChild {
-    fn new() -> Self {
-        Self {
-            child_tracker: None,
-        }
     }
 }

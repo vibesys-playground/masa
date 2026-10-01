@@ -6,7 +6,7 @@ use std::sync::{
 
 use tonic::{Code, Response, Status};
 
-use crate::layer::est::wire::EstimationResponseWire;
+use crate::layer::est::wire::{EstimationResponseWire, SubtreeHealth};
 
 // ══════════════════════════════════════════════════════════════════════════
 // Response metadata assembly
@@ -143,12 +143,14 @@ impl RequestMetadataTracker {
             || self.child_deadline_signal.load(Ordering::Relaxed)
     }
 
-    /// Whether this hop or its subtree has recorded an early return or a
-    /// deadline signal.
-    pub(crate) fn has_early_return_or_signal(&self) -> bool {
-        self.local_early_return.load(Ordering::Relaxed)
-            || self.accumulated_child_early_returns.load(Ordering::Relaxed) > 0
-            || self.is_subtree_signaled()
+    /// What the subtree below this hop has shown so far. This hop's own early
+    /// return is deliberately not part of it: it is only known once the result
+    /// is, and the result is the module's to inspect.
+    pub(crate) fn subtree_health(&self) -> SubtreeHealth {
+        SubtreeHealth {
+            early_return: self.accumulated_child_early_returns.load(Ordering::Relaxed) > 0,
+            deadline_signal: self.is_subtree_signaled(),
+        }
     }
 
     /// The report for the outgoing response.

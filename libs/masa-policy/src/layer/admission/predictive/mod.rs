@@ -15,13 +15,13 @@ use masa_core::Instant;
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
 use super::super::{
-    require_budget, BudgetInfo, Extensions, Layer, LayerChild, LayerServer, MissingDependency,
-    ServerInit,
+    BudgetInfo, BudgetLayer, ChildState, Extensions, Layer, LayerServer, MissingDependency,
+    Outcome, Requires, ServerInit,
 };
 use crate::layer::est::default_estimator::DefaultLatencyEstimator;
 use crate::layer::est::latency_map::{MethodKey, ParentToChildKey};
 use crate::layer::est::state::{is_early_return_response, LatencyEstimators};
-use crate::layer::est::{EstimationInfo, EstimationLayer, PublishesEstimationInfo};
+use crate::layer::est::{EstimationInfo, EstimationLayer, SubtreeHealth};
 use crate::policy_params::PolicyParams;
 use crate::registry::MethodId;
 
@@ -51,13 +51,8 @@ pub struct PredAdmissionServer {
 impl LayerServer for PredAdmissionServer {
     fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
         // Admission decisions must use the same estimates the estimation
-        // module maintains; a private copy would never be updated. A stack
-        // that omits or misorders the estimation module fails at construction.
+        // module maintains; a private copy would never be updated.
         let est = init.require::<LatencyEstimators<DefaultLatencyEstimator>>()?;
-        // The per-request `EstimationInfo` exists only if estimation runs
-        // first, so fail here rather than on the first request.
-        init.require::<PublishesEstimationInfo>()?;
-        require_budget(init)?;
         Ok(Self {
             pred_admission: Arc::new(PredictiveAdmission::new()),
             est,
@@ -76,18 +71,18 @@ pub struct PredAdmissionLayer {
     info: EstimationInfo,
     budget: BudgetInfo,
     rpc: CowGrpcMethod,
-    /// Set when this layer rejects a request. Prevents the rejection
-    /// from feeding back into the admission controller via `finalize`.
-    self_rejected: AtomicBool,
     /// Guards the ingress admission check so it runs only on the first poll.
     admission_checked: AtomicBool,
 }
 
 impl Layer for PredAdmissionLayer {
     type Server = PredAdmissionServer;
-    type Child = PredAdmissionChild;
     const NAME: &'static str = "pred_admission";
     type Wire = ();
+
+    fn requires(requires: &mut Requires) {
+        requires.module::<BudgetLayer>().module::<EstimationLayer>();
+    }
 
     fn new(
         method: &CowGrpcMethod,
@@ -110,7 +105,6 @@ impl Layer for PredAdmissionLayer {
             info,
             budget: BudgetInfo::of(ext),
             rpc: method.clone(),
-            self_rejected: AtomicBool::new(false),
             admission_checked: AtomicBool::new(false),
         }
     }
@@ -133,7 +127,6 @@ impl Layer for PredAdmissionLayer {
             .root_method_id()
             .unwrap_or_else(|| crate::MethodRegistry::global().get_or_register(self.rpc.clone()));
         if !self.pred_admission.should_admit(root_id) {
-            self.self_rejected.store(true, Ordering::Relaxed);
             return Err(Err(Status::new(
                 Code::DeadlineExceeded,
                 format!(
@@ -162,7 +155,7 @@ impl Layer for PredAdmissionLayer {
     fn before_child_rpc<T>(
         &self,
         child_method_name: &CowGrpcMethod,
-        _child_ctx: &mut PredAdmissionChild,
+        _child: &mut ChildState,
         _request: &mut tonic::Request<T>,
         _child_wire: &mut WireOut,
         _ext: &mut Extensions,
@@ -251,7 +244,7 @@ impl Layer for PredAdmissionLayer {
         _child_method: &CowGrpcMethod,
         response: &Result<Response<T>, Status>,
         response_wire: &WireIn<'_>,
-        _child_ctx: &PredAdmissionChild,
+        _child: &ChildState,
         _ext: &Extensions,
     ) -> Result<(), Status> {
         if !self.info.is_ingress() || response.is_err() {
@@ -277,8 +270,9 @@ impl Layer for PredAdmissionLayer {
     fn finalize<Ret>(
         &self,
         result: &mut Result<Response<Ret>, Status>,
+        outcome: Outcome<'_>,
         _wire: &mut WireOut,
-        _ext: &Extensions,
+        ext: &Extensions,
     ) {
         if !self.info.is_ingress() {
             return;
@@ -286,7 +280,7 @@ impl Layer for PredAdmissionLayer {
 
         // Skip outcome recording for self-rejections to avoid the controller
         // feeding back on its own rejections (reject → admit_p drops further → reject more).
-        if self.self_rejected.load(Ordering::Relaxed) {
+        if matches!(outcome, Outcome::Rejected { by, .. } if by == Self::NAME) {
             return;
         }
 
@@ -294,8 +288,10 @@ impl Layer for PredAdmissionLayer {
         // `LocalDeadlineExceeded` are visible to predictive admission. The
         // `signal_slack` feature emits a parallel soft-deadline signal that
         // also feeds the AIMD controller without requiring an actual abort.
-        let is_er =
-            is_early_return_response(result) || self.info.subtree_had_early_return_or_signal();
+        // Estimation finalizes after this hook, so this hop's own early
+        // return comes from the result and the subtree's from the tally
+        // estimation keeps in the extensions as the request runs.
+        let is_er = is_early_return_response(result) || SubtreeHealth::of(ext).any();
 
         let root_id = self
             .info
@@ -321,17 +317,6 @@ impl PredAdmissionLayer {
                 child_rpc.method(),
             ),
         )
-    }
-}
-
-// ── Per-Child-RPC ───────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub struct PredAdmissionChild;
-
-impl LayerChild for PredAdmissionChild {
-    fn new() -> Self {
-        Self
     }
 }
 
@@ -527,6 +512,7 @@ impl PredictiveAdmission {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layer::est::state::RequestMetadataTracker;
     use masa_core::Context;
 
     fn test_root(service: &'static str) -> MethodId {
@@ -648,26 +634,38 @@ mod tests {
             info,
             budget: BudgetInfo::from(Context::default()),
             rpc: CowGrpcMethod::new("svc", "method"),
-            self_rejected: AtomicBool::new(false),
             admission_checked: AtomicBool::new(false),
         }
     }
 
-    fn finalize_ok(layer: &PredAdmissionLayer) {
+    /// Extensions holding estimation's tally, as estimation's `new` leaves them.
+    fn ext_with(tally: RequestMetadataTracker) -> Extensions {
+        let mut ext = Extensions::new();
+        ext.insert(tally);
+        ext
+    }
+
+    fn finalize_with(layer: &PredAdmissionLayer, outcome: Outcome<'_>, ext: &Extensions) {
         layer.finalize(
             &mut Ok(Response::new(())),
+            outcome,
             &mut crate::wire::WireOut::new(),
-            &crate::layer::Extensions::new(),
+            ext,
         );
+    }
+
+    fn finalize_ok(layer: &PredAdmissionLayer, ext: &Extensions) {
+        finalize_with(layer, Outcome::Handled, ext);
     }
 
     #[test]
     fn test_deadline_signal_records_single_ac_outcome() {
         let ac = Arc::new(PredictiveAdmission::new());
         let layer = layer_with(EstimationInfo::for_test(0, None), &ac);
-        layer.info.meta.mark_deadline_signal();
+        let tally = RequestMetadataTracker::new();
+        tally.mark_deadline_signal();
 
-        finalize_ok(&layer);
+        finalize_ok(&layer, &ext_with(tally));
 
         let root_id =
             crate::MethodRegistry::global().get_or_register(CowGrpcMethod::new("svc", "method"));
@@ -689,23 +687,66 @@ mod tests {
     fn test_subtree_early_return_counts_as_er_and_quiet_subtree_does_not() {
         let ac = Arc::new(PredictiveAdmission::new());
         let layer = layer_with(EstimationInfo::for_test(0, None), &ac);
-        finalize_ok(&layer);
+        finalize_ok(&layer, &ext_with(RequestMetadataTracker::new()));
         assert_eq!(ac.global_state.lock().unwrap().er_count, 0);
 
-        layer.info.meta.mark_early_return();
-        finalize_ok(&layer);
+        // A child that returned early shows in the tally; the hop's own early
+        // return is the result, which estimation has not yet seen when this
+        // module finalizes.
+        let tally = RequestMetadataTracker::new();
+        tally.absorb_child::<()>(
+            &Err(Status::new(tonic::Code::DeadlineExceeded, "/EarlyReturn")),
+            None,
+        );
+        finalize_ok(&layer, &ext_with(tally));
         let global_state = ac.global_state.lock().unwrap();
         assert_eq!(global_state.window_total, 2);
         assert_eq!(global_state.er_count, 1);
     }
 
     #[test]
+    fn test_own_early_return_is_read_from_the_result() {
+        let ac = Arc::new(PredictiveAdmission::new());
+        let layer = layer_with(EstimationInfo::for_test(0, None), &ac);
+        layer.finalize::<()>(
+            &mut Err(Status::new(tonic::Code::DeadlineExceeded, "/EarlyReturn")),
+            Outcome::Handled,
+            &mut crate::wire::WireOut::new(),
+            &ext_with(RequestMetadataTracker::new()),
+        );
+        assert_eq!(ac.global_state.lock().unwrap().er_count, 1);
+    }
+
+    #[test]
+    fn test_own_rejection_is_not_recorded_but_another_modules_is() {
+        let ac = Arc::new(PredictiveAdmission::new());
+        let layer = layer_with(EstimationInfo::for_test(0, None), &ac);
+        let status = Status::new(tonic::Code::DeadlineExceeded, "/EarlyReturn");
+        let ext = ext_with(RequestMetadataTracker::new());
+
+        let own = Outcome::Rejected {
+            by: PredAdmissionLayer::NAME,
+            status: &status,
+        };
+        finalize_with(&layer, own, &ext);
+        assert_eq!(ac.global_state.lock().unwrap().window_total, 0);
+
+        let other = Outcome::Rejected {
+            by: "e2e_deadline_guard",
+            status: &status,
+        };
+        finalize_with(&layer, other, &ext);
+        assert_eq!(ac.global_state.lock().unwrap().window_total, 1);
+    }
+
+    #[test]
     fn test_non_ingress_records_no_outcome() {
         let ac = Arc::new(PredictiveAdmission::new());
         let layer = layer_with(EstimationInfo::for_test(1, None), &ac);
-        layer.info.meta.mark_deadline_signal();
+        let tally = RequestMetadataTracker::new();
+        tally.mark_deadline_signal();
 
-        finalize_ok(&layer);
+        finalize_ok(&layer, &ext_with(tally));
 
         assert_eq!(ac.global_state.lock().unwrap().window_total, 0);
     }
@@ -737,7 +778,7 @@ mod tests {
                         &child,
                         &response,
                         &wire,
-                        &PredAdmissionChild,
+                        &ChildState::new(),
                         &Extensions::new(),
                     )
                     .unwrap();

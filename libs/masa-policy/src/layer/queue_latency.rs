@@ -14,7 +14,7 @@ use std::sync::{Mutex, OnceLock};
 use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Response, Status};
 
-use super::{Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit};
+use super::{ChildState, Extensions, Layer, LayerServer, MissingDependency, Outcome, ServerInit};
 
 // ── Wire data ───────────────────────────────────────────────────────────
 
@@ -60,7 +60,6 @@ pub struct QueueLatencyLayer {
 
 impl Layer for QueueLatencyLayer {
     type Server = QueueLatencyServer;
-    type Child = QueueLatencyChild;
     const NAME: &'static str = "queue_latency";
     type Wire = QueueLatencyWire;
 
@@ -101,7 +100,7 @@ impl Layer for QueueLatencyLayer {
         _child_method: &CowGrpcMethod,
         response: &Result<Response<T>, Status>,
         response_wire: &WireIn<'_>,
-        _child_ctx: &QueueLatencyChild,
+        _child: &ChildState,
         _ext: &Extensions,
     ) -> Result<(), Status> {
         // Only successful responses have ever contributed to the totals.
@@ -131,6 +130,7 @@ impl Layer for QueueLatencyLayer {
     fn finalize<Ret>(
         &self,
         _result: &mut Result<Response<Ret>, Status>,
+        _outcome: Outcome<'_>,
         wire: &mut WireOut,
         _ext: &Extensions,
     ) {
@@ -145,14 +145,5 @@ impl Layer for QueueLatencyLayer {
             queue_lengths,
         })
         .unwrap_or_else(|err| panic!("{err}"));
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct QueueLatencyChild;
-
-impl LayerChild for QueueLatencyChild {
-    fn new() -> Self {
-        Self
     }
 }

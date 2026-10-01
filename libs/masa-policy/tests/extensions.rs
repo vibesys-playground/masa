@@ -6,8 +6,9 @@ use std::sync::Arc;
 use masa_core::time_now;
 use masa_policy::ContextBuilder;
 use masa_policy::{
-    policy_stack, Extensions, Layer, LayerServer, MasaResponseExt, MissingDependency, PolicyHooks,
-    ServerContext, ServerInit, WireIn, WireOut, MASA_CONTEXT_HEADER,
+    policy_stack, ChildState, Extensions, Layer, LayerServer, LayerStack, MasaResponseExt,
+    MissingDependency, Outcome, PolicyHooks, ServerContext, ServerInit, WireIn, WireOut,
+    MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
@@ -44,7 +45,6 @@ struct Producer;
 
 impl Layer for Producer {
     type Server = ();
-    type Child = ();
     const NAME: &'static str = "producer";
     type Wire = ();
 
@@ -56,7 +56,7 @@ impl Layer for Producer {
     fn before_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _child_ctx: &mut (),
+        _child: &mut ChildState,
         _request: &mut Request<T>,
         _child_wire: &mut WireOut,
         ext: &mut Extensions,
@@ -85,7 +85,6 @@ struct Consumer {
 
 impl Layer for Consumer {
     type Server = ();
-    type Child = ();
     const NAME: &'static str = "consumer";
     type Wire = SeenWire;
 
@@ -100,7 +99,7 @@ impl Layer for Consumer {
     fn before_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _child_ctx: &mut (),
+        _child: &mut ChildState,
         _request: &mut Request<T>,
         _child_wire: &mut WireOut,
         ext: &mut Extensions,
@@ -114,7 +113,7 @@ impl Layer for Consumer {
         _child_method: &CowGrpcMethod,
         _response: &Result<Response<T>, Status>,
         _response_wire: &WireIn<'_>,
-        _child_ctx: &(),
+        _child: &ChildState,
         ext: &Extensions,
     ) -> Result<(), Status> {
         *self.in_after_child.lock().unwrap() = ext.get::<Shared>().map(|s| s.child_calls);
@@ -124,6 +123,7 @@ impl Layer for Consumer {
     fn finalize<Ret>(
         &self,
         _result: &mut Result<Response<Ret>, Status>,
+        _outcome: Outcome<'_>,
         wire: &mut WireOut,
         _ext: &Extensions,
     ) {
@@ -137,7 +137,7 @@ impl Layer for Consumer {
 }
 
 /// One request through one child call; returns what `Consumer` reported.
-fn run_request<S: Layer + 'static>() -> SeenWire {
+fn run_request<S: LayerStack>() -> SeenWire {
     let server = Arc::new(Server::<S>::new("ext.Service"));
     let parent = Parent::<S>::begin(
         GrpcMethod::new("ext.Service", "Hop"),
@@ -224,7 +224,6 @@ macro_rules! dependency_module {
 
         impl Layer for $name {
             type Server = $server;
-            type Child = ();
             const NAME: &'static str = $wire_name;
             type Wire = ();
 

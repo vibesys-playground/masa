@@ -9,19 +9,19 @@ use std::sync::{Arc, Mutex};
 
 use masa_core::{time_now, Context, PriorityHint};
 use masa_policy::{
-    get_masa_context_from_metadata, policy_stack, BudgetChildWriter, BudgetLayer, ChildBudget,
-    ContextBuilder, Extensions, Layer, LayerServer, MissingDependency, PolicyHooks, ServerInit,
-    WireIn, WireOut, MASA_CONTEXT_HEADER,
+    get_masa_context_from_metadata, policy_stack, BudgetLayer, ChildBudget, ChildState,
+    ContextBuilder, Extensions, Layer, LayerServer, LayerStack, MissingDependency, PolicyHooks,
+    Requires, ServerContext, ServerInit, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
 use tonic::{Code, CowGrpcMethod, GrpcMethod, Request, Status};
 
-/// A stack of custom modules between Masa's budget pair, which is what lets
+/// A stack of custom modules after Masa's budget module, which is what lets
 /// them set the child's deadline and priority and makes the child carry a
 /// budget at all.
 macro_rules! budgeted {
     ($($module:ty),* $(,)?) => {
-        policy_stack![BudgetLayer, $($module,)* BudgetChildWriter]
+        policy_stack![BudgetLayer, $($module),*]
     };
 }
 
@@ -51,13 +51,13 @@ fn inbound(deadline: u64) -> http::Request<()> {
         .unwrap()
 }
 
-fn begin<S: Layer + 'static>(service: &'static str, deadline: u64) -> Parent<S> {
+fn begin<S: LayerStack>(service: &'static str, deadline: u64) -> Parent<S> {
     let server = Arc::new(Server::<S>::new(service));
     Parent::<S>::begin(parent_method(), &inbound(deadline), server)
 }
 
 /// Issue one child RPC and return the context the child would receive.
-fn send_child<S: Layer + 'static>(parent: &Parent<S>) -> Result<Context, Status> {
+fn send_child<S: LayerStack>(parent: &Parent<S>) -> Result<Context, Status> {
     let mut request = Request::new(());
     let mut child = Child::<S>::new(child_method(), &request);
     parent.before_child_rpc(child_method(), &mut request, &mut child)?;
@@ -72,9 +72,12 @@ struct FixedChildPriority<const P: u64>;
 
 impl<const P: u64> Layer for FixedChildPriority<P> {
     type Server = ();
-    type Child = ();
     const NAME: &'static str = "FixedChildPriority";
     type Wire = ();
+
+    fn requires(requires: &mut Requires) {
+        requires.module::<BudgetLayer>();
+    }
 
     fn new(
         _method: &CowGrpcMethod,
@@ -88,12 +91,12 @@ impl<const P: u64> Layer for FixedChildPriority<P> {
     fn before_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _child_ctx: &mut (),
+        child: &mut ChildState,
         _request: &mut Request<T>,
         _child_wire: &mut WireOut,
-        ext: &mut Extensions,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
-        ChildBudget::of(ext).prio_hint = PriorityHint::new(P);
+        ChildBudget::of(child).prio_hint = PriorityHint::new(P);
         Ok(())
     }
 }
@@ -104,7 +107,6 @@ struct RejectChildren;
 
 impl Layer for RejectChildren {
     type Server = ();
-    type Child = ();
     const NAME: &'static str = "RejectChildren";
     type Wire = ();
 
@@ -120,7 +122,7 @@ impl Layer for RejectChildren {
     fn before_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _child_ctx: &mut (),
+        _child: &mut ChildState,
         _request: &mut Request<T>,
         _child_wire: &mut WireOut,
         _ext: &mut Extensions,
@@ -135,7 +137,6 @@ struct UnreachableOnChild;
 
 impl Layer for UnreachableOnChild {
     type Server = ();
-    type Child = ();
     const NAME: &'static str = "UnreachableOnChild";
     type Wire = ();
 
@@ -151,7 +152,7 @@ impl Layer for UnreachableOnChild {
     fn before_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _child_ctx: &mut (),
+        _child: &mut ChildState,
         _request: &mut Request<T>,
         _child_wire: &mut WireOut,
         _ext: &mut Extensions,
@@ -181,7 +182,6 @@ impl LayerServer for CountChildrenServer {
 
 impl Layer for CountChildren {
     type Server = CountChildrenServer;
-    type Child = ();
     const NAME: &'static str = "CountChildren";
     type Wire = ();
 
@@ -197,7 +197,7 @@ impl Layer for CountChildren {
     fn before_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _child_ctx: &mut (),
+        _child: &mut ChildState,
         _request: &mut Request<T>,
         _child_wire: &mut WireOut,
         _ext: &mut Extensions,
@@ -223,9 +223,12 @@ impl LayerServer for PriorityFromCountServer {
 
 impl Layer for PriorityFromCount {
     type Server = PriorityFromCountServer;
-    type Child = ();
     const NAME: &'static str = "PriorityFromCount";
     type Wire = ();
+
+    fn requires(requires: &mut Requires) {
+        requires.module::<BudgetLayer>();
+    }
 
     fn new(
         _method: &CowGrpcMethod,
@@ -239,12 +242,12 @@ impl Layer for PriorityFromCount {
     fn before_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _child_ctx: &mut (),
+        child: &mut ChildState,
         _request: &mut Request<T>,
         _child_wire: &mut WireOut,
-        ext: &mut Extensions,
+        _ext: &mut Extensions,
     ) -> Result<(), Status> {
-        ChildBudget::of(ext).prio_hint = PriorityHint::new(self.0 .0.load(Ordering::Relaxed));
+        ChildBudget::of(child).prio_hint = PriorityHint::new(self.0 .0.load(Ordering::Relaxed));
         Ok(())
     }
 }
@@ -267,7 +270,6 @@ impl LayerServer for RecordServiceNameServer {
 
 impl Layer for RecordServiceName {
     type Server = RecordServiceNameServer;
-    type Child = ();
     const NAME: &'static str = "RecordServiceName";
     type Wire = ();
 
@@ -310,27 +312,23 @@ fn empty_stack_carries_nothing_to_the_child() {
 }
 
 #[test]
-#[should_panic(expected = "no `ChildBudget` is open")]
-fn module_before_the_budget_layer_cannot_set_the_child_budget() {
-    type S = policy_stack![FixedChildPriority<7>, BudgetLayer, BudgetChildWriter];
-    let parent = begin::<S>("custom-early", time_now() + 1_000);
+fn a_module_that_sets_the_child_budget_must_follow_the_budget_layer() {
+    type Early = policy_stack![FixedChildPriority<7>, BudgetLayer];
+    let err = ServerContext::<Early>::try_new("custom-early").unwrap_err();
+    assert!(err.module().ends_with("FixedChildPriority<7>"), "{err}");
+    assert!(err.resource().ends_with("BudgetLayer"), "{err}");
 
-    let _ = send_child(&parent);
+    type Missing = policy_stack![FixedChildPriority<7>];
+    let err = ServerContext::<Missing>::try_new("custom-missing").unwrap_err();
+    assert!(err.resource().ends_with("BudgetLayer"), "{err}");
 }
 
 #[test]
-#[should_panic(expected = "no `ChildBudget` is open")]
-fn module_after_the_child_writer_cannot_set_the_child_budget() {
-    type S = policy_stack![BudgetLayer, BudgetChildWriter, FixedChildPriority<7>];
-    let parent = begin::<S>("custom-late", time_now() + 1_000);
-
-    let _ = send_child(&parent);
-}
-
-#[test]
-#[should_panic(expected = "requires a `masa_policy::layer::budget::PublishesBudgetInfo`")]
-fn child_writer_without_the_budget_layer_fails_at_server_construction() {
-    let _ = Server::<policy_stack![BudgetChildWriter]>::new("custom-no-budget");
+fn a_budget_stack_needs_no_writer_module() {
+    // The framework seals the child's budget section after every module, so
+    // the stack is the budget module and whatever follows it.
+    type S = budgeted![FixedChildPriority<7>];
+    assert!(ServerContext::<S>::try_new("custom-sealed").is_ok());
 }
 
 #[test]

@@ -8,8 +8,8 @@ use std::sync::Arc;
 use masa_core::{time_now, Context};
 use masa_policy::ContextBuilder;
 use masa_policy::{
-    peek, policy_stack, Extensions, Layer, MasaRequestExt, MasaResponseExt, PolicyHooks, WireIn,
-    WireOut, MASA_CONTEXT_HEADER,
+    peek, policy_stack, ChildState, Extensions, Layer, LayerStack, MasaRequestExt, MasaResponseExt,
+    Outcome, PolicyHooks, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
@@ -47,7 +47,7 @@ fn arrives(request: &Request<()>) -> http::Request<()> {
         .unwrap()
 }
 
-fn begin<S: Layer + 'static>(server: &Arc<Server<S>>, request: &Request<()>) -> Parent<S> {
+fn begin<S: LayerStack>(server: &Arc<Server<S>>, request: &Request<()>) -> Parent<S> {
     Parent::<S>::begin(
         GrpcMethod::new("wire.Service", "Hop"),
         &arrives(request),
@@ -55,7 +55,7 @@ fn begin<S: Layer + 'static>(server: &Arc<Server<S>>, request: &Request<()>) -> 
     )
 }
 
-fn call_child<S: Layer + 'static>(parent: &Parent<S>) -> Request<()> {
+fn call_child<S: LayerStack>(parent: &Parent<S>) -> Request<()> {
     let method = GrpcMethod::new("wire.Service", "Child");
     let mut request = Request::new(());
     let mut child = Child::<S>::new(method, &request);
@@ -65,7 +65,7 @@ fn call_child<S: Layer + 'static>(parent: &Parent<S>) -> Request<()> {
     request
 }
 
-fn respond<S: Layer + 'static>(parent: &Parent<S>) -> Response<()> {
+fn respond<S: LayerStack>(parent: &Parent<S>) -> Response<()> {
     let mut result = Ok(Response::new(()));
     parent.finalize_before_serialization(&mut result);
     result.unwrap()
@@ -86,7 +86,6 @@ struct Alpha {
 
 impl Layer for Alpha {
     type Server = ();
-    type Child = ();
     const NAME: &'static str = "alpha";
     type Wire = AlphaWire;
 
@@ -99,7 +98,7 @@ impl Layer for Alpha {
     fn before_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _child_ctx: &mut (),
+        _child: &mut ChildState,
         _request: &mut Request<T>,
         child_wire: &mut WireOut,
         _ext: &mut Extensions,
@@ -115,6 +114,7 @@ impl Layer for Alpha {
     fn finalize<Ret>(
         &self,
         _result: &mut Result<Response<Ret>, Status>,
+        _outcome: Outcome<'_>,
         wire: &mut WireOut,
         _ext: &Extensions,
     ) {
@@ -139,7 +139,6 @@ struct Beta {
 
 impl Layer for Beta {
     type Server = ();
-    type Child = ();
     const NAME: &'static str = "beta";
     type Wire = BetaWire;
 
@@ -152,7 +151,7 @@ impl Layer for Beta {
     fn before_child_rpc<T>(
         &self,
         _child_method: &CowGrpcMethod,
-        _child_ctx: &mut (),
+        _child: &mut ChildState,
         _request: &mut Request<T>,
         child_wire: &mut WireOut,
         _ext: &mut Extensions,
@@ -171,6 +170,7 @@ impl Layer for Beta {
     fn finalize<Ret>(
         &self,
         _result: &mut Result<Response<Ret>, Status>,
+        _outcome: Outcome<'_>,
         wire: &mut WireOut,
         _ext: &Extensions,
     ) {
@@ -187,7 +187,6 @@ struct Silent;
 
 impl Layer for Silent {
     type Server = ();
-    type Child = ();
     const NAME: &'static str = "silent";
     type Wire = u8;
 
@@ -326,7 +325,6 @@ struct AlphaTwin;
 
 impl Layer for AlphaTwin {
     type Server = ();
-    type Child = ();
     const NAME: &'static str = "alpha";
     type Wire = u8;
 
@@ -346,7 +344,6 @@ struct BadName;
 
 impl Layer for BadName {
     type Server = ();
-    type Child = ();
     const NAME: &'static str = "has.dot";
     type Wire = u8;
 

@@ -386,7 +386,7 @@ fn test_layer_records_child_price_response_and_updates_parent_max() {
         &child,
         &response,
         &response_wire,
-        &RajomonChild,
+        &crate::layer::ChildState::new(),
         &crate::layer::Extensions::new(),
     )
     .unwrap();

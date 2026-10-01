@@ -161,15 +161,15 @@ impl From<ResponseCompact> for EstimationResponseWire {
 
 /// Facts about one request that estimation publishes in
 /// [`Extensions`](crate::Extensions) when the request begins, for modules
-/// later in the stack. A module that reads it must come after estimation; a
-/// stack that puts it earlier fails at construction, because the module's
-/// server requires [`PublishesEstimationInfo`].
+/// later in the stack. A module that reads it declares
+/// [`EstimationLayer`](super::EstimationLayer) in
+/// [`Layer::requires`](crate::Layer::requires), so a stack that puts it earlier
+/// fails at construction.
 #[derive(Debug, Clone)]
 pub struct EstimationInfo {
     pub(crate) hop_count: u8,
     pub(crate) root_method: Option<Arc<RootMethod>>,
     pub(crate) root_method_id: Option<MethodId>,
-    pub(crate) meta: Arc<RequestMetadataTracker>,
 }
 
 impl EstimationInfo {
@@ -192,15 +192,6 @@ impl EstimationInfo {
     pub fn root_method_id(&self) -> Option<MethodId> {
         self.root_method_id
     }
-
-    /// Whether the request's subtree has so far seen an early return or, under
-    /// `signal_slack`, a deadline signal: what estimation's response section
-    /// will report as a non-zero `early_return_count` or
-    /// `deadline_signal_count`. This hop's own early return is only known once
-    /// estimation has finalized, so read it from a module later in the stack.
-    pub fn subtree_had_early_return_or_signal(&self) -> bool {
-        self.meta.has_early_return_or_signal()
-    }
 }
 
 #[cfg(all(test, feature = "ac_pred"))]
@@ -211,13 +202,46 @@ impl EstimationInfo {
             hop_count,
             root_method: None,
             root_method_id,
-            meta: Arc::new(RequestMetadataTracker::new()),
         }
     }
 }
 
-/// Server-level marker that estimation publishes [`EstimationInfo`] for every
-/// request. Modules that need the info require it in their
-/// [`LayerServer::new`](crate::LayerServer::new).
-#[derive(Debug, Clone, Copy)]
-pub struct PublishesEstimationInfo;
+/// What estimation has recorded so far about the request's subtree: whether
+/// any child returned early and whether any hop, this one or below, tripped
+/// its local deadline under `signal_slack`.
+///
+/// Estimation keeps the underlying tally in [`Extensions`](crate::Extensions)
+/// and updates it as polls and child responses arrive, so a snapshot taken in
+/// any hook reflects what has happened up to then, and a snapshot taken in a
+/// `finalize` is complete whichever module finalizes first. It does not
+/// include this hop's own rejection: that is the [`Outcome`](crate::Outcome)
+/// and the result `finalize` receives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubtreeHealth {
+    /// A child returned early, or reported an early return below it.
+    pub early_return: bool,
+    /// This hop or a descendant tripped its local deadline under
+    /// `signal_slack`.
+    pub deadline_signal: bool,
+}
+
+impl SubtreeHealth {
+    /// A snapshot of the request's subtree. Panics if estimation is missing; a
+    /// module that declares [`EstimationLayer`](super::EstimationLayer) in
+    /// [`Layer::requires`](crate::Layer::requires) cannot hit that.
+    pub fn of(ext: &crate::Extensions) -> Self {
+        ext.get::<RequestMetadataTracker>()
+            .unwrap_or_else(|| {
+                panic!(
+                    "estimation's tally is missing; put `EstimationLayer` before the module that \
+                     reads `SubtreeHealth`"
+                )
+            })
+            .subtree_health()
+    }
+
+    /// Whether the subtree saw an early return or a deadline signal.
+    pub fn any(self) -> bool {
+        self.early_return || self.deadline_signal
+    }
+}

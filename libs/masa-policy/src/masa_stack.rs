@@ -2,10 +2,11 @@
 //
 // This is the only place where Cargo features choose which policy modules
 // run. Each slot is either a built-in module or `()` (disabled). Modules run
-// in slot order: budget → guard → estimation → oracle → admission →
-// queue_latency → budget child writer. The budget pair always brackets the
-// others: the modules between them read the budget and may tighten the next
-// child's deadline and priority.
+// in slot order in pre-hooks and in the reverse order in post-hooks: budget →
+// guard → estimation → oracle → admission → queue_latency. The budget module
+// comes first because every other module reads the budget and the ones that
+// set a child's deadline and priority overwrite what it opened; the framework
+// seals the child's budget section after all of them.
 //
 // To try a different policy, write a module implementing `Layer` and build a
 // new stack with `policy_stack!` instead of editing this file.
@@ -44,6 +45,5 @@ pub type MasaStack = crate::policy_stack![
     Estimation,
     Oracle,
     Admission,
-    QueueLatency,
-    crate::layer::BudgetChildWriter
+    QueueLatency
 ];
