@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use masa_core::{time_now, Context, PriorityHint};
 use masa_policy::{
-    get_masa_context_from_metadata, policy_stack, BudgetLayer, ChildPriority, ChildState,
-    ContextBuilder, Extensions, Layer, LayerServer, LayerStack, MissingDependency, PolicyHooks,
+    get_masa_context_from_metadata, policy_stack, BudgetModule, ChildPriority, ChildState,
+    ContextBuilder, Extensions, MissingDependency, Module, ModuleServer, ModuleStack, PolicyHooks,
     Requires, ServerContext, ServerInit, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
@@ -21,7 +21,7 @@ use tonic::{Code, CowGrpcMethod, GrpcMethod, Request, Status};
 /// budget at all.
 macro_rules! budgeted {
     ($($module:ty),* $(,)?) => {
-        policy_stack![BudgetLayer, $($module),*]
+        policy_stack![BudgetModule, $($module),*]
     };
 }
 
@@ -51,13 +51,13 @@ fn inbound(deadline: u64) -> http::Request<()> {
         .unwrap()
 }
 
-fn begin<S: LayerStack>(service: &'static str, deadline: u64) -> Parent<S> {
+fn begin<S: ModuleStack>(service: &'static str, deadline: u64) -> Parent<S> {
     let server = Arc::new(Server::<S>::new(service));
     Parent::<S>::begin(parent_method(), &inbound(deadline), server)
 }
 
 /// Issue one child RPC and return the context the child would receive.
-fn send_child<S: LayerStack>(parent: &Parent<S>) -> Result<Context, Status> {
+fn send_child<S: ModuleStack>(parent: &Parent<S>) -> Result<Context, Status> {
     let mut request = Request::new(());
     let mut child = Child::<S>::new(child_method(), &request);
     parent.before_child_rpc(child_method(), &mut request, &mut child)?;
@@ -66,46 +66,61 @@ fn send_child<S: LayerStack>(parent: &Parent<S>) -> Result<Context, Status> {
 
 // ── Modules ─────────────────────────────────────────────────────────────
 
-/// Assigns every child RPC a fixed priority.
-#[derive(Debug)]
-struct FixedChildPriority<const P: u64>;
+/// Defines a module that assigns every child RPC a fixed priority. A stack
+/// holds one module per name, so each instance needs its own type.
+macro_rules! fixed_child_priority {
+    ($(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        #[derive(Debug)]
+        struct $name<const P: u64>;
 
-impl<const P: u64> Layer for FixedChildPriority<P> {
-    type Server = ();
-    const NAME: &'static str = "FixedChildPriority";
-    type Wire = ();
+        impl<const P: u64> Module for $name<P> {
+            type Server = ();
+            const NAME: &'static str = stringify!($name);
+            type Wire = ();
 
-    fn requires(requires: &mut Requires) {
-        requires.module::<BudgetLayer>();
-    }
+            fn requires(requires: &mut Requires) {
+                requires.module::<BudgetModule>();
+            }
 
-    fn new(
-        _method: &CowGrpcMethod,
-        _server: &(),
-        _wire: &WireIn<'_>,
-        _ext: &mut Extensions,
-    ) -> Self {
-        Self
-    }
+            fn new(
+                _method: &CowGrpcMethod,
+                _server: &(),
+                _wire: &WireIn<'_>,
+                _ext: &mut Extensions,
+            ) -> Self {
+                Self
+            }
 
-    fn before_child_rpc<T>(
-        &self,
-        _child_method: &CowGrpcMethod,
-        child: &mut ChildState,
-        _request: &mut Request<T>,
-        _child_wire: &mut WireOut,
-        _ext: &mut Extensions,
-    ) -> Result<(), Status> {
-        child.propose(ChildPriority(PriorityHint::new(P)))?;
-        Ok(())
-    }
+            fn before_child_rpc<T>(
+                &self,
+                _child_method: &CowGrpcMethod,
+                child: &mut ChildState,
+                _request: &mut Request<T>,
+                _child_wire: &mut WireOut,
+                _ext: &mut Extensions,
+            ) -> Result<(), Status> {
+                child.propose(ChildPriority(PriorityHint::new(P)))?;
+                Ok(())
+            }
+        }
+    };
 }
+
+fixed_child_priority!(
+    /// Assigns every child RPC a fixed priority.
+    FixedChildPriority
+);
+fixed_child_priority!(
+    /// Assigns every child RPC a fixed priority, after `FixedChildPriority`.
+    LaterChildPriority
+);
 
 /// Rejects every child RPC.
 #[derive(Debug)]
 struct RejectChildren;
 
-impl Layer for RejectChildren {
+impl Module for RejectChildren {
     type Server = ();
     const NAME: &'static str = "RejectChildren";
     type Wire = ();
@@ -135,7 +150,7 @@ impl Layer for RejectChildren {
 #[derive(Debug)]
 struct UnreachableOnChild;
 
-impl Layer for UnreachableOnChild {
+impl Module for UnreachableOnChild {
     type Server = ();
     const NAME: &'static str = "UnreachableOnChild";
     type Wire = ();
@@ -172,7 +187,7 @@ struct CountChildren(ChildCounter);
 #[derive(Debug)]
 struct CountChildrenServer(ChildCounter);
 
-impl LayerServer for CountChildrenServer {
+impl ModuleServer for CountChildrenServer {
     fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
         let counter = ChildCounter::default();
         init.provide(counter.clone());
@@ -180,7 +195,7 @@ impl LayerServer for CountChildrenServer {
     }
 }
 
-impl Layer for CountChildren {
+impl Module for CountChildren {
     type Server = CountChildrenServer;
     const NAME: &'static str = "CountChildren";
     type Wire = ();
@@ -215,19 +230,19 @@ struct PriorityFromCount(ChildCounter);
 #[derive(Debug)]
 struct PriorityFromCountServer(ChildCounter);
 
-impl LayerServer for PriorityFromCountServer {
+impl ModuleServer for PriorityFromCountServer {
     fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
         Ok(Self(init.require::<ChildCounter>()?))
     }
 }
 
-impl Layer for PriorityFromCount {
+impl Module for PriorityFromCount {
     type Server = PriorityFromCountServer;
     const NAME: &'static str = "PriorityFromCount";
     type Wire = ();
 
     fn requires(requires: &mut Requires) {
-        requires.module::<BudgetLayer>();
+        requires.module::<BudgetModule>();
     }
 
     fn new(
@@ -263,14 +278,14 @@ struct RecordServiceNameServer;
 
 static SEEN_SERVICES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 
-impl LayerServer for RecordServiceNameServer {
+impl ModuleServer for RecordServiceNameServer {
     fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
         SEEN_SERVICES.lock().unwrap().push(init.service_name());
         Ok(Self)
     }
 }
 
-impl Layer for RecordServiceName {
+impl Module for RecordServiceName {
     type Server = RecordServiceNameServer;
     const NAME: &'static str = "RecordServiceName";
     type Wire = ();
@@ -314,15 +329,15 @@ fn empty_stack_carries_nothing_to_the_child() {
 }
 
 #[test]
-fn a_module_that_sets_the_child_budget_must_follow_the_budget_layer() {
-    type Early = policy_stack![FixedChildPriority<7>, BudgetLayer];
+fn a_module_that_sets_the_child_budget_must_follow_the_budget_module() {
+    type Early = policy_stack![FixedChildPriority<7>, BudgetModule];
     let err = ServerContext::<Early>::try_new("custom-early").unwrap_err();
     assert!(err.module().ends_with("FixedChildPriority<7>"), "{err}");
-    assert!(err.resource().ends_with("BudgetLayer"), "{err}");
+    assert!(err.resource().ends_with("BudgetModule"), "{err}");
 
     type Missing = policy_stack![FixedChildPriority<7>];
     let err = ServerContext::<Missing>::try_new("custom-missing").unwrap_err();
-    assert!(err.resource().ends_with("BudgetLayer"), "{err}");
+    assert!(err.resource().ends_with("BudgetModule"), "{err}");
 }
 
 #[test]
@@ -344,7 +359,7 @@ fn custom_module_sets_child_priority() {
 
 #[test]
 fn later_module_overrides_earlier_module() {
-    type S = budgeted![FixedChildPriority<7>, FixedChildPriority<9>];
+    type S = budgeted![FixedChildPriority<7>, LaterChildPriority<9>];
     let parent = begin::<S>("custom-order", time_now() + 1_000);
 
     let child = send_child(&parent).unwrap();

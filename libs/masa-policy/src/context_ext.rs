@@ -2,20 +2,24 @@
 
 use masa_core::Context;
 
-use crate::layer::{BudgetLayer, Layer};
-use crate::wire::{self, WireOut};
-use tonic::metadata::{Ascii, MetadataValue};
+use crate::module::{BudgetModule, Module};
+use crate::wire::WireOut;
+use rpcstack_tonic::{RequestExt, ResponseExt, StatusExt};
 use tonic::{Request, Response, Status};
+
+pub use rpcstack_tonic::{
+    get_method_name_override_from_headers, get_method_name_override_from_metadata,
+    get_service_name_override_from_headers, get_service_name_override_from_metadata,
+    get_wire_from_metadata, set_method_name_override_in_headers,
+    set_service_name_override_in_headers, set_wire_in_metadata,
+};
 
 /// Internal header key for MASA context.
 pub const MASA_CONTEXT_HEADER: &str = masa_core::MASA_CONTEXT_HEADER;
 
-const METHOD_NAME_OVERRIDE_HEADER: &str = "x-masa-method-name";
-const SERVICE_NAME_OVERRIDE_HEADER: &str = "x-masa-service-name";
-
 /// Get the MASA context (the budget module's wire data) from metadata.
 pub fn get_masa_context_from_metadata(metadata: &tonic::metadata::MetadataMap) -> Option<Context> {
-    get_wire_from_metadata::<BudgetLayer>(metadata)
+    get_wire_from_metadata::<BudgetModule>(metadata)
 }
 
 /// Set the MASA context in metadata, as the budget module's wire data.
@@ -23,86 +27,17 @@ pub fn get_masa_context_from_metadata(metadata: &tonic::metadata::MetadataMap) -
 /// Module wire data already attached to `metadata` is kept, so the order of
 /// attaching the context and the wire data does not matter.
 pub fn set_masa_context_in_metadata(metadata: &mut tonic::metadata::MetadataMap, ctx: &Context) {
-    set_wire_in_metadata::<BudgetLayer>(metadata, ctx);
-}
-
-/// Get module `M`'s wire data from metadata, if present. Panics on malformed
-/// wire data, like a malformed context.
-pub fn get_wire_from_metadata<M: Layer>(
-    metadata: &tonic::metadata::MetadataMap,
-) -> Option<M::Wire> {
-    wire::get_from_metadata::<M>(metadata).unwrap_or_else(|err| panic!("{err}"))
-}
-
-/// Set module `M`'s wire data in metadata that already carries a context,
-/// keeping other modules' data.
-pub fn set_wire_in_metadata<M: Layer>(metadata: &mut tonic::metadata::MetadataMap, data: &M::Wire) {
-    wire::set_in_metadata::<M>(metadata, data).unwrap_or_else(|err| panic!("{err}"));
+    set_wire_in_metadata::<BudgetModule>(metadata, ctx);
 }
 
 /// The `ctx` header value for `ctx` carrying module `M`'s wire data, for
 /// building inbound requests by hand (tests, tools).
-pub fn header_string_with_wire<M: Layer>(ctx: &Context, data: &M::Wire) -> String {
+pub fn header_string_with_wire<M: Module>(ctx: &Context, data: &M::Wire) -> String {
     let mut out = WireOut::new();
-    out.put::<BudgetLayer>(ctx)
+    out.put::<BudgetModule>(ctx)
         .and_then(|()| out.put::<M>(data))
         .unwrap_or_else(|err| panic!("{err}"));
     out.header_value()
-}
-
-fn get_ascii_metadata<'a>(
-    metadata: &'a tonic::metadata::MetadataMap,
-    key: &str,
-) -> Option<&'a str> {
-    metadata.get(key).and_then(|value| value.to_str().ok())
-}
-
-fn get_ascii_header<'a>(headers: &'a http::HeaderMap, key: &str) -> Option<&'a str> {
-    headers.get(key).and_then(|value| value.to_str().ok())
-}
-
-/// Get the logical method-name override from metadata.
-pub fn get_method_name_override_from_metadata(
-    metadata: &tonic::metadata::MetadataMap,
-) -> Option<&str> {
-    get_ascii_metadata(metadata, METHOD_NAME_OVERRIDE_HEADER)
-}
-
-/// Get the logical service-name override from metadata.
-pub fn get_service_name_override_from_metadata(
-    metadata: &tonic::metadata::MetadataMap,
-) -> Option<&str> {
-    get_ascii_metadata(metadata, SERVICE_NAME_OVERRIDE_HEADER)
-}
-
-/// Get the logical method-name override from HTTP headers.
-pub fn get_method_name_override_from_headers(headers: &http::HeaderMap) -> Option<&str> {
-    get_ascii_header(headers, METHOD_NAME_OVERRIDE_HEADER)
-}
-
-/// Get the logical service-name override from HTTP headers.
-pub fn get_service_name_override_from_headers(headers: &http::HeaderMap) -> Option<&str> {
-    get_ascii_header(headers, SERVICE_NAME_OVERRIDE_HEADER)
-}
-
-/// Set the logical method-name override in HTTP headers.
-pub fn set_method_name_override_in_headers(
-    headers: &mut http::HeaderMap,
-    method_name: &str,
-) -> Result<(), http::header::InvalidHeaderValue> {
-    let value = http::HeaderValue::from_str(method_name)?;
-    headers.insert(METHOD_NAME_OVERRIDE_HEADER, value);
-    Ok(())
-}
-
-/// Set the logical service-name override in HTTP headers.
-pub fn set_service_name_override_in_headers(
-    headers: &mut http::HeaderMap,
-    service_name: &str,
-) -> Result<(), http::header::InvalidHeaderValue> {
-    let value = http::HeaderValue::from_str(service_name)?;
-    headers.insert(SERVICE_NAME_OVERRIDE_HEADER, value);
-    Ok(())
 }
 
 pub use masa_core::{read_context, read_context_from_headers, read_priority_from_headers};
@@ -131,43 +66,27 @@ pub trait MasaRequestExt<T> {
     fn get_masa_context(&self) -> Option<Context>;
 
     /// Set module `M`'s wire data. The MASA context must be attached first.
-    fn set_wire<M: Layer>(&mut self, data: &M::Wire);
+    fn set_wire<M: Module>(&mut self, data: &M::Wire);
 
     /// Get module `M`'s wire data, if present.
-    fn get_wire<M: Layer>(&self) -> Option<M::Wire>;
+    fn get_wire<M: Module>(&self) -> Option<M::Wire>;
 }
 
 impl<T> MasaRequestExt<T> for Request<T> {
     fn set_method_name_override(&mut self, method_name: &str) -> Result<(), Status> {
-        let value = MetadataValue::<Ascii>::try_from(method_name).map_err(|e| {
-            Status::internal(format!(
-                "Failed to create metadata value for method name override: {:?}",
-                e
-            ))
-        })?;
-        self.metadata_mut()
-            .insert(METHOD_NAME_OVERRIDE_HEADER, value);
-        Ok(())
+        RequestExt::set_method_name_override(self, method_name)
     }
 
     fn get_method_name_override(&self) -> Option<&str> {
-        get_method_name_override_from_metadata(self.metadata())
+        RequestExt::get_method_name_override(self)
     }
 
     fn set_service_name_override(&mut self, service_name: &str) -> Result<(), Status> {
-        let value = MetadataValue::<Ascii>::try_from(service_name).map_err(|e| {
-            Status::internal(format!(
-                "Failed to create metadata value for service name override: {:?}",
-                e
-            ))
-        })?;
-        self.metadata_mut()
-            .insert(SERVICE_NAME_OVERRIDE_HEADER, value);
-        Ok(())
+        RequestExt::set_service_name_override(self, service_name)
     }
 
     fn get_service_name_override(&self) -> Option<&str> {
-        get_service_name_override_from_metadata(self.metadata())
+        RequestExt::get_service_name_override(self)
     }
 
     fn set_masa_context(&mut self, ctx: &Context) {
@@ -183,12 +102,12 @@ impl<T> MasaRequestExt<T> for Request<T> {
         get_masa_context_from_metadata(self.metadata())
     }
 
-    fn set_wire<M: Layer>(&mut self, data: &M::Wire) {
-        set_wire_in_metadata::<M>(self.metadata_mut(), data);
+    fn set_wire<M: Module>(&mut self, data: &M::Wire) {
+        RequestExt::set_wire::<M>(self, data);
     }
 
-    fn get_wire<M: Layer>(&self) -> Option<M::Wire> {
-        get_wire_from_metadata::<M>(self.metadata())
+    fn get_wire<M: Module>(&self) -> Option<M::Wire> {
+        RequestExt::get_wire::<M>(self)
     }
 }
 
@@ -204,10 +123,10 @@ pub trait MasaResponseExt<T> {
     fn get_masa_context(&self) -> Option<Context>;
 
     /// Get module `M`'s wire data, if present.
-    fn get_wire<M: Layer>(&self) -> Option<M::Wire>;
+    fn get_wire<M: Module>(&self) -> Option<M::Wire>;
 
     /// Set module `M`'s wire data. The MASA context must be attached first.
-    fn set_wire<M: Layer>(&mut self, data: &M::Wire);
+    fn set_wire<M: Module>(&mut self, data: &M::Wire);
 }
 
 impl<T> MasaResponseExt<T> for Response<T> {
@@ -224,12 +143,12 @@ impl<T> MasaResponseExt<T> for Response<T> {
         get_masa_context_from_metadata(self.metadata())
     }
 
-    fn get_wire<M: Layer>(&self) -> Option<M::Wire> {
-        get_wire_from_metadata::<M>(self.metadata())
+    fn get_wire<M: Module>(&self) -> Option<M::Wire> {
+        ResponseExt::get_wire::<M>(self)
     }
 
-    fn set_wire<M: Layer>(&mut self, data: &M::Wire) {
-        set_wire_in_metadata::<M>(self.metadata_mut(), data);
+    fn set_wire<M: Module>(&mut self, data: &M::Wire) {
+        ResponseExt::set_wire::<M>(self, data);
     }
 }
 
@@ -245,10 +164,10 @@ pub trait MasaStatusExt {
     fn get_masa_context(&self) -> Option<Context>;
 
     /// Get module `M`'s wire data, if present.
-    fn get_wire<M: Layer>(&self) -> Option<M::Wire>;
+    fn get_wire<M: Module>(&self) -> Option<M::Wire>;
 
     /// Set module `M`'s wire data. The MASA context must be attached first.
-    fn set_wire<M: Layer>(&mut self, data: &M::Wire);
+    fn set_wire<M: Module>(&mut self, data: &M::Wire);
 }
 
 impl MasaStatusExt for Status {
@@ -265,12 +184,12 @@ impl MasaStatusExt for Status {
         get_masa_context_from_metadata(self.metadata())
     }
 
-    fn get_wire<M: Layer>(&self) -> Option<M::Wire> {
-        get_wire_from_metadata::<M>(self.metadata())
+    fn get_wire<M: Module>(&self) -> Option<M::Wire> {
+        StatusExt::get_wire::<M>(self)
     }
 
-    fn set_wire<M: Layer>(&mut self, data: &M::Wire) {
-        set_wire_in_metadata::<M>(self.metadata_mut(), data);
+    fn set_wire<M: Module>(&mut self, data: &M::Wire) {
+        StatusExt::set_wire::<M>(self, data);
     }
 }
 
@@ -278,38 +197,6 @@ impl MasaStatusExt for Status {
 mod tests {
     use super::*;
     use crate::ContextBuilder;
-
-    #[test]
-    fn method_override_helpers_round_trip_metadata_and_headers() {
-        let mut request = Request::new(());
-
-        request.set_method_name_override("test_method").unwrap();
-        request.set_service_name_override("test.Service").unwrap();
-
-        assert_eq!(request.get_method_name_override(), Some("test_method"));
-        assert_eq!(request.get_service_name_override(), Some("test.Service"));
-        assert_eq!(
-            get_method_name_override_from_metadata(request.metadata()),
-            Some("test_method")
-        );
-        assert_eq!(
-            get_service_name_override_from_metadata(request.metadata()),
-            Some("test.Service")
-        );
-
-        let mut headers = http::HeaderMap::new();
-        set_method_name_override_in_headers(&mut headers, "test_method").unwrap();
-        set_service_name_override_in_headers(&mut headers, "test.Service").unwrap();
-
-        assert_eq!(
-            get_method_name_override_from_headers(&headers),
-            Some("test_method")
-        );
-        assert_eq!(
-            get_service_name_override_from_headers(&headers),
-            Some("test.Service")
-        );
-    }
 
     #[test]
     fn request_extension_round_trips_context() {

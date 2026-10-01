@@ -1,25 +1,47 @@
 # Writing Policy Modules
 
 A Masa policy is a stack of **policy modules**. Each module implements
-`masa_policy::Layer` and hooks into the RPC lifecycle; `PolicyHooks<S>` runs
+`masa_policy::Module` and hooks into the RPC lifecycle; `PolicyHooks<S>` runs
 the stack `S` for every request. Masa's own policies (deadline guard,
 estimation, oracle, predictive/Rajomon admission, queue-latency tracing) are
 built-in modules, and `MasaStack` is the feature-selected default. A new
 policy is a new module, composed into a new stack. It does not need edits to
-`hooks.rs` or new `cfg` branches.
+the hook adapter or new `cfg` branches.
+
+## Crates
+
+The framework owns every mechanism (hook order, which modules run a hook,
+shared per-request state, decision points, outcomes, declared dependencies,
+the wire codec) and has no policy: it knows a request only by its service and
+method name, and never defaults or interprets a value a module carries. It
+lives in three crates that know nothing about Masa
+(`scripts/validate_rpcstack_boundary.py` checks their dependencies):
+
+| Crate | Contents |
+|---|---|
+| `libs/rpcstack-wire` | The `ctx` header's section codec. A leaf crate, so Hyper can read one section without depending on tonic. |
+| `libs/rpcstack` | `Module`, `ModuleServer`, `Stack`/`policy_stack!`, `Extensions`/`ChildState` with decision points, `Outcome`/`ChildOutcome`, `Requires`/`MissingDependency`/`ServerInit`, `build_server`, and the typed wire codec (`WireIn`, `WireOut`, `peek`). |
+| `libs/rpcstack-tonic` | `PolicyHooks<S>` (tonic's `Hooks` for any stack), and `RequestExt`/`ResponseExt`/`StatusExt` for module wire data and method-name overrides on tonic messages. |
+
+`libs/masa-policy` holds Masa's own modules and stacks (budget, guard,
+estimation, oracle, admission, queue latency, `MasaStack`) and re-exports the
+framework, so `masa_policy::Module`, `masa_policy::policy_stack!` and
+`masa_policy::PolicyHooks<S = MasaStack>` name the same items as the
+framework crates. Each framework crate has a README listing its public
+surface.
 
 ## The contract
 
 | Item | Role |
 |---|---|
-| `Layer` | Per-request state and lifecycle hooks. All hooks default to no-ops. |
-| `Layer::Server: LayerServer` | Per-service state, built once by `LayerServer::new(&mut ServerInit)`, which returns `Err(MissingDependency)` when the server state it needs is missing. |
-| `Layer::requires` | Declares the modules that must precede this one in the stack; checked when the server state is built. |
+| `Module` | Per-request state and lifecycle hooks. All hooks default to no-ops. |
+| `Module::Server: ModuleServer` | Per-service state, built once by `ModuleServer::new(&mut ServerInit)`, which returns `Err(MissingDependency)` when the server state it needs is missing. |
+| `Module::requires` | Declares the modules that must precede this one in the stack; checked when the server state is built. |
 | `ChildState` | A typed map for one child RPC (like `Extensions`, but per child): what a module keeps for that child, keyed by type. |
 | `Extensions::propose` / `proposals` / `resolve` | Typed decision points: many modules propose, the owner resolves. See "Decisions". |
 | `Outcome`, `ChildOutcome` | How the request, or one child RPC, ended; passed to `finalize` and `after_child_rpc`. |
-| `BudgetLayer` | Masa's budget module: the request's facts and time budget, and the child's. Owns the `ChildDeadline` and `ChildPriority` decisions. See "Budget module". |
-| `Layer::NAME`, `Layer::Wire` | The module's name (in `Outcome` and the wire envelope) and its own wire data: a serde type whose section is named `NAME` in the `ctx` header. `()` means none. See "Wire data". |
+| `BudgetModule` | Masa's budget module: the request's facts and time budget, and the child's. Owns the `ChildDeadline` and `ChildPriority` decisions. See "Budget module". |
+| `Module::NAME`, `Module::Wire` | The module's name (in `Outcome` and the wire envelope) and its own wire data: a serde type whose section is named `NAME` in the `ctx` header. `()` means none. See "Wire data". |
 | `WireIn` / `WireOut` | Typed access to the wire sections: `wire.get::<Self>()` on an inbound message (a request, or a child's response), `out.put::<Self>(&value)` on an outbound one. |
 | `Extensions` | A per-request typed map (one value per type) that the hooks of all modules share; the framework never reads or fills it. |
 | `ServerInit` | Service name plus a typed store: `provide::<T>()` publishes server state, `get::<T>()` and `require::<T>()` read state from an earlier module. |
@@ -82,10 +104,10 @@ cause (`outcome`) and the final `result`.
 A module that reads what another module provides declares it:
 
 ```rust
-impl Layer for MyAdmission {
+impl Module for MyAdmission {
     // ...
     fn requires(requires: &mut Requires) {
-        requires.module::<BudgetLayer>().module::<EstimationLayer>();
+        requires.module::<BudgetModule>().module::<EstimationModule>();
     }
 }
 ```
@@ -93,8 +115,8 @@ impl Layer for MyAdmission {
 `ServerContext::try_new` (called by `ServerHooks::new`, which panics with the
 same message) walks the stack and fails if a required module is absent or comes
 later, with an error naming both: *module `MyAdmission` requires module
-`EstimationLayer` earlier in the stack, but it comes later; move
-`EstimationLayer` before `MyAdmission`*. A module placed in an illegal position
+`EstimationModule` earlier in the stack, but it comes later; move
+`EstimationModule` before `MyAdmission`*. A module placed in an illegal position
 therefore fails when the server is built, never at the first request. Server
 resources (`ServerInit::provide`/`require`) are for state that a module's
 server shares with another's, such as estimation's latency estimators; their
@@ -106,7 +128,7 @@ Several modules often contribute to one decision: the deadline a child
 request carries, say. The framework supplies the mechanism and no rule:
 
 1. The *owner* defines the decision type, usually a newtype, and documents how
-   it combines proposals (`ChildDeadline(Timestamp)`, owned by `BudgetLayer`).
+   it combines proposals (`ChildDeadline(Timestamp)`, owned by `BudgetModule`).
 2. Any module proposes with `child.propose(value)?` (or `ext.propose` on the
    request map) while the child is being set up. The framework records the value
    with the proposing module's `NAME`, in the order the proposals were made.
@@ -133,7 +155,7 @@ rejected.
 ```rust
 use masa_core::PriorityHint;
 use masa_policy::{
-    policy_stack, BudgetLayer, ChildDeadline, ChildPriority, ChildState, Extensions, Layer,
+    policy_stack, BudgetModule, ChildDeadline, ChildPriority, ChildState, Extensions, Module,
     PolicyHooks, Requires, WireIn, WireOut,
 };
 use tonic::{CowGrpcMethod, Request, Status};
@@ -143,13 +165,13 @@ use tonic::{CowGrpcMethod, Request, Status};
 #[derive(Debug)]
 pub struct ChildEdf;
 
-impl Layer for ChildEdf {
+impl Module for ChildEdf {
     type Server = ();
     const NAME: &'static str = "child_edf";
     type Wire = ();
 
     fn requires(requires: &mut Requires) {
-        requires.module::<BudgetLayer>();
+        requires.module::<BudgetModule>();
     }
 
     fn new(
@@ -179,8 +201,8 @@ impl Layer for ChildEdf {
 // Reuse Masa's budget and estimation modules, add the new one. The module
 // nearest the end of the stack wins a decision under the budget module's rule.
 pub type MyStack = policy_stack![
-    BudgetLayer,
-    masa_policy::modules::EstimationLayer,
+    BudgetModule,
+    masa_policy::modules::EstimationModule,
     ChildEdf,
 ];
 pub type MyHooks = PolicyHooks<MyStack>;
@@ -203,7 +225,7 @@ fn finalize<Ret>(
 }
 ```
 
-`libs/masa-policy/tests/stack_semantics.rs` has runnable toy modules for every
+`libs/rpcstack-tonic/tests/stack_semantics.rs` has runnable toy modules for every
 rule above (order, symmetry, outcome, dependencies, per-child state, decisions
 with different owner rules and a veto, concurrent children), and
 `libs/masa-policy/tests/custom_stack.rs` has modules covering priority
@@ -218,7 +240,7 @@ a serde type and exchanges it through the framework's codec:
 #[derive(Serialize, Deserialize)]
 pub struct MyWire { pub budget: u64 }
 
-impl Layer for MyModule {
+impl Module for MyModule {
     const NAME: &'static str = "my_module";
     type Wire = MyWire;
     // ...
@@ -249,16 +271,18 @@ in `finalize`. The response is read-only there because
 `response_wire` borrows from it; the error status of a failed child carries
 wire sections the same way a successful response does.
 Each section travels in the `ctx` header as `<NAME>:<base64 JSON>`, joined by
-`.`; the header holds nothing else (`libs/masa-policy/src/wire.rs` documents
-the layout, and `libs/masa-core/src/wire.rs` holds the primitives Hyper also
-uses). Sections are decoded independently, and `masa_policy::peek::<M>(&headers)`
+`.`; the header holds nothing else (`libs/rpcstack/src/wire.rs` documents
+the layout, and `libs/rpcstack-wire/src/lib.rs` holds the primitives Hyper also
+uses through `masa_core`). Sections are decoded independently, and `masa_policy::peek::<M>(&headers)`
 decodes one module's section without decoding any other. Sections that are
 built and parsed on every RPC, like estimation's, encode their fields as JSON
 arrays instead of objects (`#[serde(from = ..., into = ...)]` on a tuple
 struct), which made them about a third the size and the per-RPC hook cost
 equal to what it was with the data in `Context`. `NAME` must be
-unique among modules with wire data and use only ASCII letters, digits, `_` or
-`-`; a stack that violates this panics when the server is constructed. Root
+unique among the modules of a stack (the empty module `()` is exempt), and a
+module with wire data must also use only ASCII letters, digits, `_` or `-`; a
+stack that violates this panics when the server is constructed, naming both
+modules of a duplicate. Root
 clients attach wire data with `masa::RootContext` (for example
 `with_rajomon_tokens`). Apps read a response's wire data through `masa`, for
 example `masa::queue_latencies_from_metadata` and
@@ -266,7 +290,7 @@ example `masa::queue_latencies_from_metadata` and
 
 ## Sharing state between modules
 
-Publish server state from the producer's `LayerServer::new` and read it in a
+Publish server state from the producer's `ModuleServer::new` and read it in a
 later module:
 
 ```rust
@@ -276,7 +300,7 @@ init.provide(estimators.clone());
 let est = init.require::<LatencyEstimators<_>>()?;
 ```
 
-`PredAdmissionLayer` reads `EstimationLayer`'s estimators this way. Published
+`PredAdmissionModule` reads `EstimationModule`'s estimators this way. Published
 values should be cheap handles (`Arc`-backed) so producer and consumer share one
 instance.
 
@@ -290,7 +314,7 @@ hooks and `finalize` get `Extensions` shared.
 Estimation and predictive admission use both mechanisms. Estimation inserts an
 `EstimationInfo` (hop count and ingress flag, root method and its registry id)
 in `new`, and keeps its running tally of the request's polls and children in
-`Extensions` too. Admission declares `EstimationLayer` in `requires`, reads the
+`Extensions` too. Admission declares `EstimationModule` in `requires`, reads the
 `EstimationInfo` in `new`, and in `finalize` takes a `SubtreeHealth::of(ext)`
 snapshot: whether a child returned early and whether any hop tripped
 `signal_slack`. Post-hooks run in reverse order, so admission finalizes before
@@ -306,8 +330,8 @@ than keeping a flag.
 ### Budget module
 
 A request's API, id, SLO, gateway entry time, deadline and priority (the
-`masa_core::Context`) are the wire data of `BudgetLayer`, in the `budget`
-section. The framework neither reads nor forwards them. `BudgetLayer`:
+`masa_core::Context`) are the wire data of `BudgetModule`, in the `budget`
+section. The framework neither reads nor forwards them. `BudgetModule`:
 
 - reads the request's section in `new` (a request without one is a
   misconfigured sender and panics, as for any malformed wire data) and
@@ -315,11 +339,11 @@ section. The framework neither reads nor forwards them. `BudgetLayer`:
   gateway entry, this hop's deadline, the end-to-end deadline
   (`gateway_entry + slo`) and priority. The guard, estimation, oracle and
   predictive admission read it in their own `new` and keep a clone. They
-  declare `BudgetLayer` in `requires`, so a stack that puts one of them before
+  declare `BudgetModule` in `requires`, so a stack that puts one of them before
   it, or omits it, fails at construction.
 - owns the child's `ChildDeadline` and `ChildPriority` decisions. Modules that
   decide them (estimation, oracle) `propose` in `before_child_rpc`;
-  `BudgetLayer` resolves both in `seal_child_rpc` with the rule *the last
+  `BudgetModule` resolves both in `seal_child_rpc` with the rule *the last
   proposal wins* (so the module nearest the end of the stack decides), and the
   parent's own value when nobody proposed. The two decisions resolve
   independently, so a module that proposes only a priority leaves the deadline
@@ -328,7 +352,7 @@ section. The framework neither reads nor forwards them. `BudgetLayer`:
 - writes the request's own section into the response in `finalize`, again
   reusing the encoded inbound section.
 
-A stack needs no writer module: any stack that starts with `BudgetLayer` sends
+A stack needs no writer module: any stack that starts with `BudgetModule` sends
 its children a budget section. A stack without it sends none (the framework
 sends nothing by default), which Masa's next hop cannot serve.
 
@@ -344,7 +368,7 @@ Hyper reads only the section's priority to schedule a stream
 
 ### Estimation's wire data
 
-`EstimationLayer`'s section (`EstimationWire`) has two halves, one per
+`EstimationModule`'s section (`EstimationWire`) has two halves, one per
 direction. A request carries `EstimationRequestWire { hop_count, root_method }`:
 estimation itself writes the child's section in `before_child_rpc` with the hop
 count incremented (saturating at 255) and the root passed on unchanged, and the
@@ -390,8 +414,8 @@ To try a policy:
 1. Write modules as files under `libs/masa-policy/src/agent/` and declare them
    in `agent/mod.rs`.
 2. Set `AgentStack` in `agent/mod.rs`, e.g.
-   `pub type AgentStack = policy_stack![crate::modules::BudgetLayer, crate::modules::EstimationLayer, my_policy::MyAdmission];`.
-   Keep `BudgetLayer` first (see "Budget module"): without it requests carry no
+   `pub type AgentStack = policy_stack![crate::modules::BudgetModule, crate::modules::EstimationModule, my_policy::MyAdmission];`.
+   Keep `BudgetModule` first (see "Budget module"): without it requests carry no
    deadline or priority to the next hop.
    It starts as `crate::MasaStack`, so `<features>,stack_custom` behaves like
    `<features>` until you change it.
@@ -406,13 +430,14 @@ To try a policy:
 Rules for the agent stack:
 
 - Edit only `libs/masa-policy/src/agent/`. Built-in modules, `masa_stack.rs`,
-  `hooks.rs`, and the vendored libraries are out of scope for a policy change.
+  the framework crates, and the vendored libraries are out of scope for a
+  policy change.
 - Keep one hooks type per binary: use `masa::DefaultHooks` everywhere rather
   than naming `PolicyHooks<...>` in app code (see below).
 - Never delay `PriorityHint::infra()` work: it is reserved for infrastructure
   tasks.
 - Built-in modules are reusable only when their feature is enabled (e.g.
-  `crate::modules::EstimationLayer` needs `estimator`). Modules' wire
+  `crate::modules::EstimationModule` needs `estimator`). Modules' wire
   sections depend on the stack, so build every service with the same features.
 - Validate with `./scripts/check.sh "sched_slo,stack_custom"` and
   `./scripts/test.sh --feature "sched_slo,stack_custom"`.
@@ -512,4 +537,4 @@ These policy decisions are still selected by features outside `masa-policy`:
   should use its own wire section.
 - **Behavior toggles inside built-in modules**: e.g., `abort_slack`,
   `signal_slack`, `deadline_equals_slack` and the `est_*` estimator choice are
-  still `cfg`/`const` switches inside `EstimationLayer`.
+  still `cfg`/`const` switches inside `EstimationModule`.

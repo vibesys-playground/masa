@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use masa_core::{time_now, PriorityHint};
 use masa_policy::ContextBuilder;
-use masa_policy::{peek, Extensions, Layer, MasaRequestExt, WireIn, WireOut, MASA_CONTEXT_HEADER};
+use masa_policy::{peek, Extensions, MasaRequestExt, Module, WireIn, WireOut, MASA_CONTEXT_HEADER};
 use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Request};
 
@@ -33,7 +33,7 @@ macro_rules! bench_module {
         #[derive(Debug)]
         struct $name;
 
-        impl Layer for $name {
+        impl Module for $name {
             type Server = ();
             const NAME: &'static str = $key;
             type Wire = $wire;

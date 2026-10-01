@@ -108,7 +108,7 @@ compile_error!("'sched_pred' requires 'estimator'");
 compile_error!("'ac_pred' requires 'estimator'");
 
 // Admission control requires a scheduling policy to be active, otherwise
-// DefaultHooks resolves to NoopHooks and the layer is never invoked.
+// DefaultHooks resolves to NoopHooks and the module is never invoked.
 #[cfg(all(
     any(feature = "ac_pred", feature = "ac_rajomon"),
     not(any(

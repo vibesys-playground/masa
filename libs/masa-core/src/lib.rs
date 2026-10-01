@@ -5,7 +5,7 @@ mod latency_estimator;
 mod priority;
 mod timing;
 mod typing;
-pub mod wire;
+use rpcstack_wire as wire;
 
 pub use context::FutureSpan;
 pub use context::{
@@ -27,7 +27,7 @@ pub use timing::{time_now, Instant, LatencyTracker};
 pub use typing::{Address, Api, Latency, MethodId, RequestId, ServiceId, Timestamp};
 
 /// Header key for MASA context.
-pub const MASA_CONTEXT_HEADER: &str = "ctx";
+pub const MASA_CONTEXT_HEADER: &str = rpcstack_wire::HEADER_NAME;
 
 /// Oracle-only header carrying perfect child RPC wall-clock work in microseconds.
 pub const ORACLE_CHILD_WORK_US_HEADER: &str = "x-masa-oracle-child-work-us";

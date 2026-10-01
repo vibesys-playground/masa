@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use masa_core::time_now;
-use masa_policy::modules::EstimationLayer;
+use masa_policy::modules::EstimationModule;
 use masa_policy::ContextBuilder;
 use masa_policy::{
     EstimationResponseWire, EstimationWire, MasaResponseExt, PolicyHooks, MASA_CONTEXT_HEADER,
@@ -31,7 +31,7 @@ type Chi = <PolicyHooks as Hooks>::ChildContext;
 /// attaches.
 fn child_response(parent: &masa_core::Context) -> Response<()> {
     let mut response = Response::new(()).with_masa_context(parent);
-    response.set_wire::<EstimationLayer>(&EstimationWire::response(EstimationResponseWire {
+    response.set_wire::<EstimationModule>(&EstimationWire::response(EstimationResponseWire {
         compute_time_us: 4_000,
         accumulated_compute_us: 5_000,
         utilization: 0.5,

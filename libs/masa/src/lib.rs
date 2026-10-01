@@ -24,7 +24,7 @@ pub use masa_policy::RajomonWire;
 /// metadata) in `metadata`, if any.
 #[cfg(feature = "estimator")]
 pub fn estimation_from_metadata(metadata: &tonic::metadata::MetadataMap) -> Option<EstimationWire> {
-    masa_policy::get_wire_from_metadata::<masa_policy::modules::EstimationLayer>(metadata)
+    masa_policy::get_wire_from_metadata::<masa_policy::modules::EstimationModule>(metadata)
 }
 
 /// Set the estimation module's wire data in `metadata`, keeping other modules' data.
@@ -33,7 +33,7 @@ pub fn set_estimation_in_metadata(
     metadata: &mut tonic::metadata::MetadataMap,
     wire: &EstimationWire,
 ) {
-    masa_policy::set_wire_in_metadata::<masa_policy::modules::EstimationLayer>(metadata, wire);
+    masa_policy::set_wire_in_metadata::<masa_policy::modules::EstimationModule>(metadata, wire);
 }
 
 /// Set the queue-latency module's wire data in `metadata`, keeping other modules' data.
@@ -42,19 +42,19 @@ pub fn set_queue_latencies_in_metadata(
     metadata: &mut tonic::metadata::MetadataMap,
     wire: &QueueLatencyWire,
 ) {
-    masa_policy::set_wire_in_metadata::<masa_policy::modules::QueueLatencyLayer>(metadata, wire);
+    masa_policy::set_wire_in_metadata::<masa_policy::modules::QueueLatencyModule>(metadata, wire);
 }
 
 /// Rajomon's wire data (request tokens or response price) in `metadata`, if any.
 #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
 pub fn rajomon_from_metadata(metadata: &tonic::metadata::MetadataMap) -> Option<RajomonWire> {
-    masa_policy::get_wire_from_metadata::<masa_policy::modules::RajomonLayer>(metadata)
+    masa_policy::get_wire_from_metadata::<masa_policy::modules::RajomonModule>(metadata)
 }
 
 /// Set Rajomon's wire data in `metadata`, keeping other modules' data.
 #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
 pub fn set_rajomon_in_metadata(metadata: &mut tonic::metadata::MetadataMap, wire: &RajomonWire) {
-    masa_policy::set_wire_in_metadata::<masa_policy::modules::RajomonLayer>(metadata, wire);
+    masa_policy::set_wire_in_metadata::<masa_policy::modules::RajomonModule>(metadata, wire);
 }
 
 /// The queue latencies the call tree below a response reported, read from the
@@ -63,7 +63,7 @@ pub fn set_rajomon_in_metadata(metadata: &mut tonic::metadata::MetadataMap, wire
 pub fn queue_latencies_from_metadata(
     metadata: &tonic::metadata::MetadataMap,
 ) -> Option<QueueLatencyWire> {
-    masa_policy::get_wire_from_metadata::<masa_policy::modules::QueueLatencyLayer>(metadata)
+    masa_policy::get_wire_from_metadata::<masa_policy::modules::QueueLatencyModule>(metadata)
 }
 
 use std::ops::Deref;
@@ -201,7 +201,7 @@ impl RootContext {
     #[cfg(feature = "ac_rajomon")]
     pub fn with_rajomon_tokens(mut self, tokens: u64) -> Self {
         self.wire
-            .put::<masa_policy::modules::RajomonLayer>(&masa_policy::RajomonWire::request(tokens))
+            .put::<masa_policy::modules::RajomonModule>(&masa_policy::RajomonWire::request(tokens))
             .unwrap_or_else(|err| panic!("{err}"));
         self
     }
@@ -214,7 +214,7 @@ impl RootContext {
         root_method: Option<RootMethod>,
     ) -> Self {
         self.wire
-            .put::<masa_policy::modules::EstimationLayer>(&EstimationWire::request(
+            .put::<masa_policy::modules::EstimationModule>(&EstimationWire::request(
                 hop_count,
                 root_method,
             ))
@@ -225,7 +225,7 @@ impl RootContext {
     /// Attach the context and wire data to `request`.
     pub fn attach<T>(&self, mut request: tonic::Request<T>) -> tonic::Request<T> {
         let mut wire = self.wire.clone();
-        wire.put::<masa_policy::BudgetLayer>(&self.context)
+        wire.put::<masa_policy::BudgetModule>(&self.context)
             .unwrap_or_else(|err| panic!("{err}"));
         wire.install(request.metadata_mut());
         request
@@ -255,7 +255,7 @@ pub fn attach_context<T>(req: &mut tonic::Request<T>, api: &str, slo: Duration) 
 /// `None` if the responder did not propagate one.
 #[cfg(feature = "ac_rajomon")]
 pub fn rajomon_price_from_metadata(metadata: &tonic::metadata::MetadataMap) -> Option<u64> {
-    masa_policy::get_wire_from_metadata::<masa_policy::modules::RajomonLayer>(metadata)
+    masa_policy::get_wire_from_metadata::<masa_policy::modules::RajomonModule>(metadata)
         .and_then(|wire| wire.price)
 }
 

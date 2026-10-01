@@ -9,6 +9,7 @@ PYTHON_BIN="${PYTHON:-python3}"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/validate_policy_matrix.py"
 "$PYTHON_BIN" "$REPO_ROOT/scripts/validate_tonic_masa_boundary.py"
+"$PYTHON_BIN" "$REPO_ROOT/scripts/validate_rpcstack_boundary.py"
 
 flag_combos=(
     "sched_fifo"
@@ -81,6 +82,9 @@ check_tests() {
     echo "Checking tests for Masa crates and apps"
     # List of packages to check tests for (excluding forked libs that fail strict checks)
     local packages=(
+        "rpcstack-wire"
+        "rpcstack"
+        "rpcstack-tonic"
         "masa"
         "masa-core"
         "masa-policy"

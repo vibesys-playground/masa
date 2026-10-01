@@ -35,6 +35,9 @@ members = [
   "libs/masa-semantics",
   "libs/multiqueue-prio-queue",
   "libs/rpcstack-sched",
+  "libs/rpcstack",
+  "libs/rpcstack-tonic",
+  "libs/rpcstack-wire",
 
   # evaluation applications
   "apps/hotel",
