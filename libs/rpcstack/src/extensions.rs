@@ -239,7 +239,7 @@ impl Extensions {
 /// child's `before_child_rpc` to its `after_child_rpc`, or to its rejection.
 ///
 /// Each child RPC has its own map, so what modules store here (the proposals
-/// for this child's deadline and priority, a latency tracker) belongs to that
+/// for this child's cost, a latency tracker) belongs to that
 /// child alone, however many children are in flight. It is keyed by type
 /// like [`Extensions`], so a module finds its state, and a module that wants
 /// to read another's, by naming the type, never by position in the stack.

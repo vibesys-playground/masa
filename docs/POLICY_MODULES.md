@@ -6,7 +6,29 @@ the stack `S` for every request. Masa's own policies (deadline guard,
 estimation, oracle, predictive/Rajomon admission, queue-latency tracing) are
 built-in modules, and `MasaStack` is the feature-selected default. A new
 policy is a new module, composed into a new stack. It does not need edits to
-`hooks.rs` or new `cfg` branches.
+the hook adapter or new `cfg` branches.
+
+## Crates
+
+The framework owns every mechanism (hook order, which modules run a hook,
+shared per-request state, decision points, outcomes, declared dependencies,
+the wire codec) and has no policy: it knows a request only by its service and
+method name, and never defaults or interprets a value a module carries. It
+lives in three crates that know nothing about Masa
+(`scripts/validate_rpcstack_boundary.py` checks their dependencies):
+
+| Crate | Contents |
+|---|---|
+| `libs/rpcstack-wire` | The `ctx` header's section codec. A leaf crate, so Hyper can read one section without depending on tonic. |
+| `libs/rpcstack` | `Module`, `ModuleServer`, `Stack`/`policy_stack!`, `Extensions`/`ChildState` with decision points, `Outcome`/`ChildOutcome`, `Requires`/`MissingDependency`/`ServerInit`, `build_server`, and the typed wire codec (`WireIn`, `WireOut`, `peek`). |
+| `libs/rpcstack-tonic` | `PolicyHooks<S>` (tonic's `Hooks` for any stack), and `RequestExt`/`ResponseExt`/`StatusExt` for module wire data and method-name overrides on tonic messages. |
+
+`libs/masa-policy` holds Masa's own modules and stacks (budget, guard,
+estimation, oracle, admission, queue latency, `MasaStack`) and re-exports the
+framework, so `masa_policy::Module`, `masa_policy::policy_stack!` and
+`masa_policy::PolicyHooks<S = MasaStack>` name the same items as the
+framework crates. Each framework crate has a README listing its public
+surface.
 
 ## The contract
 
@@ -203,7 +225,7 @@ fn finalize<Ret>(
 }
 ```
 
-`libs/masa-policy/tests/stack_semantics.rs` has runnable toy modules for every
+`libs/rpcstack-tonic/tests/stack_semantics.rs` has runnable toy modules for every
 rule above (order, symmetry, outcome, dependencies, per-child state, decisions
 with different owner rules and a veto, concurrent children), and
 `libs/masa-policy/tests/custom_stack.rs` has modules covering priority
@@ -249,16 +271,18 @@ in `finalize`. The response is read-only there because
 `response_wire` borrows from it; the error status of a failed child carries
 wire sections the same way a successful response does.
 Each section travels in the `ctx` header as `<NAME>:<base64 JSON>`, joined by
-`.`; the header holds nothing else (`libs/masa-policy/src/wire.rs` documents
-the layout, and `libs/masa-core/src/wire.rs` holds the primitives Hyper also
-uses). Sections are decoded independently, and `masa_policy::peek::<M>(&headers)`
+`.`; the header holds nothing else (`libs/rpcstack/src/wire.rs` documents
+the layout, and `libs/rpcstack-wire/src/lib.rs` holds the primitives Hyper also
+uses through `masa_core`). Sections are decoded independently, and `masa_policy::peek::<M>(&headers)`
 decodes one module's section without decoding any other. Sections that are
 built and parsed on every RPC, like estimation's, encode their fields as JSON
 arrays instead of objects (`#[serde(from = ..., into = ...)]` on a tuple
 struct), which made them about a third the size and the per-RPC hook cost
 equal to what it was with the data in `Context`. `NAME` must be
-unique among modules with wire data and use only ASCII letters, digits, `_` or
-`-`; a stack that violates this panics when the server is constructed. Root
+unique among the modules of a stack (the empty module `()` is exempt), and a
+module with wire data must also use only ASCII letters, digits, `_` or `-`; a
+stack that violates this panics when the server is constructed, naming both
+modules of a duplicate. Root
 clients attach wire data with `masa::RootContext` (for example
 `with_rajomon_tokens`). Apps read a response's wire data through `masa`, for
 example `masa::queue_latencies_from_metadata` and
@@ -406,7 +430,8 @@ To try a policy:
 Rules for the agent stack:
 
 - Edit only `libs/masa-policy/src/agent/`. Built-in modules, `masa_stack.rs`,
-  `hooks.rs`, and the vendored libraries are out of scope for a policy change.
+  the framework crates, and the vendored libraries are out of scope for a
+  policy change.
 - Keep one hooks type per binary: use `masa::DefaultHooks` everywhere rather
   than naming `PolicyHooks<...>` in app code (see below).
 - Never delay `PriorityHint::infra()` work: it is reserved for infrastructure

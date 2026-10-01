@@ -108,7 +108,7 @@ The `masa` crate defines the fundamental types shared across the system.
 
 `masa_policy::ContextBuilder` creates root `Context` instances. If no explicit `prio_hint` is provided, it uses `masa_policy::root_priority`, which defaults to `PriorityHint::new(deadline)` — using the per-hop deadline as the priority value. Under `sched_pred`, the default is converted to relative time-left (`deadline - time_now()`) so initial H2 stream priority uses the same scale as dynamic reprioritization; under `sched_tailclipper` it is the gateway entry time.
 
-Serialization: `to_header_string()` / `from_header_string()` produce and read a `ctx` header value holding the `budget` section (a base64 JSON array, see `libs/masa-core/src/wire.rs`).
+Serialization: `to_header_string()` / `from_header_string()` produce and read a `ctx` header value holding the `budget` section (a base64 JSON array, see `libs/rpcstack-wire/src/lib.rs`).
 
 ### `PriorityHint`
 
@@ -175,7 +175,7 @@ For a complete request lifecycle:
 10. `finalize_after_serialization()` — after response is serialized (e.g., inject `x-queue-latency` header).
 
 ### Policy Implementation
-All scheduling policies are unified into `PolicyHooks<S>` (`libs/masa-policy/src/hooks.rs`), which owns context plumbing and dispatches every lifecycle hook through the module stack `S` in order (first `Err` short-circuits). Stacks are built with `policy_stack!` (`module/mod.rs`); `MasaStack` (`masa_stack.rs`) is the feature-selected default:
+All scheduling policies are unified into `PolicyHooks<S>` (`libs/rpcstack-tonic/src/hooks.rs`, re-exported by `masa-policy` with `MasaStack` as the default `S`), which owns context plumbing and dispatches every lifecycle hook through the module stack `S` in order (first `Err` short-circuits). Stacks are built with `policy_stack!` (`libs/rpcstack/src/module.rs`); `MasaStack` (`masa_stack.rs`) is the feature-selected default:
 *   **`E2eDeadlineGuardModule`** (`module/e2e_deadline_guard.rs`): Checks deadline in `before_poll`/`after_poll`; aborts past-deadline requests. Enabled by `abort_slo` feature.
 *   **`EstimationModule`** (`module/est/module.rs`): Latency tracking, deadline tightening, reprioritization, local deadline checks. Enabled by `estimator` feature. Publishes its estimators through `ServerInit` for later modules.
 *   **`OracleModule`** (`module/oracle.rs`): Perfect-information child deadline and priority. Enabled by `sched_oracle` feature.
@@ -201,7 +201,7 @@ The child's `Context` is written by the budget modules as the `budget` section o
 
 ### Method Name Override
 
-The `x-masa-method-name` header (`libs/masa-policy/src/context_ext.rs`, exposed through Masa-owned request helpers) allows overriding the gRPC method name for latency tracking. This is used by applications where a generic endpoint (e.g., `invoke`) handles multiple logical methods (e.g., the synthbench and tracebench applications).
+The `x-rpcstack-method-name` header (`libs/rpcstack-tonic/src/metadata.rs`, exposed through `MasaRequestExt`) allows overriding the gRPC method name for latency tracking. This is used by applications where a generic endpoint (e.g., `invoke`) handles multiple logical methods (e.g., the synthbench and tracebench applications).
 
 ## 4. Transport Layer (`libs/hyper`)
 

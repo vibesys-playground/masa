@@ -107,20 +107,26 @@ Key policy flags:
 
 ### libs/masa & libs/masa-core
 Application-facing Masa API and core types:
-- `libs/masa-core`: `Context` (the budget module's wire data), the `ctx` header section primitives (`wire`), `PriorityHint`, `Prioritize`, and latency distribution utilities
+- `libs/masa-core`: `Context` (the budget module's wire data), `PriorityHint`, `Prioritize`, and latency distribution utilities
 - `libs/masa`: `DefaultHooks` selection by feature flag, context creation helpers, load-balanced transport, and policy-facing reexports from `masa-policy`
 - `DefaultHooks`: `tonic::masa::noop::NoopHooks` with no scheduling features; `masa_policy::PolicyHooks` (= `PolicyHooks<MasaStack>`) when scheduling features are enabled; `PolicyHooks<AgentStack>` with `stack_custom`
 
+### libs/rpcstack-wire, libs/rpcstack & libs/rpcstack-tonic
+The module framework. It owns every mechanism and has no policy (no deadlines, priorities or tokens; a request is known only by service and method name), and depends on no Masa crate, hyper or tokio runtime policy crate (`scripts/validate_rpcstack_boundary.py`). Each crate has a README listing its public surface:
+- `libs/rpcstack-wire`: leaf crate with the `ctx` header section codec (`sections`, `find_section`, `encode_payload`, `decode_payload`, `push_section`, `HEADER_NAME`); `masa-core` uses it so Hyper can read one section selectively
+- `libs/rpcstack`: `Module` (with `requires`), `ModuleServer`, `ServerInit`, `build_server` (checks that `Module::NAME` is unique across the stack and dependencies are met), `Extensions`/`ChildState` (typed per-request and per-child maps, with typed decision points: `propose`/`proposals`/`resolve`), `Outcome`/`ChildOutcome`, `Stack`, `policy_stack!`, and the wire codec (`WireIn`, `WireOut`, `peek`). It owns hook order: pre-hooks head first and short-circuiting; `seal_child_rpc`, `after_child_rpc` and `finalize` tail first, only for modules whose pre-hook ran; `after_poll` head first
+- `libs/rpcstack-tonic`: `PolicyHooks<S>` — tonic's `Hooks` for any stack; owns request plumbing and dispatches every hook through the module stack `S`. Also `RequestExt`/`ResponseExt`/`StatusExt` for module wire data and method-name overrides
+- Tests of the framework use toy modules and no Masa types: `libs/rpcstack/tests`, `libs/rpcstack-tonic/tests`
+
 ### libs/masa-policy/
-Concrete policy hook implementation and metadata helpers:
-- `hooks.rs`: `PolicyHooks<S>` — unified hook implementation; owns context plumbing and dispatches every hook through the module stack `S`
-- `module/mod.rs`: Public policy module API — `Module` (with `requires`), `ModuleServer`, `ServerInit`, `Extensions`/`ChildState` (typed per-request and per-child maps, with typed decision points: `propose`/`proposals`/`resolve`), `Outcome`/`ChildOutcome`, `Stack`, `policy_stack!`. The framework owns hook order: pre-hooks head first and short-circuiting; `seal_child_rpc`, `after_child_rpc` and `finalize` tail first, only for modules whose pre-hook ran; `after_poll` head first
+Masa's own policy, written against the framework; it re-exports the framework under the same paths (`masa_policy::Module`, `policy_stack!`, `PolicyHooks<S = MasaStack>`):
+- `hooks.rs`: `PolicyHooks<S = MasaStack>` and the contexts as aliases of the `rpcstack-tonic` types
 - `masa_stack.rs`: `MasaStack`, the only place where features choose modules (disabled slots are `()`)
 - `agent/`: `AgentStack`, the agent-owned stack selected by `stack_custom`; new policies for apps and experiments go here
 - `module/`: Built-in modules — `budget.rs` (request facts, and the child budget as a decision the budget module resolves; `ContextBuilder` and the root priority formula), `e2e_deadline_guard.rs`, `oracle.rs`, `queue_latency.rs`, `est/` (estimation), `admission/` (predictive + rajomon)
-- To add a policy, write a new module implementing `Module` and compose a stack; do not add branches to `hooks.rs`. See `docs/POLICY_MODULES.md`
-- `context_ext.rs`: Context (budget section) helpers and `MasaRequestExt`/`MasaResponseExt`/`MasaStatusExt`
-- Depends on `tonic` for hook traits and gRPC boundary types; vendored tonic does not depend on `masa-policy`
+- To add a policy, write a new module implementing `Module` and compose a stack; do not add branches to the hook adapter. See `docs/POLICY_MODULES.md`
+- `context_ext.rs`: Context (budget section) helpers and `MasaRequestExt`/`MasaResponseExt`/`MasaStatusExt` (the framework's request helpers plus the Masa context)
+- Depends on `rpcstack`, `rpcstack-tonic` and `tonic`; vendored tonic does not depend on `masa-policy` or on the framework crates
 
 ### libs/tonic/tonic/src/masa/
 Tonic-specific glue:

@@ -9,7 +9,7 @@
 //   the first `Err` short-circuits the rest.
 // - `seal_child_rpc` runs once per child RPC after every `before_child_rpc`
 //   succeeded, in reverse stack order; a module can reject the child there.
-// - Several modules can contribute to one decision (the child's deadline, say):
+// - Several modules can contribute to one decision (a child's cost, say):
 //   they `propose` typed values, the framework records them with the proposing
 //   module's name, and the module that owns the decision `resolve`s them in its
 //   `seal_child_rpc` by its own rule. The framework has none.
@@ -485,7 +485,7 @@ pub trait Module: Send + Sync + std::fmt::Debug + 'static {
 
     /// Called after each poll of the handler future.
     ///
-    /// Returns `Err` to end the request (e.g., deadline guard on `Pending`).
+    /// Returns `Err` to end the request (e.g., a guard checking on `Pending`).
     /// A decision point like `before_poll`, so it runs in stack order and the
     /// first `Err` ends the request: the order in which modules may end it is
     /// the same before and after the poll, and a poll has no nesting to

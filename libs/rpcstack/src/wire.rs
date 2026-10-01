@@ -13,7 +13,7 @@
 //! ```
 //!
 //! Each module with wire data is one section, for example
-//! `rajomon:eyJ0b2tlbnMiOjB9` for `{"tokens":0}`. Neither `.` nor `:` is in
+//! `count:eyJuIjowfQ==` for `{"n":0}`. Neither `.` nor `:` is in
 //! the base64 alphabet, and module names may not contain them, so the value is
 //! split with plain string searches. The primitives live in [`rpcstack_wire`],
 //! which has no HTTP or gRPC dependencies, so a crate that cannot depend on
