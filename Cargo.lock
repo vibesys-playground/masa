@@ -3058,7 +3058,6 @@ dependencies = [
  "http",
  "masa",
  "masa-core",
- "masa-policy",
  "rand 0.8.5",
  "tokio",
  "tonic",
