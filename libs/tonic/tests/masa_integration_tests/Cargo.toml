@@ -17,6 +17,7 @@ masa-core = { path = "../../../masa-core" }
 masa-policy = { path = "../../../masa-policy" }
 rpcstack-sched = { path = "../../../rpcstack-sched" }
 http = { version = "0.2" }
+serde = { version = "1", features = ["derive"] }
 
 [build-dependencies]
 prost-build = "0.12"

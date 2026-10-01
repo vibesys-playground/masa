@@ -64,7 +64,7 @@ pub fn decode_payload_tail<'b>(payload: &str, buf: &'b mut [u8]) -> Result<&'b [
         return Err("base64: invalid length".to_owned());
     }
     let groups = (payload.len() / 4).min(buf.len() / 3);
-    let tail = &payload[payload.len() - groups * 4..];
+    let tail = &payload.as_bytes()[payload.len() - groups * 4..];
     let len = BASE64
         .decode_slice(tail, buf)
         .map_err(|err| format!("base64: {err}"))?;
@@ -121,7 +121,21 @@ mod tests {
         );
         assert!(decode_payload_tail("abc", &mut buf).is_err());
         assert!(decode_payload_tail("!!!!", &mut buf).is_err());
+        assert!(decode_payload_tail("AA=A", &mut buf).is_err());
+        assert!(decode_payload_tail("A===", &mut buf).is_err());
+        assert!(decode_payload_tail("=AAA", &mut buf).is_err());
         assert_eq!(decode_payload_tail("", &mut buf).unwrap(), b"");
+    }
+
+    #[test]
+    fn tail_agrees_with_the_general_decoder_for_every_padding() {
+        for len in 0..40usize {
+            let payload = encode_payload(&"x".repeat(len)).unwrap();
+            let whole = BASE64.decode(&payload).unwrap();
+            let mut buf = [0u8; 12];
+            let tail = decode_payload_tail(&payload, &mut buf).unwrap();
+            assert!(!tail.is_empty() && whole.ends_with(tail), "{len}");
+        }
     }
 
     #[test]

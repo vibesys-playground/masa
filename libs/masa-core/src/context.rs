@@ -136,10 +136,21 @@ fn priority_at_end_of_array(tail: &[u8]) -> Option<u64> {
     if digits.is_empty() || (digits.len() > 1 && digits[0] == b'0') {
         return None;
     }
-    digits.iter().try_fold(0u64, |acc, &b| {
-        let digit = b.is_ascii_digit().then(|| u64::from(b - b'0'))?;
-        acc.checked_mul(10)?.checked_add(digit)
-    })
+    // Nineteen digits cannot overflow a `u64`, which is every priority in
+    // practice; only a twentieth digit needs the checked arithmetic.
+    let mut value = 0u64;
+    for &b in digits {
+        let digit = u64::from(b.wrapping_sub(b'0'));
+        if digit > 9 {
+            return None;
+        }
+        value = if digits.len() < 20 {
+            value * 10 + digit
+        } else {
+            value.checked_mul(10)?.checked_add(digit)?
+        };
+    }
+    Some(value)
 }
 
 impl Default for Context {

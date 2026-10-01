@@ -32,9 +32,9 @@ pub use hooks::{ChildContext, ParentContext, PolicyHooks, ServerContext};
 pub use masa_stack::MasaStack;
 pub use module::{
     root_priority, BudgetInfo, BudgetModule, ChildDeadline, ChildOutcome, ChildPriority,
-    ChildState, ContextBuilder, DecisionClosed, Early, Extensions, MissingDependency, Module,
-    ModuleServer, ModuleStack, Outcome, Proposal, Proposals, Rejection, Requires, ServerInit,
-    Stack,
+    ChildState, ContextBuilder, DecisionClosed, Early, Extensions, Ingress, MissingDependency,
+    Module, ModuleServer, ModuleStack, Outcome, Proposal, Proposals, Rejection, Requires,
+    ServerInit, Stack,
 };
 pub use rpcstack::wire;
 pub use rpcstack::{peek, policy_stack, WireError, WireIn, WireOut};

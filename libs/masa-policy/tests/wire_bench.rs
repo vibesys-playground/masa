@@ -4,7 +4,9 @@
 //   cargo test --release -p masa-policy --test wire_bench -- --ignored --nocapture
 //
 // (a) decode the whole budget `Context`,
-// (a2) read only its priority (what hyper does per HTTP/2 stream),
+// (a2) read only its priority, as hyper did per HTTP/2 stream before ingress
+//      hooks (decode the section, skipping five of its six fields),
+// (a3) the ingress hook, which hyper runs per HTTP/2 stream now,
 // (b) split the wire envelope into sections without decoding any,
 // (c) `peek` one small module section.
 
@@ -14,8 +16,30 @@ use std::time::Instant;
 use masa_core::{time_now, PriorityHint};
 use masa_policy::ContextBuilder;
 use masa_policy::{peek, Extensions, MasaRequestExt, Module, WireIn, WireOut, MASA_CONTEXT_HEADER};
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
+use tonic::masa::Hooks;
 use tonic::{CowGrpcMethod, Request};
+
+/// What hyper decoded per stream before ingress hooks: the priority alone, by
+/// deserializing the section and skipping the other five fields.
+#[derive(Deserialize)]
+struct SkipToPriority(
+    IgnoredAny,
+    IgnoredAny,
+    IgnoredAny,
+    IgnoredAny,
+    IgnoredAny,
+    u64,
+);
+
+fn skip_to_priority(headers: &http::HeaderMap) -> u64 {
+    let ctx = headers.get(MASA_CONTEXT_HEADER).unwrap().to_str().unwrap();
+    let payload = rpcstack_wire::find_section(ctx, "budget").unwrap();
+    rpcstack_wire::decode_payload::<SkipToPriority>(payload)
+        .unwrap()
+        .5
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Small {
@@ -49,16 +73,22 @@ bench_module!(SmallModule, "small", Small);
 bench_module!(LargerModule, "larger", Larger);
 bench_module!(OtherModule, "other", Small);
 
+/// The fastest of several runs, which is least disturbed by other load.
 fn time(label: &str, iterations: u32, mut f: impl FnMut()) {
-    for _ in 0..iterations / 10 {
+    const RUNS: u32 = 7;
+    let per_run = iterations / RUNS;
+    for _ in 0..per_run {
         f();
     }
-    let start = Instant::now();
-    for _ in 0..iterations {
-        f();
+    let mut best = f64::MAX;
+    for _ in 0..RUNS {
+        let start = Instant::now();
+        for _ in 0..per_run {
+            f();
+        }
+        best = best.min(start.elapsed().as_nanos() as f64 / f64::from(per_run));
     }
-    let ns = start.elapsed().as_nanos() as f64 / f64::from(iterations);
-    println!("{label:<56} {ns:>9.1} ns/op");
+    println!("{label:<56} {best:>9.1} ns/op");
 }
 
 #[test]
@@ -110,11 +140,41 @@ fn compare_context_decode_envelope_split_and_peek() {
     time("(a) full Context decode, header with 4 sections", n, || {
         black_box(masa_core::read_context_from_headers(black_box(&headers)));
     });
-    time("(a2) priority only, header without wire data", n, || {
-        black_box(masa_core::read_priority_from_headers(black_box(&plain)));
+    time(
+        "(a2) priority, decode and skip, budget section only",
+        n,
+        || {
+            black_box(skip_to_priority(black_box(&plain)));
+        },
+    );
+    time(
+        "(a2) priority, decode and skip, header with 4 sections",
+        n,
+        || {
+            black_box(skip_to_priority(black_box(&headers)));
+        },
+    );
+    time("(a3) ingress hook, budget section only", n, || {
+        black_box(<masa_policy::PolicyHooks as Hooks>::ingress(black_box(
+            &plain,
+        )));
     });
-    time("(a2) priority only, header with 4 sections", n, || {
-        black_box(masa_core::read_priority_from_headers(black_box(&headers)));
+    time("(a3) ingress hook, header with 4 sections", n, || {
+        black_box(<masa_policy::PolicyHooks as Hooks>::ingress(black_box(
+            &headers,
+        )));
+    });
+    let payload = rpcstack_wire::find_section(
+        plain.get(MASA_CONTEXT_HEADER).unwrap().to_str().unwrap(),
+        "budget",
+    )
+    .unwrap()
+    .to_owned();
+    time("(x) peek_priority only", n, || {
+        black_box(masa_core::peek_priority(black_box(&payload)).unwrap());
+    });
+    time("(x) headers.get only", n, || {
+        black_box(black_box(&plain).get(MASA_CONTEXT_HEADER));
     });
     time("(b) envelope split (WireIn::from_headers)", n, || {
         black_box(WireIn::from_headers(black_box(&headers)).unwrap());
