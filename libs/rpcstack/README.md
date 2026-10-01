@@ -33,10 +33,19 @@ Public surface:
   decision and its owner resolves it by its own rule.
 - `Outcome` and `ChildOutcome`: how a request ended, and how a child RPC ended,
   as `finalize` and `after_child_rpc` see them.
-- `WireIn`, `WireOut`, `WireError`, `peek`, `HEADER_NAME`: the typed wire
-  codec. `WireIn` is a borrowed view of an inbound header that decodes one
-  section on demand; `WireOut` collects the sections a module puts. A missing
-  section is `None`; what that means is up to the module.
+- `WireIn`, `WireOut`, `EncodedSection`, `WireError`, `peek`, `describe`,
+  `HEADER_NAME`: the typed wire codec. `WireIn` is a borrowed view of an
+  inbound header that decodes one section on demand; `WireOut` builds the
+  outbound header in place from the sections a module puts (up to 128 bytes
+  without allocating). A payload is `bincode`, so a wire type writes every
+  field every time and uses an `Option` for "may be absent". A missing section
+  is `None`; what that means is up to the module. `EncodedSection` carries a
+  received section on unchanged, without encoding it again; `describe` and
+  `Display` for `WireIn` print the sections in hex.
+- `Module::POLL_HOOKS` (default `true`): a module that keeps both poll hooks at
+  their defaults sets it to `false`, and a stack in which no module has poll
+  hooks skips them and the per-request lock they need. Debug builds panic if a
+  module declares `false` and overrides a poll hook.
 - `Early` and `Rejection`: what a stack returns when a module ends a request or
   rejects a child RPC; used by hook adapters such as `rpcstack-tonic`.
 

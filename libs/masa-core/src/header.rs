@@ -1,9 +1,13 @@
 use crate::context::{peek_priority, BUDGET_SECTION};
 use crate::{wire, Context, PriorityHint, MASA_CONTEXT_HEADER};
 
+/// The header's name, parsed once: looking a header up by a `&str` parses and
+/// validates the name every time.
+const CONTEXT_HEADER: http::HeaderName = http::HeaderName::from_static(MASA_CONTEXT_HEADER);
+
 fn header_value(headers: &http::HeaderMap) -> &str {
     let ctx = headers
-        .get(MASA_CONTEXT_HEADER)
+        .get(&CONTEXT_HEADER)
         .unwrap_or_else(|| panic!("{}", crate::MISSING_CONTEXT_HEADER_MESSAGE));
     // `HeaderValue::to_str` checks each byte for visible ASCII, which costs more
     // than everything else this does with the header. A header value holds no
@@ -183,39 +187,35 @@ mod tests {
         let _ = read_priority_from_headers(&headers_with("other:AA=="));
     }
 
-    /// What Hyper decoded before the scan: the priority alone, by deserializing
-    /// the section and skipping the first five elements.
-    #[derive(serde::Deserialize)]
-    struct PriorityPeek(
-        serde::de::IgnoredAny,
-        serde::de::IgnoredAny,
-        serde::de::IgnoredAny,
-        serde::de::IgnoredAny,
-        serde::de::IgnoredAny,
-        PriorityHint,
-    );
+    fn section_of(bytes: &[u8]) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
 
     #[test]
-    fn read_priority_panics_with_the_message_it_always_did_for_a_malformed_section() {
-        for section in [
-            "not-base64",
-            "AAAA",
-            "AAA",
-            "IjEi",
-            "WzEsMiwzLDQsNV0=",
-            "WyJhIiwxLDIsMyw0LDUsNl0=",
-            "WyJhIiwxLDIsMyw0LCI1Il0=",
-            "WyJhIiwxLDIsMyw0LDE4NDQ2NzQ0MDczNzA5NTUxNjE2XQ==",
-        ] {
-            let before = wire::decode_payload::<PriorityPeek>(section);
+    fn read_priority_panics_with_the_message_the_general_decoder_gives_for_a_malformed_section() {
+        let name = [3u8, b'a', b'p', b'i'];
+        let sections = [
+            "not-base64".to_owned(),
+            "AAAA".to_owned(),
+            "AAA".to_owned(),
+            section_of(&[]),
+            section_of(&[1, 2, 3]),
+            // Cut short.
+            section_of(&[&name[..], &[1, 2, 3, 4]].concat()),
+            // A marker that is not a u64, a name that is not UTF-8, trailing bytes.
+            section_of(&[&name[..], &[1, 2, 3, 4, 254]].concat()),
+            section_of(&[3, 0xff, 0xfe, 0xfd, 1, 2, 3, 4, 5]),
+            section_of(&[&name[..], &[1, 2, 3, 4, 5, 6]].concat()),
+        ];
+        for section in sections {
+            let before = wire::decode_payload::<Context>(&section).map(|ctx| ctx.prio_hint());
             let headers = headers_with(&format!("budget:{section}"));
 
             let result = std::panic::catch_unwind(|| read_priority_from_headers(&headers));
 
             match (before, result) {
-                (Ok(PriorityPeek(.., priority)), Ok(read)) => {
-                    assert_eq!(read, priority, "{section}")
-                }
+                (Ok(priority), Ok(read)) => assert_eq!(read, priority, "{section}"),
                 (Err(err), Err(panic)) => assert_eq!(
                     panic.downcast_ref::<String>().unwrap(),
                     &crate::invalid_budget_section_message(err),
@@ -223,7 +223,7 @@ mod tests {
                 ),
                 (before, result) => {
                     panic!(
-                        "{section}: before {:?}, now {:?}",
+                        "{section}: general decoder ok {:?}, scan ok {:?}",
                         before.is_ok(),
                         result.is_ok()
                     )

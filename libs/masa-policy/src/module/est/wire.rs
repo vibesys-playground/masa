@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use super::state::RequestMetadataTracker;
 use crate::registry::MethodId;
 
-// The wire types below are encoded as JSON arrays rather than objects:
-// estimation's sections are built and parsed on every RPC, and dropping the
-// field names shrinks each section to a third of its size. The array layouts
-// are the `*Compact` types.
+// The wire types below are tuples on the wire, in field order, and every field
+// is always written, an absent `Option` as its tag: the encoding has no field
+// names and does not describe itself, so a field cannot be left out or
+// defaulted. The layouts are the `*Compact` types.
 
 /// Identifies the root (ingress) RPC method. Transported over the wire as a
 /// (service, method) pair so that method identity is stable across replicas.
@@ -53,9 +53,7 @@ impl From<RootMethodCompact> for RootMethod {
 /// reported nothing, so it contributes nothing to its parent's totals.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EstimationWire {
-    #[serde(rename = "q", default, skip_serializing_if = "Option::is_none")]
     pub request: Option<EstimationRequestWire>,
-    #[serde(rename = "r", default, skip_serializing_if = "Option::is_none")]
     pub response: Option<EstimationResponseWire>,
 }
 

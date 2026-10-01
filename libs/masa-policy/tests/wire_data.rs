@@ -219,7 +219,7 @@ mod rajomon {
     }
 
     #[test]
-    fn no_price_is_not_written_and_reads_as_absent() {
+    fn no_price_is_written_as_an_absent_tag_and_reads_as_absent() {
         let response = response_with(RajomonWire::request(7));
         let value = response
             .metadata()
@@ -227,8 +227,17 @@ mod rajomon {
             .unwrap()
             .to_str()
             .unwrap();
-        // {"tokens":7}, exactly what a request carries.
-        assert!(value.ends_with(".rajomon:eyJ0b2tlbnMiOjd9"), "{value}");
+        // Tokens 7, then the tag of an absent price: exactly what a request
+        // carries, and not what a price of zero is written as.
+        assert!(value.ends_with(".rajomon:BwA="), "{value}");
         assert_eq!(response.get_wire::<RajomonModule>().unwrap().price, None);
+        let zero = response_with(RajomonWire::response(7, 0));
+        let zero = zero
+            .metadata()
+            .get(MASA_CONTEXT_HEADER)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(zero.ends_with(".rajomon:BwEA"), "{zero}");
     }
 }

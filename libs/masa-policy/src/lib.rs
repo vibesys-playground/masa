@@ -38,7 +38,7 @@ pub use module::{
     Stack,
 };
 pub use rpcstack::wire;
-pub use rpcstack::{peek, policy_stack, WireError, WireIn, WireOut};
+pub use rpcstack::{describe, peek, policy_stack, EncodedSection, WireError, WireIn, WireOut};
 
 /// Masa's built-in policy modules, for reuse in custom stacks. Each is
 /// available only when its feature is enabled.

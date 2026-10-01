@@ -27,7 +27,6 @@ pub struct RajomonWire {
     pub tokens: u64,
     /// Absent unless the responder chose to propagate its price; zero is a
     /// real price.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price: Option<u64>,
 }
 
