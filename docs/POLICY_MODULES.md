@@ -15,7 +15,7 @@ policy is a new module, composed into a new stack. It does not need edits to
 | `Layer` | Per-request state and lifecycle hooks. All hooks default to no-ops. |
 | `Layer::Server: LayerServer` | Per-service state, built once by `LayerServer::new(&mut ServerInit)`, which returns `Err(MissingDependency)` when a prerequisite module is missing or misordered. |
 | `Layer::Child: LayerChild` | Per-child-RPC state, created before `before_child_rpc` and passed back to `after_child_rpc`. |
-| `ChildRpcContext` | What the child will receive in the shared `Context`: `deadline` and `prio_hint`. Modules mutate it in `before_child_rpc`. |
+| `BudgetLayer`, `BudgetChildWriter` | Masa's budget modules: the request's facts and time budget, and the child's. They bracket the stack. See "Budget modules". |
 | `Layer::NAME`, `Layer::Wire` | The module's own wire data: a serde type and the unique name of its section in the `ctx` header. `()` means none. See "Wire data". |
 | `WireIn` / `WireOut` | Typed access to the wire sections: `wire.get::<Self>()` on an inbound message (a request, or a child's response), `out.put::<Self>(&value)` on an outbound one. |
 | `Extensions` | A per-request typed map (one value per type) that the hooks of all modules share; the framework never reads or fills it. |
@@ -26,23 +26,28 @@ Lifecycle, per inbound request:
 
 | Hook | When | Can |
 |---|---|---|
-| `Layer::new` | Request arrives, context decoded | Read or mutate the inbound `Context`; read the inbound wire data (`wire.get::<Self>()`, `None` if absent); insert into `Extensions` |
+| `Layer::new` | Request arrives | Read the inbound wire data (`wire.get::<Self>()`, `None` if absent); read or insert into `Extensions` |
 | `before_poll` | Before each handler poll | Abort (`Err`), reprioritize the task (`tokio::task::reprioritize`) |
-| `before_child_rpc` | Before each outbound RPC | Reject the child (`Err`), set child deadline/priority, write the child's wire data |
+| `before_child_rpc` | Before each outbound RPC | Reject the child (`Err`), write the child's wire data, share per-child decisions through `Extensions` (the child's deadline and priority: `ChildBudget`) |
 | `after_child_rpc` | Child response received | Record latencies, read the child response's wire data (`response_wire.get::<Self>()`) |
 | `after_poll` | After each handler poll | Abort (`Err`), e.g. on `Pending` past deadline |
-| `finalize` | Before response serialization | Write response metadata into `Context`, write the response's wire data |
+| `finalize` | Before response serialization | Write the response's wire data |
 
-Modules run in stack order and the first `Err` short-circuits the rest. For
-`ChildRpcContext`, the last writer wins. `Extensions` is passed mutably to
-`new`, `before_poll` and `before_child_rpc`, and shared to the `after_*` hooks
-and `finalize`.
+Modules run in stack order and the first `Err` short-circuits the rest.
+`Extensions` is passed mutably to `new`, `before_poll` and `before_child_rpc`,
+and shared to the `after_*` hooks and `finalize`. No hook receives a request
+context: the framework carries no request, child or response data of its own,
+so a child request or a response carries exactly the sections the modules
+`put`.
 
 ## Example
 
 ```rust
-use masa_core::{Context, PriorityHint};
-use masa_policy::{policy_stack, ChildRpcContext, Extensions, Layer, PolicyHooks, WireIn, WireOut};
+use masa_core::PriorityHint;
+use masa_policy::{
+    policy_stack, BudgetChildWriter, BudgetLayer, ChildBudget, Extensions, Layer, PolicyHooks,
+    WireIn, WireOut,
+};
 use tonic::{CowGrpcMethod, Request, Status};
 
 /// Earliest-deadline-first for children: child priority = child deadline.
@@ -58,7 +63,6 @@ impl Layer for ChildEdf {
     fn new(
         _m: &CowGrpcMethod,
         _s: &(),
-        _ctx: &mut Context,
         _wire: &WireIn<'_>,
         _ext: &mut Extensions,
     ) -> Self {
@@ -67,21 +71,25 @@ impl Layer for ChildEdf {
 
     fn before_child_rpc<T>(
         &self,
-        _ctx: &Context,
         _child: &CowGrpcMethod,
         _child_ctx: &mut (),
         _req: &mut Request<T>,
-        child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
-        _ext: &mut Extensions,
+        ext: &mut Extensions,
     ) -> Result<(), Status> {
-        child_rpc.prio_hint = PriorityHint::new(child_rpc.deadline);
+        let child = ChildBudget::of(ext);
+        child.prio_hint = PriorityHint::new(child.deadline);
         Ok(())
     }
 }
 
-// Reuse Masa's estimation module, replace everything else.
-pub type MyStack = policy_stack![masa_policy::modules::EstimationLayer, ChildEdf];
+// Reuse Masa's budget pair and estimation module, replace everything else.
+pub type MyStack = policy_stack![
+    BudgetLayer,
+    masa_policy::modules::EstimationLayer,
+    ChildEdf,
+    BudgetChildWriter,
+];
 pub type MyHooks = PolicyHooks<MyStack>;
 ```
 
@@ -91,8 +99,7 @@ priority assignment, ordering, short-circuiting, and shared server state.
 ## Wire data
 
 A module that needs to send data to other hops (tokens, prices, hints) defines
-a serde type and exchanges it through the framework's codec, instead of adding
-fields to `Context`:
+a serde type and exchanges it through the framework's codec:
 
 ```rust
 #[derive(Serialize, Deserialize)]
@@ -105,7 +112,6 @@ impl Layer for MyModule {
     fn new(
         _m: &CowGrpcMethod,
         _s: &(),
-        _ctx: &mut Context,
         wire: &WireIn<'_>,
         _ext: &mut Extensions,
     ) -> Self {
@@ -128,10 +134,11 @@ responses and reports the sum) reads the child's section in `after_child_rpc`
 and writes its own in `finalize`. The response is read-only there because
 `response_wire` borrows from it; the error status of a failed child carries
 wire sections the same way a successful response does.
-Each section travels in the `ctx` header as `.<NAME>:<base64 JSON>` after the
-unchanged `Context` blob (`libs/masa-policy/src/wire.rs` documents the layout).
-Sections are decoded independently, and `masa_policy::peek::<M>(&headers)`
-decodes one module's section without decoding the `Context`. Sections that are
+Each section travels in the `ctx` header as `<NAME>:<base64 JSON>`, joined by
+`.`; the header holds nothing else (`libs/masa-policy/src/wire.rs` documents
+the layout, and `libs/masa-core/src/wire.rs` holds the primitives Hyper also
+uses). Sections are decoded independently, and `masa_policy::peek::<M>(&headers)`
+decodes one module's section without decoding any other. Sections that are
 built and parsed on every RPC, like estimation's, encode their fields as JSON
 arrays instead of objects (`#[serde(from = ..., into = ...)]` on a tuple
 struct), which made them about a third the size and the per-RPC hook cost
@@ -175,8 +182,51 @@ publishes the marker `PublishesEstimationInfo`, which admission's server
 requires, so a stack that puts admission first fails at construction. In `new`,
 estimation inserts an `EstimationInfo` (hop count and ingress flag, root
 method and its registry id, and a live view of the subtree's early-return and
-deadline-signal state); admission reads it in `new` and uses it in place of
-any `Context` field.
+deadline-signal state); admission reads it in `new`.
+
+### Budget modules
+
+A request's API, id, SLO, gateway entry time, deadline and priority (the
+`masa_core::Context`) are the wire data of `BudgetLayer`, in the `budget`
+section. The framework neither reads nor forwards them. `BudgetLayer`:
+
+- reads the request's section in `new` (a request without one is a
+  misconfigured sender and panics, as for any malformed wire data) and
+  inserts a read-only `BudgetInfo` into `Extensions`: API, request id, SLO,
+  gateway entry, this hop's deadline, the end-to-end deadline
+  (`gateway_entry + slo`) and priority. The guard, estimation, oracle and
+  predictive admission read it in their own `new` and keep a clone. Their
+  servers `require` the `PublishesBudgetInfo` marker, so a stack that puts
+  one of them before `BudgetLayer` fails at construction (`require_budget`).
+- opens a `ChildBudget { deadline, prio_hint }` in `Extensions` at the start
+  of each `before_child_rpc`, set to the parent's own deadline and priority.
+  Modules that decide the child's deadline or priority (estimation, oracle)
+  overwrite its fields with `ChildBudget::of(ext)`; the last writer wins, as
+  the stack order says. Nothing is copied by the framework: a module that
+  writes neither leaves the parent's values.
+- writes the request's own section into the response in `finalize`.
+
+`BudgetChildWriter` writes the child request's `budget` section from the
+parent's facts and the final `ChildBudget`, and removes the `ChildBudget`.
+Hooks run in stack order, so one module cannot both open the child's budget
+before the others and write it after them; hence the pair. **Ordering
+requirement**: `BudgetLayer` first, then every module that reads the budget or
+sets the child's budget, then `BudgetChildWriter` last. A module that calls
+`ChildBudget::of` before `BudgetLayer` or after `BudgetChildWriter` panics on
+its first child RPC with a message saying so. A stack without the pair sends no
+`budget` section to children (the framework sends nothing by default), which
+Masa's next hop cannot serve. When the stack gains reverse-order hooks, the
+pair becomes one module.
+
+Root clients build a `Context` with `masa::ContextBuilder`
+(`masa_policy::ContextBuilder`), which sets the root priority with
+`masa_policy::root_priority` unless the caller gives one: the gateway entry
+time under `sched_tailclipper`, the time left to the deadline under
+`sched_pred`, the deadline otherwise (so a root with deadline 0 gets priority 0,
+which is `PriorityHint::infra()`). `masa::RootContext` and
+`MasaRequestExt::set_masa_context` attach a `Context` as the budget section.
+Hyper reads only the section's priority to schedule a stream
+(`masa_core::read_priority_from_headers`).
 
 ### Estimation's wire data
 
@@ -226,7 +276,9 @@ To try a policy:
 1. Write modules as files under `libs/masa-policy/src/agent/` and declare them
    in `agent/mod.rs`.
 2. Set `AgentStack` in `agent/mod.rs`, e.g.
-   `pub type AgentStack = policy_stack![crate::modules::EstimationLayer, my_policy::MyAdmission];`.
+   `pub type AgentStack = policy_stack![crate::modules::BudgetLayer, crate::modules::EstimationLayer, my_policy::MyAdmission, crate::modules::BudgetChildWriter];`.
+   Keep the budget pair around your modules (see "Budget modules"): without it
+   requests carry no deadline or priority to the next hop.
    It starts as `crate::MasaStack`, so `<features>,stack_custom` behaves like
    `<features>` until you change it.
 3. Build with a scheduling feature plus `stack_custom`, and add the features
@@ -303,18 +355,18 @@ To try a queue:
 
 These policy decisions are still selected by features outside `masa-policy`:
 
-- **Root priority**: `ContextBuilder::build` in `masa-core` picks deadline,
-  gateway entry time (TailClipper), or remaining budget (`sched_pred`) when the
-  gateway does not set `prio_hint`. Modules can override it per task with
-  `tokio::task::reprioritize` in `before_poll`.
+- **Root priority**: `masa_policy::root_priority` (used by
+  `masa_policy::ContextBuilder`) picks deadline, gateway entry time
+  (TailClipper), or remaining budget (`sched_pred`) when the gateway does not
+  set `prio_hint`, and is selected by features at the client. Hyper schedules
+  the stream with the priority in the header before any module runs; modules can
+  override it per task with `tokio::task::reprioritize` in `before_poll`.
 - **Queue discipline**: FIFO, binary heap and TailClipper round-robin live in
   `rpcstack-sched` (new queues go in `custom.rs`, see above); the
   multi-threaded heap/multiqueue live in the patched Tokio (`sched_mt*`).
-- **Wire context schema**: `ChildRpcContext` and `Context` fields are fixed by
-  `masa-core`. A module that needs new propagated metadata should use its own
-  wire section. Estimation and predictive admission no longer keep anything in
-  `Context`; what remains there is request identity, SLO, deadline and
-  priority.
+- **Budget schema**: `Context` (the budget section) is fixed by `masa-core`
+  because Hyper reads its priority. A module that needs new propagated metadata
+  should use its own wire section.
 - **Behavior toggles inside built-in modules**: e.g., `abort_slack`,
   `signal_slack`, `deadline_equals_slack` and the `est_*` estimator choice are
   still `cfg`/`const` switches inside `EstimationLayer`.

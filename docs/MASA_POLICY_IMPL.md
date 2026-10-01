@@ -101,15 +101,14 @@ The `masa` crate defines the fundamental types shared across the system.
 *   `gateway_entry`: Timestamp when the request entered the system (microseconds since UNIX epoch).
 *   `deadline`: The computed deadline for this RPC hop (microseconds since UNIX epoch). Not necessarily the end-to-end deadline.
 *   `prio_hint`: The priority value used by the scheduler.
-*   `frontend_elapse`: Optional elapsed time at frontend.
+
+`Context` is the wire data of the budget module (the `budget` section of the `ctx` header; see `docs/POLICY_MODULES.md`).
 
 `Context` also provides `e2e_deadline()`, computed as `gateway_entry + slo`, which is the absolute end-to-end deadline.
 
-`ContextBuilder` creates `Context` instances. If no explicit `prio_hint` is provided, it defaults to `PriorityHint::new(deadline)` — using the per-hop deadline as the priority value. Under `sched_pred`, the default is converted to relative time-left (`deadline - time_now()`) so initial H2 stream priority uses the same scale as dynamic reprioritization.
+`masa_policy::ContextBuilder` creates root `Context` instances. If no explicit `prio_hint` is provided, it uses `masa_policy::root_priority`, which defaults to `PriorityHint::new(deadline)` — using the per-hop deadline as the priority value. Under `sched_pred`, the default is converted to relative time-left (`deadline - time_now()`) so initial H2 stream priority uses the same scale as dynamic reprioritization; under `sched_tailclipper` it is the gateway entry time.
 
-Serialization:
-*   `to_json()` / `from_json()`: JSON format (used for logging/debugging).
-*   `to_header_string()` / `from_header_string()`: **Bincode + base64** format (used for HTTP/2 header transport — compact binary, not human-readable).
+Serialization: `to_header_string()` / `from_header_string()` produce and read a `ctx` header value holding the `budget` section (a base64 JSON array, see `libs/masa-core/src/wire.rs`).
 
 ### `PriorityHint`
 
@@ -198,7 +197,7 @@ All scheduling policies are unified into `PolicyHooks<S>` (`libs/masa-policy/src
 The parent context is obtained from thread-local storage via `unsafe { tonic::masa::client::get_parent_ctx::<M>() }`, which is implemented in Tonic's Masa module and set by the poll hooks (see Section 6).
 
 ### Header Injection
-The `Context` is serialized using **bincode** (compact binary format) and **base64-encoded**, then added to the HTTP/2 headers with the key `ctx`. This propagates the deadline and priority information to the next hop. The format is not human-readable; use `Context::to_json()` for debugging.
+The child's `Context` is written by the budget modules as the `budget` section of the `ctx` header (base64 JSON, after the other modules' sections). This propagates the deadline and priority information to the next hop. The format is not human-readable without decoding.
 
 ### Method Name Override
 
@@ -211,7 +210,7 @@ Masa modifies `hyper` to be priority-aware on the server side.
 ### Server-Side Request Handling
 In `libs/hyper/src/proto/h2/server.rs`, when `hyper` receives a new HTTP/2 stream (request):
 1.  It checks for the `ctx` header.
-2.  **If present**: It calls `.to_str().unwrap()`, then `MasaContext::from_header_string()` (base64 decode → bincode deserialize) to extract the propagated priority hint. Note: these `.unwrap()` calls will **panic** on malformed input (see `docs/MASA_IMPROVEMENTS.md`).
+2.  **If present**: It calls `masa_core::read_priority_from_headers`, which finds the `budget` section of the header and decodes only its priority. Note: these `.unwrap()` calls will **panic** on malformed input (see `docs/MASA_IMPROVEMENTS.md`).
 3.  It calls `exec.execute_h2stream_with_prio(future, prio)`.
 4.  **If absent**: It calls `exec.execute_h2stream(future)`, which defaults to `PriorityHint::infra()` (highest priority, value 0). This means requests without a `ctx` header are treated as infrastructure and always execute first.
 
@@ -412,9 +411,9 @@ The total is injected into the outgoing response in `finalize()`, creating a rec
 ## Summary of Data Flow
 
 1.  **Origin**: Request starts with a default or assigned priority/deadline.
-2.  **Client (Upstream)**: `ParentHooks::before_child_rpc` calculates child deadline/priority, serializes `Context` to bincode+base64, and sets the `ctx` HTTP/2 header.
+2.  **Client (Upstream)**: `ParentHooks::before_child_rpc` calculates child deadline/priority, the budget modules write the child's `budget` section, and the framework sets the `ctx` HTTP/2 header from the sections the modules wrote.
 3.  **Network**: Request travels with `ctx` header.
-4.  **Server (Downstream) Hyper**: Parses `ctx` header (base64 → bincode → `Context`), extracts `PriorityHint`.
+4.  **Server (Downstream) Hyper**: Reads the `budget` section of the `ctx` header, extracts `PriorityHint`.
 5.  **Server Executor**: Under `hyper/masa`, `Exec::Default` calls `tokio::task::spawn_with_prio(handler_future, priority)` for HTTP/2 request streams.
 6.  **Tokio Runtime**: Enqueues task in priority queue (binary heap, round-robin, or FIFO depending on feature flags).
 7.  **CPU**: Picks highest priority task (lowest `PriorityHint` value) to execute.

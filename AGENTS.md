@@ -95,7 +95,7 @@ Key policy flags:
 ## Architecture
 
 ### Data Flow
-1. Client's `Hooks` calculates child deadline/priority, serializes `Context` to JSON in HTTP/2 header (`ctx` key)
+1. Client's `Hooks` run the module stack; Masa's budget modules write the child's `Context` (deadline/priority) as the `budget` section of the HTTP/2 `ctx` header, beside the other modules' sections
 2. Server-side `hyper` parses `ctx` header, extracts `PriorityHint`
 3. Under the `hyper/masa` feature, Hyper's default HTTP/2 stream executor calls `tokio::spawn_with_prio(handler_future, priority)`
 4. Modified `tokio` runtime enqueues task in a priority queue (binary heap); lower `PriorityHint` value = higher priority
@@ -107,19 +107,19 @@ Key policy flags:
 
 ### libs/masa & libs/masa-core
 Application-facing Masa API and core types:
-- `libs/masa-core`: `Context`/`ContextBuilder`, `PriorityHint`, `Prioritize`, and latency distribution utilities
+- `libs/masa-core`: `Context` (the budget module's wire data), the `ctx` header section primitives (`wire`), `PriorityHint`, `Prioritize`, and latency distribution utilities
 - `libs/masa`: `DefaultHooks` selection by feature flag, context creation helpers, load-balanced transport, and policy-facing reexports from `masa-policy`
 - `DefaultHooks`: `tonic::masa::noop::NoopHooks` with no scheduling features; `masa_policy::PolicyHooks` (= `PolicyHooks<MasaStack>`) when scheduling features are enabled; `PolicyHooks<AgentStack>` with `stack_custom`
 
 ### libs/masa-policy/
 Concrete policy hook implementation and metadata helpers:
 - `hooks.rs`: `PolicyHooks<S>` — unified hook implementation; owns context plumbing and dispatches every hook through the module stack `S`
-- `layer/mod.rs`: Public policy module API — `Layer`, `LayerServer`, `LayerChild`, `ChildRpcContext`, `ServerInit`, `Stack`, `policy_stack!`
+- `layer/mod.rs`: Public policy module API — `Layer`, `LayerServer`, `LayerChild`, `ServerInit`, `Extensions`, `Stack`, `policy_stack!`
 - `masa_stack.rs`: `MasaStack`, the only place where features choose modules (disabled slots are `()`)
 - `agent/`: `AgentStack`, the agent-owned stack selected by `stack_custom`; new policies for apps and experiments go here
-- `layer/`: Built-in modules — `e2e_deadline_guard.rs`, `oracle.rs`, `queue_latency.rs`, `est/` (estimation), `admission/` (predictive + rajomon)
+- `layer/`: Built-in modules — `budget.rs` (request facts and child budget; `ContextBuilder` and the root priority formula), `e2e_deadline_guard.rs`, `oracle.rs`, `queue_latency.rs`, `est/` (estimation), `admission/` (predictive + rajomon)
 - To add a policy, write a new module implementing `Layer` and compose a stack; do not add branches to `hooks.rs`. See `docs/POLICY_MODULES.md`
-- `context_ext.rs`: Context serialization helpers and `MasaRequestExt`/`MasaResponseExt`/`MasaStatusExt`
+- `context_ext.rs`: Context (budget section) helpers and `MasaRequestExt`/`MasaResponseExt`/`MasaStatusExt`
 - Depends on `tonic` for hook traits and gRPC boundary types; vendored tonic does not depend on `masa-policy`
 
 ### libs/tonic/tonic/src/masa/
