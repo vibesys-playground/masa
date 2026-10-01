@@ -33,7 +33,7 @@ fn unused_local_addr() -> SocketAddr {
     listener.local_addr().expect("read ephemeral test port")
 }
 
-/// Install test-local Rajomon params before the process-wide `PolicyParams`
+/// Install test-local Rajomon params before the process-wide `RajomonParams`
 /// `OnceLock` is initialized. The production default (`init_price=0`,
 /// `price_freq=5`) was chosen to match the NSDI '25 paper's "no artificial
 /// floor" semantics, but that makes these admission/piggyback assertions
@@ -46,7 +46,7 @@ fn unused_local_addr() -> SocketAddr {
 /// retry loop). `latency_threshold_us=0` prevents the background price worker
 /// from decaying the test price back to zero between parallel tests. All other
 /// params take their built-in defaults via `#[serde(default)]` on
-/// `PolicyParams` / `RajomonParams`.
+/// `RajomonParams`.
 #[cfg(feature = "ac_rajomon")]
 fn ensure_test_rajomon_params() {
     use std::sync::Once;
@@ -62,8 +62,8 @@ fn ensure_test_rajomon_params() {
         std::env::set_var("MASA_POLICY_PARAMS_PATH", &path);
         // Force initialization of the OnceLock while we still hold exclusive
         // access via `Once::call_once`, so a concurrent rajomon test can't
-        // read `PolicyParams::global()` before our env var is in place.
-        let _ = masa_policy::PolicyParams::global();
+        // read `RajomonParams::global()` before our env var is in place.
+        let _ = masa_policy::RajomonParams::global();
     });
 }
 

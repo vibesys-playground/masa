@@ -85,6 +85,7 @@ check_tests() {
         "rpcstack-wire"
         "rpcstack"
         "rpcstack-tonic"
+        "rajomon"
         "masa"
         "masa-core"
         "masa-policy"

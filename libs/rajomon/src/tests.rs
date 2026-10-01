@@ -2,9 +2,10 @@ use std::sync::atomic::Ordering;
 
 use tonic::{CowGrpcMethod, Response, Status};
 
-use super::*;
-use crate::module::Module;
-use crate::wire::WireIn;
+use rpcstack::{ChildOutcome, ChildState, Extensions, Module, WireIn, HEADER_NAME};
+
+use crate::module::{RajomonModule, RajomonServer, RajomonWire};
+use crate::{ClientTokenBucket, RajomonSharedState, RAJOMON_STATE};
 
 // Default parameter values matching PolicyParams defaults.
 // Tests verify algorithmic behaviour with these specific values.
@@ -14,23 +15,19 @@ const PRICE_STEP_UP: u64 = 8;
 const TOKENS_LEFT_INIT: u64 = 10;
 const TOKEN_UPDATE_STEP: u64 = 5;
 
+/// The header value that carries `wire` as Rajomon's section.
+fn wire_header(wire: &RajomonWire) -> http::HeaderValue {
+    let mut out = rpcstack::WireOut::new();
+    out.put::<RajomonModule>(wire).unwrap();
+    out.header_value().parse().unwrap()
+}
+
 /// A module for a request that arrived carrying `tokens` as Rajomon wire data.
 fn module_with_tokens(method: &CowGrpcMethod, tokens: u64) -> RajomonModule {
     let mut headers = http::HeaderMap::new();
-    headers.insert(
-        masa_core::MASA_CONTEXT_HEADER,
-        crate::wire::header_value_with::<RajomonModule>(&RajomonWire::request(tokens))
-            .unwrap()
-            .parse()
-            .unwrap(),
-    );
+    headers.insert(HEADER_NAME, wire_header(&RajomonWire::request(tokens)));
     let wire = WireIn::from_headers(&headers).unwrap();
-    RajomonModule::new(
-        method,
-        &RajomonServer,
-        &wire,
-        &mut crate::module::Extensions::new(),
-    )
+    RajomonModule::new(method, &RajomonServer, &wire, &mut Extensions::new())
 }
 
 /// Mutex to serialize tests that modify the global RAJOMON_STATE.own_price,
@@ -372,22 +369,16 @@ fn test_module_records_child_price_response_and_updates_parent_max() {
     let module = module_with_tokens(&parent, 100);
     let response: Result<Response<()>, Status> = Ok(Response::new(()));
     let mut headers = http::HeaderMap::new();
-    headers.insert(
-        masa_core::MASA_CONTEXT_HEADER,
-        crate::wire::header_value_with::<RajomonModule>(&RajomonWire::response(100, 13))
-            .unwrap()
-            .parse()
-            .unwrap(),
-    );
+    headers.insert(HEADER_NAME, wire_header(&RajomonWire::response(100, 13)));
     let response_wire = WireIn::from_headers(&headers).unwrap();
 
-    crate::module::Module::after_child_rpc(
+    Module::after_child_rpc(
         &module,
         &child,
-        crate::module::ChildOutcome::Sent(&response),
+        ChildOutcome::Sent(&response),
         &response_wire,
-        &crate::module::ChildState::new(),
-        &crate::module::Extensions::new(),
+        &ChildState::new(),
+        &Extensions::new(),
     )
     .unwrap();
 

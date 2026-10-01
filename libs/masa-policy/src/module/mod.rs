@@ -41,8 +41,6 @@ pub use rpcstack::{
 
 #[cfg(feature = "ac_pred")]
 pub use admission::predictive::PredAdmissionModule;
-#[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
-pub use admission::rajomon::RajomonModule;
 pub use budget::{
     root_priority, BudgetInfo, BudgetModule, ChildDeadline, ChildPriority, ContextBuilder,
 };
@@ -57,3 +55,5 @@ pub use est::{
 pub use oracle::OracleModule;
 #[cfg(feature = "trace_queue_latency")]
 pub use queue_latency::{QueueLatencyModule, QueueLatencyWire};
+#[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
+pub use rajomon::RajomonModule;

@@ -118,15 +118,18 @@ The module framework. It owns every mechanism and has no policy (no deadlines, p
 - `libs/rpcstack-tonic`: `PolicyHooks<S>` — tonic's `Hooks` for any stack; owns request plumbing and dispatches every hook through the module stack `S`. Also `RequestExt`/`ResponseExt`/`StatusExt` for module wire data and method-name overrides
 - Tests of the framework use toy modules and no Masa types: `libs/rpcstack/tests`, `libs/rpcstack-tonic/tests`
 
+### libs/rajomon
+Rajomon admission control (feature `ac_rajomon`) as a module built on the framework alone: `RajomonModule`, `RajomonWire`, the process-wide `RAJOMON_STATE` (prices, price-update worker), the client-side `CLIENT_TOKEN_BUCKET`, and `RajomonParams`. It depends on `rpcstack` and generic libraries, never on a Masa crate or hyper, and no framework crate depends on it (`scripts/validate_rpcstack_boundary.py`). `libs/rajomon/tests/toy_stack.rs` runs it in a stack of the framework alone. `masa-policy` depends on it under `ac_rajomon` and re-exports its public items. See `libs/rajomon/README.md`
+
 ### libs/masa-policy/
 Masa's own policy, written against the framework; it re-exports the framework under the same paths (`masa_policy::Module`, `policy_stack!`, `PolicyHooks<S = MasaStack>`):
 - `hooks.rs`: `PolicyHooks<S = MasaStack>` and the contexts as aliases of the `rpcstack-tonic` types
 - `masa_stack.rs`: `MasaStack`, the only place where features choose modules (disabled slots are `()`)
 - `agent/`: `AgentStack`, the agent-owned stack selected by `stack_custom`; new policies for apps and experiments go here
-- `module/`: Built-in modules — `budget.rs` (request facts, and the child budget as a decision the budget module resolves; `ContextBuilder` and the root priority formula), `e2e_deadline_guard.rs`, `oracle.rs`, `queue_latency.rs`, `est/` (estimation), `admission/` (predictive + rajomon)
+- `module/`: Built-in modules — `budget.rs` (request facts, and the child budget as a decision the budget module resolves; `ContextBuilder` and the root priority formula), `e2e_deadline_guard.rs`, `oracle.rs`, `queue_latency.rs`, `est/` (estimation), `admission/` (predictive; Rajomon lives in `libs/rajomon`)
 - To add a policy, write a new module implementing `Module` and compose a stack; do not add branches to the hook adapter. See `docs/POLICY_MODULES.md`
 - `context_ext.rs`: Context (budget section) helpers and `MasaRequestExt`/`MasaResponseExt`/`MasaStatusExt` (the framework's request helpers plus the Masa context)
-- Depends on `rpcstack`, `rpcstack-tonic` and `tonic`; vendored tonic does not depend on `masa-policy` or on the framework crates
+- Depends on `rpcstack`, `rpcstack-tonic`, `tonic` and, under `ac_rajomon`, `rajomon`; vendored tonic does not depend on `masa-policy` or on the framework crates
 
 ### libs/tonic/tonic/src/masa/
 Tonic-specific glue:

@@ -202,6 +202,7 @@ packages=(
     "rpcstack-wire"
     "rpcstack"
     "rpcstack-tonic"
+    "rajomon"
     "masa-core"
     "masa-integration-tests"
     "tonic"

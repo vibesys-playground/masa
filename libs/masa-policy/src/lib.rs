@@ -70,6 +70,7 @@ pub use policy_params::PolicyParams;
 
 // Re-export Rajomon public items when the feature is enabled.
 #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
-pub use module::admission::rajomon::{
-    ClientTokenBucket, RajomonSharedState, RajomonWire, CLIENT_TOKEN_BUCKET, RAJOMON_STATE,
+pub use rajomon::{
+    ClientTokenBucket, RajomonParams, RajomonSharedState, RajomonWire, CLIENT_TOKEN_BUCKET,
+    RAJOMON_STATE,
 };

@@ -280,5 +280,5 @@ pub fn try_acquire_tokens(api: &str) -> Option<u64> {
 /// Initial token value for Rajomon admission control (runtime-configurable).
 #[cfg(feature = "ac_rajomon")]
 pub fn tokens_left_init() -> u64 {
-    masa_policy::PolicyParams::global().rajomon.tokens_left_init
+    masa_policy::RajomonParams::global().tokens_left_init
 }

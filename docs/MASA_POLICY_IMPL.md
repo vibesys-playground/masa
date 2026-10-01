@@ -180,7 +180,7 @@ All scheduling policies are unified into `PolicyHooks<S>` (`libs/rpcstack-tonic/
 *   **`EstimationModule`** (`module/est/module.rs`): Latency tracking, deadline tightening, reprioritization, local deadline checks. Enabled by `estimator` feature. Publishes its estimators through `ServerInit` for later modules.
 *   **`OracleModule`** (`module/oracle.rs`): Perfect-information child deadline and priority. Enabled by `sched_oracle` feature.
 *   **`PredAdmissionModule`** (`module/admission/predictive/mod.rs`): Predictive admission control using the estimation module's estimators. Enabled by `ac_pred` feature.
-*   **`RajomonModule`** (`module/admission/rajomon/mod.rs`): Token-bucket admission control with server-side price signals. Enabled by `ac_rajomon` feature.
+*   **`RajomonModule`** (`libs/rajomon`, re-exported by `masa-policy`): Token-bucket admission control with server-side price signals. Enabled by `ac_rajomon` feature.
 *   **`QueueLatencyModule`** (`module/queue_latency.rs`): Tracks queue latency across the call graph via `x-queue-latency` headers. Enabled by `trace_queue_latency` feature.
 *   **`()`**: The empty module, used for every disabled slot.
 *   **`NoopHooks`** (`libs/tonic/tonic/src/masa/noop.rs`): Selected when no scheduling feature is active.

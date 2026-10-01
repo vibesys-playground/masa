@@ -4,19 +4,19 @@ use std::task::Poll;
 use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Response, Status};
 
-use super::shared::{RajomonSharedState, RAJOMON_STATE};
-use crate::module::{
+use rpcstack::{
     ChildOutcome, ChildState, Extensions, MissingDependency, Module, ModuleServer, Outcome,
-    ServerInit,
+    ServerInit, WireIn, WireOut,
 };
-use crate::policy_params::PolicyParams;
-use crate::wire::{WireIn, WireOut};
+
+use crate::params::RajomonParams;
+use crate::shared::{RajomonSharedState, RAJOMON_STATE};
 
 // ── Wire data ───────────────────────────────────────────────────────────
 
 /// Token budget Rajomon assumes for a request that arrives with no Rajomon
 /// wire data at all. Absence is Rajomon's to interpret; zero is a real budget.
-pub(super) const DEFAULT_TOKENS: u64 = 100;
+pub(crate) const DEFAULT_TOKENS: u64 = 100;
 
 /// Rajomon's data on the wire. A request carries the token budget down the
 /// call tree; a response echoes the request's budget and, when lazy price
@@ -62,12 +62,12 @@ impl ModuleServer for RajomonServer {
 
 #[derive(Debug)]
 pub struct RajomonModule {
-    pub(super) rpc: CowGrpcMethod,
-    pub(super) should_drop: bool,
+    pub(crate) rpc: CowGrpcMethod,
+    pub(crate) should_drop: bool,
     /// Remaining token budget for this request, shared across fan-out branches.
-    pub(super) remaining_tokens: AtomicU64,
+    pub(crate) remaining_tokens: AtomicU64,
     /// Inbound token count, echoed in the response.
-    pub(super) inbound_tokens: AtomicU64,
+    pub(crate) inbound_tokens: AtomicU64,
 }
 
 impl Module for RajomonModule {
@@ -283,9 +283,9 @@ impl RajomonModule {
     /// of `tok` values across requests, and under deterministic "all-in"
     /// client spending it degenerates to "always" or "never." See
     /// `3rd_party/rajomon/RUST_PORT_ALIGNMENT.md` §0.5 / §10 item B.
-    pub(super) fn should_propagate_price(&self) -> bool {
+    pub(crate) fn should_propagate_price(&self) -> bool {
         use rand::Rng;
-        let p = PolicyParams::global().rajomon.price_freq;
+        let p = RajomonParams::global().price_freq;
         match p {
             0 => false,
             1 => true,
