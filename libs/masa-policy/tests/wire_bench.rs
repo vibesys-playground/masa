@@ -1,17 +1,18 @@
-// Timed comparison of reading a `ctx` header three ways. Ignored by default
+// Timed comparison of reading a `ctx` header four ways. Ignored by default
 // because timings are only meaningful in release mode:
 //
 //   cargo test --release -p masa-policy --test wire_bench -- --ignored --nocapture
 //
-// (a) decode the whole `Context` (what hyper does per HTTP/2 stream today to
-//     read the priority),
+// (a) decode the whole budget `Context`,
+// (a2) read only its priority (what hyper does per HTTP/2 stream),
 // (b) split the wire envelope into sections without decoding any,
 // (c) `peek` one small module section.
 
 use std::hint::black_box;
 use std::time::Instant;
 
-use masa_core::{time_now, ContextBuilder, PriorityHint};
+use masa_core::{time_now, PriorityHint};
+use masa_policy::ContextBuilder;
 use masa_policy::{peek, Extensions, Layer, MasaRequestExt, WireIn, WireOut, MASA_CONTEXT_HEADER};
 use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Request};
@@ -38,13 +39,7 @@ macro_rules! bench_module {
             const NAME: &'static str = $key;
             type Wire = $wire;
 
-            fn new(
-                _m: &CowGrpcMethod,
-                _s: &(),
-                _c: &mut masa_core::Context,
-                _w: &WireIn<'_>,
-                _ext: &mut Extensions,
-            ) -> Self {
+            fn new(_m: &CowGrpcMethod, _s: &(), _w: &WireIn<'_>, _ext: &mut Extensions) -> Self {
                 Self
             }
         }
@@ -76,11 +71,9 @@ fn compare_context_decode_envelope_split_and_peek() {
         .gateway_entry(now)
         .deadline(now + 500_000)
         .prio_hint(PriorityHint::new(now + 500_000))
-        .frontend_elapse(12_345)
         .build();
 
     let mut request = Request::new(());
-    request.set_masa_context(&ctx);
     let mut out = WireOut::new();
     out.put::<SmallModule>(&Small { tokens: 40 }).unwrap();
     out.put::<LargerModule>(&Larger {
@@ -90,6 +83,7 @@ fn compare_context_decode_envelope_split_and_peek() {
     .unwrap();
     out.put::<OtherModule>(&Small { tokens: 7 }).unwrap();
     out.install(request.metadata_mut());
+    request.set_masa_context(&ctx);
 
     let value = request
         .metadata()
@@ -99,7 +93,7 @@ fn compare_context_decode_envelope_split_and_peek() {
         .unwrap()
         .to_owned();
     println!(
-        "ctx header: {} bytes, blob {} bytes",
+        "ctx header: {} bytes, budget section alone {} bytes",
         value.len(),
         ctx.to_header_string().len()
     );
@@ -111,15 +105,17 @@ fn compare_context_decode_envelope_split_and_peek() {
     plain.insert(MASA_CONTEXT_HEADER, ctx.to_header_string().parse().unwrap());
 
     let n = 1_000_000;
-    time(
-        "(a) full Context decode, header without wire data",
-        n,
-        || {
-            black_box(masa_core::read_context_from_headers(black_box(&plain)));
-        },
-    );
-    time("(a) full Context decode, header with 3 sections", n, || {
+    time("(a) full Context decode, budget section only", n, || {
+        black_box(masa_core::read_context_from_headers(black_box(&plain)));
+    });
+    time("(a) full Context decode, header with 4 sections", n, || {
         black_box(masa_core::read_context_from_headers(black_box(&headers)));
+    });
+    time("(a2) priority only, header without wire data", n, || {
+        black_box(masa_core::read_priority_from_headers(black_box(&plain)));
+    });
+    time("(a2) priority only, header with 4 sections", n, || {
+        black_box(masa_core::read_priority_from_headers(black_box(&headers)));
     });
     time("(b) envelope split (WireIn::from_headers)", n, || {
         black_box(WireIn::from_headers(black_box(&headers)).unwrap());

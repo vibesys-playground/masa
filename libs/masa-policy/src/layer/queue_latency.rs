@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use masa_core::Context;
 use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Response, Status};
 
@@ -68,7 +67,6 @@ impl Layer for QueueLatencyLayer {
     fn new(
         _method: &CowGrpcMethod,
         _server: &QueueLatencyServer,
-        _ctx: &mut Context,
         _wire: &WireIn<'_>,
         _ext: &mut Extensions,
     ) -> Self {
@@ -82,11 +80,7 @@ impl Layer for QueueLatencyLayer {
     }
 
     #[inline]
-    fn before_poll<Ret>(
-        &self,
-        _ctx: &Context,
-        _ext: &mut Extensions,
-    ) -> Result<(), Result<Response<Ret>, Status>> {
+    fn before_poll<Ret>(&self, _ext: &mut Extensions) -> Result<(), Result<Response<Ret>, Status>> {
         let queue_latency = tokio::task::obtain_task_queue_latency().as_micros() as u64;
         if self.is_first_poll.swap(false, Ordering::Relaxed) {
             if queue_latency > 0 {
@@ -104,7 +98,6 @@ impl Layer for QueueLatencyLayer {
     #[inline]
     fn after_child_rpc<T>(
         &self,
-        _ctx: &Context,
         _child_method: &CowGrpcMethod,
         response: &Result<Response<T>, Status>,
         response_wire: &WireIn<'_>,
@@ -137,7 +130,6 @@ impl Layer for QueueLatencyLayer {
     #[inline]
     fn finalize<Ret>(
         &self,
-        _ctx: &mut Context,
         _result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
         _ext: &Extensions,

@@ -5,7 +5,8 @@
 
 use std::sync::Arc;
 
-use masa_core::{time_now, Context, ContextBuilder};
+use masa_core::{time_now, Context};
+use masa_policy::ContextBuilder;
 use masa_policy::{
     peek, policy_stack, Extensions, Layer, MasaRequestExt, MasaResponseExt, PolicyHooks, WireIn,
     WireOut, MASA_CONTEXT_HEADER,
@@ -30,10 +31,10 @@ fn root_context() -> Context {
 /// The request a sender would produce: the context plus the given wire data.
 fn sent(wire: impl FnOnce(&mut WireOut)) -> Request<()> {
     let mut request = Request::new(());
-    request.set_masa_context(&root_context());
     let mut out = WireOut::new();
     wire(&mut out);
     out.install(request.metadata_mut());
+    request.set_masa_context(&root_context());
     request
 }
 
@@ -89,13 +90,7 @@ impl Layer for Alpha {
     const NAME: &'static str = "alpha";
     type Wire = AlphaWire;
 
-    fn new(
-        _m: &CowGrpcMethod,
-        _s: &(),
-        _c: &mut Context,
-        wire: &WireIn<'_>,
-        _ext: &mut Extensions,
-    ) -> Self {
+    fn new(_m: &CowGrpcMethod, _s: &(), wire: &WireIn<'_>, _ext: &mut Extensions) -> Self {
         Self {
             inbound: wire.get::<Self>().unwrap(),
         }
@@ -103,11 +98,9 @@ impl Layer for Alpha {
 
     fn before_child_rpc<T>(
         &self,
-        _ctx: &Context,
         _child_method: &CowGrpcMethod,
         _child_ctx: &mut (),
         _request: &mut Request<T>,
-        _child_rpc: &mut masa_policy::ChildRpcContext,
         child_wire: &mut WireOut,
         _ext: &mut Extensions,
     ) -> Result<(), Status> {
@@ -121,7 +114,6 @@ impl Layer for Alpha {
 
     fn finalize<Ret>(
         &self,
-        _ctx: &mut Context,
         _result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
         _ext: &Extensions,
@@ -151,13 +143,7 @@ impl Layer for Beta {
     const NAME: &'static str = "beta";
     type Wire = BetaWire;
 
-    fn new(
-        _m: &CowGrpcMethod,
-        _s: &(),
-        _c: &mut Context,
-        wire: &WireIn<'_>,
-        _ext: &mut Extensions,
-    ) -> Self {
+    fn new(_m: &CowGrpcMethod, _s: &(), wire: &WireIn<'_>, _ext: &mut Extensions) -> Self {
         Self {
             inbound: wire.get::<Self>().unwrap(),
         }
@@ -165,11 +151,9 @@ impl Layer for Beta {
 
     fn before_child_rpc<T>(
         &self,
-        _ctx: &Context,
         _child_method: &CowGrpcMethod,
         _child_ctx: &mut (),
         _request: &mut Request<T>,
-        _child_rpc: &mut masa_policy::ChildRpcContext,
         child_wire: &mut WireOut,
         _ext: &mut Extensions,
     ) -> Result<(), Status> {
@@ -186,7 +170,6 @@ impl Layer for Beta {
 
     fn finalize<Ret>(
         &self,
-        _ctx: &mut Context,
         _result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
         _ext: &Extensions,
@@ -208,13 +191,7 @@ impl Layer for Silent {
     const NAME: &'static str = "silent";
     type Wire = u8;
 
-    fn new(
-        _m: &CowGrpcMethod,
-        _s: &(),
-        _c: &mut Context,
-        _wire: &WireIn<'_>,
-        _ext: &mut Extensions,
-    ) -> Self {
+    fn new(_m: &CowGrpcMethod, _s: &(), _wire: &WireIn<'_>, _ext: &mut Extensions) -> Self {
         Self
     }
 }
@@ -297,7 +274,7 @@ fn setting_the_context_keeps_wire_data_and_vice_versa() {
 }
 
 #[test]
-fn header_without_wire_data_is_the_plain_context_blob() {
+fn header_without_wire_data_is_the_budget_section_alone() {
     let ctx = root_context();
     let mut request = Request::new(());
     request.set_masa_context(&ctx);
@@ -306,7 +283,7 @@ fn header_without_wire_data_is_the_plain_context_blob() {
 }
 
 #[test]
-fn context_decoding_ignores_the_wire_suffix() {
+fn context_decoding_ignores_other_sections() {
     let root = sent(|out| out.put::<Alpha>(&AlphaWire { n: 9 }).unwrap());
     let value = root
         .metadata()
@@ -332,8 +309,7 @@ fn peek_decodes_one_section_without_the_context() {
     assert_eq!(peek::<Alpha>(&headers).unwrap(), Some(AlphaWire { n: 3 }));
     assert_eq!(peek::<Silent>(&headers).unwrap(), None);
 
-    // A context blob that does not decode is irrelevant to `peek`, and so is a
-    // corrupt section of another module.
+    // A corrupt section of another module is irrelevant to `peek`.
     let mut corrupt = http::HeaderMap::new();
     corrupt.insert(
         MASA_CONTEXT_HEADER,
@@ -354,13 +330,7 @@ impl Layer for AlphaTwin {
     const NAME: &'static str = "alpha";
     type Wire = u8;
 
-    fn new(
-        _m: &CowGrpcMethod,
-        _s: &(),
-        _c: &mut Context,
-        _wire: &WireIn<'_>,
-        _ext: &mut Extensions,
-    ) -> Self {
+    fn new(_m: &CowGrpcMethod, _s: &(), _wire: &WireIn<'_>, _ext: &mut Extensions) -> Self {
         Self
     }
 }
@@ -380,13 +350,7 @@ impl Layer for BadName {
     const NAME: &'static str = "has.dot";
     type Wire = u8;
 
-    fn new(
-        _m: &CowGrpcMethod,
-        _s: &(),
-        _c: &mut Context,
-        _wire: &WireIn<'_>,
-        _ext: &mut Extensions,
-    ) -> Self {
+    fn new(_m: &CowGrpcMethod, _s: &(), _wire: &WireIn<'_>, _ext: &mut Extensions) -> Self {
         Self
     }
 }

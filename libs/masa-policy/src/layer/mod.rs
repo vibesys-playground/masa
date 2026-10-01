@@ -7,6 +7,8 @@
 // empty module, so a disabled slot in a stack costs nothing.
 //
 // Masa's built-in modules:
+// - **Budget** (always): `BudgetLayer` and `BudgetChildWriter` — the request's
+//   facts and time budget, and the child request's budget section.
 // - **Guard** (feature `abort_slo`): `E2eDeadlineGuardLayer` — rejects
 //   past-deadline requests.
 // - **Estimation** (feature `estimator`): `EstimationLayer` — latency tracking,
@@ -24,7 +26,6 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::task::Poll;
 
-use masa_core::{Context, PriorityHint};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tonic::{CowGrpcMethod, Response, Status};
@@ -41,6 +42,7 @@ mod extensions;
 #[cfg(feature = "estimator")]
 pub(crate) mod est;
 
+mod budget;
 #[cfg(feature = "abort_slo")]
 mod e2e_deadline_guard;
 #[cfg(feature = "sched_oracle")]
@@ -151,28 +153,6 @@ impl ServerInit {
     }
 }
 
-/// Mutable state populated by modules in [`Layer::before_child_rpc`].
-///
-/// Initialized from the parent context. Each module in the stack may mutate
-/// fields (e.g., tighten deadline, adjust priority). After all modules have
-/// run, the hooks build the child `Context` from these fields. Module-specific
-/// data does not belong here: it goes in the module's [`Layer::Wire`].
-#[derive(Debug)]
-#[non_exhaustive]
-pub struct ChildRpcContext {
-    pub deadline: u64,
-    pub prio_hint: PriorityHint,
-}
-
-impl ChildRpcContext {
-    pub(crate) fn from_parent(ctx: &Context) -> Self {
-        Self {
-            deadline: ctx.deadline(),
-            prio_hint: ctx.prio_hint(),
-        }
-    }
-}
-
 /// A policy module: per-request state that hooks into the request lifecycle
 /// at key points to implement policy-specific logic (estimation, admission
 /// control, etc.).
@@ -203,14 +183,13 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
     ///
     /// `wire` is the inbound request's wire sections; the module reads its own
     /// with `wire.get::<Self>()`, which is `None` if the sender attached
-    /// none. May inspect and mutate `ctx`.
+    /// none.
     ///
     /// `ext` is the request's [`Extensions`], empty when the first module
     /// runs; modules earlier in the stack may already have stored values.
     fn new(
         method: &CowGrpcMethod,
         server: &Self::Server,
-        ctx: &mut Context,
         wire: &WireIn<'_>,
         ext: &mut Extensions,
     ) -> Self;
@@ -218,28 +197,23 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
     /// Called before each poll of the handler future.
     ///
     /// Returns `Err` to abort the request.
-    fn before_poll<Ret>(
-        &self,
-        _ctx: &Context,
-        _ext: &mut Extensions,
-    ) -> Result<(), Result<Response<Ret>, Status>> {
+    fn before_poll<Ret>(&self, _ext: &mut Extensions) -> Result<(), Result<Response<Ret>, Status>> {
         Ok(())
     }
 
     /// Called before each outbound child RPC.
     ///
-    /// The module may reject the child RPC (returning `Err`) or mutate
-    /// `child_rpc` to tighten the deadline or adjust priority. `child_wire`
+    /// The module may reject the child RPC (returning `Err`). `child_wire`
     /// starts empty and becomes the child request's wire sections: a module
     /// that does not `put` anything sends nothing, and nothing is carried
-    /// over from this request's inbound wire.
+    /// over from this request's inbound wire. A module that decides
+    /// something the child's sections depend on shares it through `ext`
+    /// (Masa's budget modules do this for the child's deadline and priority).
     fn before_child_rpc<T>(
         &self,
-        _ctx: &Context,
         _child_method: &CowGrpcMethod,
         _child_ctx: &mut Self::Child,
         _request: &mut tonic::Request<T>,
-        _child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
         _ext: &mut Extensions,
     ) -> Result<(), Status> {
@@ -256,7 +230,6 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
     /// [`Layer::finalize`].
     fn after_child_rpc<T>(
         &self,
-        _ctx: &Context,
         _child_method: &CowGrpcMethod,
         _response: &Result<Response<T>, Status>,
         _response_wire: &WireIn<'_>,
@@ -271,7 +244,6 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
     /// Returns `Err` to abort the request (e.g., deadline guard on `Pending`).
     fn after_poll<Ret>(
         &self,
-        _ctx: &Context,
         _poll: &Poll<Result<Response<Ret>, Status>>,
         _ext: &Extensions,
     ) -> Result<(), Result<Response<Ret>, Status>> {
@@ -283,11 +255,8 @@ pub trait Layer: Send + Sync + std::fmt::Debug {
     /// Modules report to the caller by `put`ting their own section into
     /// `wire`, which starts empty and becomes the response's wire sections;
     /// nothing from the request or from child responses is carried into it.
-    /// Modules that still use `ctx` mutate it directly, and the caller
-    /// serializes the context once after all modules have run.
     fn finalize<Ret>(
         &self,
-        _ctx: &mut Context,
         _result: &mut Result<Response<Ret>, Status>,
         _wire: &mut WireOut,
         _ext: &Extensions,
@@ -343,7 +312,6 @@ impl Layer for () {
     fn new(
         _method: &CowGrpcMethod,
         _server: &(),
-        _ctx: &mut Context,
         _wire: &WireIn<'_>,
         _ext: &mut Extensions,
     ) -> Self {
@@ -384,14 +352,13 @@ impl<H: Layer, T: Layer> Layer for Stack<H, T> {
     fn new(
         method: &CowGrpcMethod,
         server: &Self::Server,
-        ctx: &mut Context,
         wire: &WireIn<'_>,
         ext: &mut Extensions,
     ) -> Self {
-        let head = H::new(method, &server.0, ctx, wire, ext);
+        let head = H::new(method, &server.0, wire, ext);
         Self {
             head,
-            tail: T::new(method, &server.1, ctx, wire, ext),
+            tail: T::new(method, &server.1, wire, ext),
         }
     }
 
@@ -401,95 +368,60 @@ impl<H: Layer, T: Layer> Layer for Stack<H, T> {
     }
 
     #[inline]
-    fn before_poll<Ret>(
-        &self,
-        ctx: &Context,
-        ext: &mut Extensions,
-    ) -> Result<(), Result<Response<Ret>, Status>> {
-        self.head.before_poll(ctx, ext)?;
-        self.tail.before_poll(ctx, ext)
+    fn before_poll<Ret>(&self, ext: &mut Extensions) -> Result<(), Result<Response<Ret>, Status>> {
+        self.head.before_poll(ext)?;
+        self.tail.before_poll(ext)
     }
 
     #[inline]
     fn before_child_rpc<R>(
         &self,
-        ctx: &Context,
         child_method: &CowGrpcMethod,
         child_ctx: &mut Self::Child,
         request: &mut tonic::Request<R>,
-        child_rpc: &mut ChildRpcContext,
         child_wire: &mut WireOut,
         ext: &mut Extensions,
     ) -> Result<(), Status> {
-        self.head.before_child_rpc(
-            ctx,
-            child_method,
-            &mut child_ctx.0,
-            request,
-            child_rpc,
-            child_wire,
-            ext,
-        )?;
-        self.tail.before_child_rpc(
-            ctx,
-            child_method,
-            &mut child_ctx.1,
-            request,
-            child_rpc,
-            child_wire,
-            ext,
-        )
+        self.head
+            .before_child_rpc(child_method, &mut child_ctx.0, request, child_wire, ext)?;
+        self.tail
+            .before_child_rpc(child_method, &mut child_ctx.1, request, child_wire, ext)
     }
 
     #[inline]
     fn after_child_rpc<R>(
         &self,
-        ctx: &Context,
         child_method: &CowGrpcMethod,
         response: &Result<Response<R>, Status>,
         response_wire: &WireIn<'_>,
         child_ctx: &Self::Child,
         ext: &Extensions,
     ) -> Result<(), Status> {
-        self.head.after_child_rpc(
-            ctx,
-            child_method,
-            response,
-            response_wire,
-            &child_ctx.0,
-            ext,
-        )?;
-        self.tail.after_child_rpc(
-            ctx,
-            child_method,
-            response,
-            response_wire,
-            &child_ctx.1,
-            ext,
-        )
+        self.head
+            .after_child_rpc(child_method, response, response_wire, &child_ctx.0, ext)?;
+        self.tail
+            .after_child_rpc(child_method, response, response_wire, &child_ctx.1, ext)
     }
 
     #[inline]
     fn after_poll<Ret>(
         &self,
-        ctx: &Context,
         poll: &Poll<Result<Response<Ret>, Status>>,
         ext: &Extensions,
     ) -> Result<(), Result<Response<Ret>, Status>> {
-        self.head.after_poll(ctx, poll, ext)?;
-        self.tail.after_poll(ctx, poll, ext)
+        self.head.after_poll(poll, ext)?;
+        self.tail.after_poll(poll, ext)
     }
 
     #[inline]
     fn finalize<Ret>(
         &self,
-        ctx: &mut Context,
         result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
         ext: &Extensions,
     ) {
-        self.head.finalize(ctx, result, wire, ext);
-        self.tail.finalize(ctx, result, wire, ext);
+        self.head.finalize(result, wire, ext);
+        self.tail.finalize(result, wire, ext);
     }
 }
 
@@ -513,6 +445,10 @@ macro_rules! policy_stack {
 pub use admission::predictive::PredAdmissionLayer;
 #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
 pub use admission::rajomon::RajomonLayer;
+pub use budget::{
+    require_budget, root_priority, BudgetChildWriter, BudgetInfo, BudgetLayer, ChildBudget,
+    ContextBuilder, PublishesBudgetInfo,
+};
 #[cfg(feature = "abort_slo")]
 pub use e2e_deadline_guard::E2eDeadlineGuardLayer;
 #[cfg(feature = "estimator")]

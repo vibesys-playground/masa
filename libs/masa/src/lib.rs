@@ -1,5 +1,5 @@
 pub use masa_core::{
-    time_now, Context, ContextBuilder, FutureSpan, LatencyDistribution, MethodId, PriorityHint,
+    time_now, Context, FutureSpan, LatencyDistribution, MethodId, PriorityHint,
     ORACLE_CHILD_WORK_US_HEADER, ORACLE_REMAINING_AFTER_US_HEADER,
 };
 pub use masa_policy::{
@@ -7,8 +7,8 @@ pub use masa_policy::{
     get_method_name_override_from_metadata, get_service_name_override_from_headers,
     get_service_name_override_from_metadata, read_context, read_context_from_headers,
     read_priority_from_headers, set_masa_context_in_metadata, set_method_name_override_in_headers,
-    set_service_name_override_in_headers, MasaRequestExt, MasaResponseExt, MasaStatusExt,
-    WireError, WireIn, WireOut, MASA_CONTEXT_HEADER,
+    set_service_name_override_in_headers, ContextBuilder, MasaRequestExt, MasaResponseExt,
+    MasaStatusExt, WireError, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 
 #[cfg(feature = "trace_queue_latency")]
@@ -118,7 +118,8 @@ pub fn create_context(api: &str, slo: Duration) -> Context {
 }
 
 /// A root request's context together with the module wire data its sender
-/// attaches (for example Rajomon's tokens), which travels beside the `Context`.
+/// attaches (for example Rajomon's tokens). The context is the budget module's
+/// wire data; both travel in the `ctx` header.
 #[derive(Debug, Clone)]
 pub struct RootContext {
     context: Context,
@@ -164,8 +165,10 @@ impl RootContext {
 
     /// Attach the context and wire data to `request`.
     pub fn attach<T>(&self, mut request: tonic::Request<T>) -> tonic::Request<T> {
-        request.set_masa_context(&self.context);
-        self.wire.install(request.metadata_mut());
+        let mut wire = self.wire.clone();
+        wire.put::<masa_policy::BudgetLayer>(&self.context)
+            .unwrap_or_else(|err| panic!("{err}"));
+        wire.install(request.metadata_mut());
         request
     }
 }

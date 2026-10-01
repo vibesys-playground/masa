@@ -7,8 +7,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Once};
 
-use masa_core::{time_now, ContextBuilder};
+use masa_core::time_now;
 use masa_policy::modules::QueueLatencyLayer;
+use masa_policy::ContextBuilder;
 use masa_policy::{
     policy_stack, MasaRequestExt, MasaResponseExt, PolicyHooks, QueueLatencyWire,
     MASA_CONTEXT_HEADER,

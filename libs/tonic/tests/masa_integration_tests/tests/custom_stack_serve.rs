@@ -17,13 +17,16 @@ use std::time::Duration;
 use masa::MasaRequestExt;
 #[cfg(feature = "stack_custom")]
 use masa::MasaResponseExt;
-use masa_core::{time_now, Context, ContextBuilder};
+use masa_core::time_now;
 use masa_integration_tests::pb::{
     child_service_client::ChildServiceClient,
     child_service_server::{ChildService, ChildServiceServer},
     Input1, Input2, Output1, Output2,
 };
-use masa_policy::{policy_stack, Extensions, Layer, PolicyHooks, WireIn, WireOut};
+use masa_policy::{
+    policy_stack, BudgetChildWriter, BudgetInfo, BudgetLayer, ContextBuilder, Extensions, Layer,
+    PolicyHooks, WireIn, WireOut,
+};
 use tonic::metadata::MetadataValue;
 use tonic::transport::Server;
 use tonic::{Code, CowGrpcMethod, Request, Response, Status};
@@ -69,7 +72,7 @@ impl ChildService for RecordingSvc {
 
 /// Rejects one request id before the handler is first polled.
 #[derive(Debug)]
-struct RejectBlocked;
+struct RejectBlocked(BudgetInfo);
 
 impl Layer for RejectBlocked {
     type Server = ();
@@ -80,19 +83,14 @@ impl Layer for RejectBlocked {
     fn new(
         _method: &CowGrpcMethod,
         _server: &(),
-        _ctx: &mut Context,
         _wire: &WireIn<'_>,
-        _ext: &mut Extensions,
+        ext: &mut Extensions,
     ) -> Self {
-        Self
+        Self(BudgetInfo::of(ext))
     }
 
-    fn before_poll<Ret>(
-        &self,
-        ctx: &Context,
-        _ext: &mut Extensions,
-    ) -> Result<(), Result<Response<Ret>, Status>> {
-        if ctx.request_id() == BLOCKED_REQUEST_ID {
+    fn before_poll<Ret>(&self, _ext: &mut Extensions) -> Result<(), Result<Response<Ret>, Status>> {
+        if self.0.request_id() == BLOCKED_REQUEST_ID {
             return Err(Err(Status::resource_exhausted("rejected by custom stack")));
         }
         Ok(())
@@ -112,7 +110,6 @@ impl Layer for StampResponse {
     fn new(
         _method: &CowGrpcMethod,
         _server: &(),
-        _ctx: &mut Context,
         _wire: &WireIn<'_>,
         _ext: &mut Extensions,
     ) -> Self {
@@ -121,7 +118,6 @@ impl Layer for StampResponse {
 
     fn finalize<Ret>(
         &self,
-        _ctx: &mut Context,
         result: &mut Result<Response<Ret>, Status>,
         _wire: &mut WireOut,
         _ext: &Extensions,
@@ -134,7 +130,7 @@ impl Layer for StampResponse {
     }
 }
 
-type TestStack = policy_stack![RejectBlocked, StampResponse];
+type TestStack = policy_stack![BudgetLayer, RejectBlocked, StampResponse, BudgetChildWriter];
 
 // ── Tests ───────────────────────────────────────────────────────────────
 

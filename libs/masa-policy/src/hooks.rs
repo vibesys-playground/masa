@@ -1,9 +1,11 @@
 // Masa hooks implementation.
 //
 // `PolicyHooks<S>` is the single concrete `Hooks` implementation. It owns
-// request-context plumbing (reading the inbound `Context`, resolving method
-// names, building and serializing the child and response contexts) and
-// delegates every policy decision to the module stack `S`. The default stack,
+// request plumbing (splitting the inbound wire sections, resolving method
+// names, installing the child's and the response's wire sections) and
+// delegates every policy decision to the module stack `S`: what a request
+// carries, what a child request carries, and what a response carries are all
+// whatever the modules put. The default stack,
 // `MasaStack`, is selected by Cargo features in `masa_stack.rs`; any other
 // stack built with `policy_stack!` plugs in the same way.
 //
@@ -16,16 +18,13 @@ use std::task::Poll;
 
 use crate::context_ext::{
     get_method_name_override_from_headers, get_method_name_override_from_metadata,
-    get_service_name_override_from_headers, get_service_name_override_from_metadata, read_context,
-    MasaRequestExt, MasaResponseExt, MasaStatusExt,
+    get_service_name_override_from_headers, get_service_name_override_from_metadata,
 };
 use crate::layer::{
-    assert_unique_names, ChildRpcContext, Extensions, Layer, LayerChild, LayerServer,
-    MissingDependency, ServerInit,
+    assert_unique_names, Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit,
 };
 use crate::masa_stack::MasaStack;
 use crate::wire::{WireIn, WireOut};
-use masa_core::{Context, ContextBuilder};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
 use tonic::{CowGrpcMethod, GrpcMethod, Request, Response, Status};
 
@@ -101,7 +100,6 @@ impl<S: Layer + 'static> ServerHooks for ServerContext<S> {
 
 #[derive(Debug)]
 pub struct ParentContext<S: Layer = MasaStack> {
-    ctx: Context,
     layers: S,
     /// Hooks take `&self`, so the per-request extensions sit behind a lock;
     /// hooks run one at a time, so it is never contended.
@@ -120,27 +118,19 @@ impl<S: Layer + 'static> ParentHooks<ChildContext<S>, ServerContext<S>> for Pare
         req: &http::Request<B>,
         server_ctx: Arc<ServerContext<S>>,
     ) -> Self {
-        let mut ctx = read_context(req);
         let resolved_method = resolve_method_name_from_http(method, req);
         let wire = WireIn::from_headers(req.headers()).unwrap_or_else(|err| panic!("{err}"));
         let mut ext = Extensions::new();
-        let layers = S::new(
-            &resolved_method,
-            &server_ctx.layers,
-            &mut ctx,
-            &wire,
-            &mut ext,
-        );
+        let layers = S::new(&resolved_method, &server_ctx.layers, &wire, &mut ext);
 
         Self {
-            ctx,
             layers,
             ext: Mutex::new(ext),
         }
     }
 
     fn before_poll<Ret>(&self) -> Result<(), Result<Response<Ret>, Status>> {
-        self.layers.before_poll(&self.ctx, &mut self.ext())
+        self.layers.before_poll(&mut self.ext())
     }
 
     fn before_child_rpc<T>(
@@ -152,26 +142,17 @@ impl<S: Layer + 'static> ParentHooks<ChildContext<S>, ServerContext<S>> for Pare
         let child_method_name = resolve_method_name_from_request(child_method, request);
         child_ctx.set_method_name(child_method_name.clone());
 
-        let mut child_rpc = ChildRpcContext::from_parent(&self.ctx);
         let mut child_wire = WireOut::new();
         self.layers.before_child_rpc(
-            &self.ctx,
             &child_method_name,
             &mut child_ctx.layers,
             request,
-            &mut child_rpc,
             &mut child_wire,
             &mut self.ext(),
         )?;
 
-        // Masa's existing `Context` path: the child's context starts as a copy
-        // of the parent's with deadline and priority overridden. Module wire
-        // data is never copied down.
-        let child_recv_ctx = ContextBuilder::from(&self.ctx)
-            .deadline(child_rpc.deadline)
-            .prio_hint(child_rpc.prio_hint)
-            .build();
-        request.set_masa_context(&child_recv_ctx);
+        // The child request carries exactly what the modules put: nothing is
+        // copied down from this request.
         child_wire.install(request.metadata_mut());
 
         Ok(())
@@ -191,7 +172,6 @@ impl<S: Layer + 'static> ParentHooks<ChildContext<S>, ServerContext<S>> for Pare
             let response_wire =
                 WireIn::from_metadata(metadata).unwrap_or_else(|err| panic!("{err}"));
             self.layers.after_child_rpc(
-                &self.ctx,
                 child_method,
                 response,
                 &response_wire,
@@ -206,23 +186,15 @@ impl<S: Layer + 'static> ParentHooks<ChildContext<S>, ServerContext<S>> for Pare
         &self,
         poll: &Poll<Result<Response<Ret>, Status>>,
     ) -> Result<(), Result<Response<Ret>, Status>> {
-        self.layers.after_poll(&self.ctx, poll, &self.ext())
+        self.layers.after_poll(poll, &self.ext())
     }
 
     fn finalize_before_serialization<Ret>(&self, result: &mut Result<Response<Ret>, Status>) {
-        let mut ctx = self.ctx.clone();
         let mut wire = WireOut::new();
-        self.layers
-            .finalize(&mut ctx, result, &mut wire, &self.ext());
+        self.layers.finalize(result, &mut wire, &self.ext());
         let metadata = match result {
-            Ok(resp) => {
-                resp.set_masa_context(&ctx);
-                resp.metadata_mut()
-            }
-            Err(status) => {
-                status.set_masa_context(&ctx);
-                status.metadata_mut()
-            }
+            Ok(resp) => resp.metadata_mut(),
+            Err(status) => status.metadata_mut(),
         };
         wire.install(metadata);
     }
@@ -286,8 +258,9 @@ mod tests {
         use crate::context_ext::MASA_CONTEXT_HEADER;
         use crate::layer::est::latency_map::ParentToChildKey;
         use crate::layer::est::state::LatencyEstimators;
+        use crate::ContextBuilder;
         use crate::MethodRegistry;
-        use masa_core::{ContextBuilder, LatencyRms};
+        use masa_core::LatencyRms;
         use std::sync::Arc;
         use tonic::masa::{ClientHooks, ParentHooks, ServerHooks};
         use tonic::{CowGrpcMethod, GrpcMethod, Request, Response};
@@ -402,7 +375,7 @@ mod tests {
                 .unwrap();
 
             // Verify child tracker was initialized by the estimation layer
-            let (_guard, (estimation, _)) = &child_ctx.layers;
+            let (_budget, (_guard, (estimation, _))) = &child_ctx.layers;
             let child_tracker = estimation
                 .child_tracker
                 .as_ref()

@@ -33,8 +33,9 @@ pub use context_ext::{
 };
 pub use hooks::{ChildContext, ParentContext, PolicyHooks, ServerContext};
 pub use layer::{
-    ChildRpcContext, Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit,
-    Stack,
+    require_budget, root_priority, BudgetChildWriter, BudgetInfo, BudgetLayer, ChildBudget,
+    ContextBuilder, Extensions, Layer, LayerChild, LayerServer, MissingDependency,
+    PublishesBudgetInfo, ServerInit, Stack,
 };
 pub use masa_stack::MasaStack;
 pub use wire::{peek, WireError, WireIn, WireOut};
@@ -54,6 +55,7 @@ pub mod modules {
     pub use crate::layer::QueueLatencyLayer;
     #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
     pub use crate::layer::RajomonLayer;
+    pub use crate::layer::{BudgetChildWriter, BudgetLayer};
 }
 #[cfg(feature = "trace_queue_latency")]
 pub use layer::QueueLatencyWire;

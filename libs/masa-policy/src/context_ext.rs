@@ -2,8 +2,8 @@
 
 use masa_core::Context;
 
-use crate::layer::Layer;
-use crate::wire;
+use crate::layer::{BudgetLayer, Layer};
+use crate::wire::{self, WireOut};
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::{Request, Response, Status};
 
@@ -13,25 +13,17 @@ pub const MASA_CONTEXT_HEADER: &str = masa_core::MASA_CONTEXT_HEADER;
 const METHOD_NAME_OVERRIDE_HEADER: &str = "x-masa-method-name";
 const SERVICE_NAME_OVERRIDE_HEADER: &str = "x-masa-service-name";
 
-/// Get the MASA context from metadata.
+/// Get the MASA context (the budget module's wire data) from metadata.
 pub fn get_masa_context_from_metadata(metadata: &tonic::metadata::MetadataMap) -> Option<Context> {
-    metadata.get(MASA_CONTEXT_HEADER).map(|value| {
-        let ctx_str = value.to_str().unwrap_or_else(|err| {
-            panic!(
-                "{}",
-                masa_core::invalid_context_header_metadata_message(err)
-            )
-        });
-        Context::from_header_string(ctx_str)
-    })
+    get_wire_from_metadata::<BudgetLayer>(metadata)
 }
 
-/// Set the MASA context in metadata.
+/// Set the MASA context in metadata, as the budget module's wire data.
 ///
 /// Module wire data already attached to `metadata` is kept, so the order of
 /// attaching the context and the wire data does not matter.
 pub fn set_masa_context_in_metadata(metadata: &mut tonic::metadata::MetadataMap, ctx: &Context) {
-    wire::set_context_part(metadata, ctx.to_header_string());
+    set_wire_in_metadata::<BudgetLayer>(metadata, ctx);
 }
 
 /// Get module `M`'s wire data from metadata, if present. Panics on malformed
@@ -51,8 +43,11 @@ pub fn set_wire_in_metadata<M: Layer>(metadata: &mut tonic::metadata::MetadataMa
 /// The `ctx` header value for `ctx` carrying module `M`'s wire data, for
 /// building inbound requests by hand (tests, tools).
 pub fn header_string_with_wire<M: Layer>(ctx: &Context, data: &M::Wire) -> String {
-    wire::header_value_with::<M>(&ctx.to_header_string(), data)
-        .unwrap_or_else(|err| panic!("{err}"))
+    let mut out = WireOut::new();
+    out.put::<BudgetLayer>(ctx)
+        .and_then(|()| out.put::<M>(data))
+        .unwrap_or_else(|err| panic!("{err}"));
+    out.header_value()
 }
 
 fn get_ascii_metadata<'a>(
@@ -282,7 +277,7 @@ impl MasaStatusExt for Status {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use masa_core::ContextBuilder;
+    use crate::ContextBuilder;
 
     #[test]
     fn method_override_helpers_round_trip_metadata_and_headers() {

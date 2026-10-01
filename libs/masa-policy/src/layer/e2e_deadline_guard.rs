@@ -7,11 +7,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::task::Poll;
 
-use masa_core::{time_now, Context};
+use masa_core::time_now;
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
 use super::{
-    ChildRpcContext, Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit,
+    require_budget, BudgetInfo, Extensions, Layer, LayerChild, LayerServer, MissingDependency,
+    ServerInit,
 };
 
 // ── Core Handler ──────────────────────────────────────────────────────
@@ -20,24 +21,16 @@ use super::{
 struct SloAbortHandler {
     will_abort: AtomicBool,
     rpc: CowGrpcMethod,
+    budget: BudgetInfo,
     last_child: Mutex<Option<CowGrpcMethod>>,
 }
 
-impl Default for SloAbortHandler {
-    fn default() -> Self {
-        Self {
-            will_abort: AtomicBool::new(false),
-            rpc: CowGrpcMethod::new("", ""),
-            last_child: Mutex::new(None),
-        }
-    }
-}
-
 impl SloAbortHandler {
-    fn new(rpc: CowGrpcMethod) -> Self {
+    fn new(rpc: CowGrpcMethod, budget: BudgetInfo) -> Self {
         Self {
             will_abort: AtomicBool::new(false),
             rpc,
+            budget,
             last_child: Mutex::new(None),
         }
     }
@@ -48,12 +41,12 @@ impl SloAbortHandler {
         }
     }
 
-    fn check(&self, ctx: &Context) -> bool {
+    fn check(&self) -> bool {
         // e2e_deadline=0 means no SLO was set (e.g. health-check pings); never early-return.
         // Use e2e_deadline (gateway_entry + slo) rather than ctx.deadline() so that policies
         // like pred_sched that tighten the per-hop deadline for scheduling purposes do not
         // cause premature early-returns — ER fires only at the actual end-to-end SLO boundary.
-        let e2e_deadline = ctx.e2e_deadline();
+        let e2e_deadline = self.budget.e2e_deadline();
         if e2e_deadline == 0 {
             return false;
         }
@@ -62,7 +55,7 @@ impl SloAbortHandler {
             return true;
         }
 
-        let deadline = ctx.deadline();
+        let deadline = self.budget.deadline();
         if deadline == 0 {
             return false;
         }
@@ -115,7 +108,8 @@ impl SloAbortHandler {
 pub struct E2eDeadlineGuardServer;
 
 impl LayerServer for E2eDeadlineGuardServer {
-    fn new(_init: &mut ServerInit) -> Result<Self, MissingDependency> {
+    fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
+        require_budget(init)?;
         Ok(Self)
     }
 }
@@ -136,22 +130,17 @@ impl Layer for E2eDeadlineGuardLayer {
     fn new(
         method: &CowGrpcMethod,
         _server: &E2eDeadlineGuardServer,
-        _ctx: &mut Context,
         _wire: &WireIn<'_>,
-        _ext: &mut Extensions,
+        ext: &mut Extensions,
     ) -> Self {
         Self {
-            handler: SloAbortHandler::new(method.clone()),
+            handler: SloAbortHandler::new(method.clone(), BudgetInfo::of(ext)),
         }
     }
 
     #[inline]
-    fn before_poll<Ret>(
-        &self,
-        ctx: &Context,
-        _ext: &mut Extensions,
-    ) -> Result<(), Result<Response<Ret>, Status>> {
-        if self.handler.check(ctx) {
+    fn before_poll<Ret>(&self, _ext: &mut Extensions) -> Result<(), Result<Response<Ret>, Status>> {
+        if self.handler.check() {
             return Err(Err(self.handler.issue_error()));
         }
         Ok(())
@@ -160,15 +149,13 @@ impl Layer for E2eDeadlineGuardLayer {
     #[inline]
     fn before_child_rpc<T>(
         &self,
-        ctx: &Context,
         _child_method: &CowGrpcMethod,
         _child_ctx: &mut E2eDeadlineGuardChild,
         _request: &mut tonic::Request<T>,
-        _child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
         _ext: &mut Extensions,
     ) -> Result<(), Status> {
-        if self.handler.check(ctx) {
+        if self.handler.check() {
             return Err(self.handler.issue_error());
         }
         Ok(())
@@ -177,7 +164,6 @@ impl Layer for E2eDeadlineGuardLayer {
     #[inline]
     fn after_child_rpc<T>(
         &self,
-        _ctx: &Context,
         child_method: &CowGrpcMethod,
         _response: &Result<Response<T>, Status>,
         _response_wire: &WireIn<'_>,
@@ -191,12 +177,11 @@ impl Layer for E2eDeadlineGuardLayer {
     #[inline]
     fn after_poll<Ret>(
         &self,
-        ctx: &Context,
         poll: &Poll<Result<Response<Ret>, Status>>,
         _ext: &Extensions,
     ) -> Result<(), Result<Response<Ret>, Status>> {
         if let Poll::Pending = poll {
-            if self.handler.check(ctx) {
+            if self.handler.check() {
                 return Err(Err(self.handler.issue_error()));
             }
         }
@@ -226,7 +211,8 @@ macro_rules! generate_abort_slo_test {
         fn test_early_return_tracking() {
             use super::{$ChildContext, $ParentContext, $ServerContext};
             use crate::context_ext::MASA_CONTEXT_HEADER;
-            use masa_core::{time_now, ContextBuilder};
+            use crate::ContextBuilder;
+            use masa_core::time_now;
             use std::sync::Arc;
             use tonic::masa::{ClientHooks, ParentHooks, ServerHooks};
             use tonic::{GrpcMethod, Request, Response, Status};

@@ -1,14 +1,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 
-use masa_core::Context;
 use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Response, Status};
 
 use super::shared::{RajomonSharedState, RAJOMON_STATE};
-use crate::layer::{
-    ChildRpcContext, Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit,
-};
+use crate::layer::{Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit};
 use crate::policy_params::PolicyParams;
 use crate::wire::{WireIn, WireOut};
 
@@ -79,7 +76,6 @@ impl Layer for RajomonLayer {
     fn new(
         method: &CowGrpcMethod,
         _server: &RajomonServer,
-        _ctx: &mut Context,
         wire: &WireIn<'_>,
         _ext: &mut Extensions,
     ) -> Self {
@@ -119,11 +115,7 @@ impl Layer for RajomonLayer {
     }
 
     #[inline]
-    fn before_poll<Ret>(
-        &self,
-        _ctx: &Context,
-        _ext: &mut Extensions,
-    ) -> Result<(), Result<Response<Ret>, Status>> {
+    fn before_poll<Ret>(&self, _ext: &mut Extensions) -> Result<(), Result<Response<Ret>, Status>> {
         // Track queue delay for price updates
         let q_lat_us = tokio::task::obtain_task_queue_latency().as_micros() as u64;
         RAJOMON_STATE
@@ -141,11 +133,9 @@ impl Layer for RajomonLayer {
     #[inline]
     fn before_child_rpc<T>(
         &self,
-        _ctx: &Context,
         child_method: &CowGrpcMethod,
         _child_ctx: &mut RajomonChild,
         _request: &mut tonic::Request<T>,
-        _child_rpc: &mut ChildRpcContext,
         child_wire: &mut WireOut,
         _ext: &mut Extensions,
     ) -> Result<(), Status> {
@@ -174,7 +164,6 @@ impl Layer for RajomonLayer {
     #[inline]
     fn after_poll<Ret>(
         &self,
-        _ctx: &Context,
         poll: &Poll<Result<Response<Ret>, Status>>,
         _ext: &Extensions,
     ) -> Result<(), Result<Response<Ret>, Status>> {
@@ -189,7 +178,6 @@ impl Layer for RajomonLayer {
     #[inline]
     fn after_child_rpc<T>(
         &self,
-        _ctx: &Context,
         child_method: &CowGrpcMethod,
         _response: &Result<Response<T>, Status>,
         response_wire: &WireIn<'_>,
@@ -227,7 +215,6 @@ impl Layer for RajomonLayer {
     #[inline]
     fn finalize<Ret>(
         &self,
-        _ctx: &mut Context,
         _result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
         _ext: &Extensions,

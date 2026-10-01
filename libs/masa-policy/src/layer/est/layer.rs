@@ -8,11 +8,12 @@ use crate::wire::{WireIn, WireOut};
 use std::sync::Arc;
 use std::task::Poll;
 
-use masa_core::{Context, PriorityHint, ABORT_SLACK};
+use masa_core::{PriorityHint, ABORT_SLACK};
 use tonic::{Code, CowGrpcMethod, Response, Status};
 
 use super::super::{
-    ChildRpcContext, Extensions, Layer, LayerChild, LayerServer, MissingDependency, ServerInit,
+    require_budget, BudgetInfo, ChildBudget, Extensions, Layer, LayerChild, LayerServer,
+    MissingDependency, ServerInit,
 };
 use super::default_estimator::DefaultLatencyEstimator;
 use super::state::{
@@ -34,6 +35,7 @@ impl LayerServer for EstimationServer {
     /// Publishes the latency estimators so later modules (e.g., predictive
     /// admission control) share this service's estimates.
     fn new(init: &mut ServerInit) -> Result<Self, MissingDependency> {
+        require_budget(init)?;
         let est = LatencyEstimators::<DefaultLatencyEstimator>::new();
         init.provide(est.clone());
         init.provide(PublishesEstimationInfo);
@@ -55,6 +57,7 @@ pub struct EstimationLayer {
     request_metadata: Arc<RequestMetadataTracker>,
     rpc: CowGrpcMethod,
     info: EstimationInfo,
+    budget: BudgetInfo,
 }
 
 impl Layer for EstimationLayer {
@@ -66,7 +69,6 @@ impl Layer for EstimationLayer {
     fn new(
         method: &CowGrpcMethod,
         server: &EstimationServer,
-        _ctx: &mut Context,
         wire: &WireIn<'_>,
         ext: &mut Extensions,
     ) -> Self {
@@ -111,19 +113,16 @@ impl Layer for EstimationLayer {
             request_metadata,
             rpc: method.clone(),
             info,
+            budget: BudgetInfo::of(ext),
         }
     }
 
     /// Reprioritize the current task and check the local deadline
     /// (ABORT_SLACK aborts; SIGNAL_SLACK marks the soft signal).
     #[inline]
-    fn before_poll<Ret>(
-        &self,
-        ctx: &Context,
-        _ext: &mut Extensions,
-    ) -> Result<(), Result<Response<Ret>, Status>> {
+    fn before_poll<Ret>(&self, _ext: &mut Extensions) -> Result<(), Result<Response<Ret>, Status>> {
         if ABORT_SLACK {
-            let local_deadline = ctx.deadline();
+            let local_deadline = self.budget.deadline();
             if local_deadline != 0 && masa_core::time_now() > local_deadline {
                 return Err(Err(Status::new(
                     Code::DeadlineExceeded,
@@ -136,11 +135,11 @@ impl Layer for EstimationLayer {
             }
         }
 
-        super::signal_slack::mark_if_late(ctx, &self.request_metadata);
+        super::signal_slack::mark_if_late(&self.budget, &self.request_metadata);
 
         #[cfg(feature = "sched_pred")]
         {
-            let remaining = ctx.deadline().saturating_sub(masa_core::time_now());
+            let remaining = self.budget.deadline().saturating_sub(masa_core::time_now());
             tokio::task::reprioritize(tokio::task::TaskPriority::new(remaining));
         }
 
@@ -153,13 +152,11 @@ impl Layer for EstimationLayer {
     #[inline]
     fn before_child_rpc<T>(
         &self,
-        ctx: &Context,
         child_method_name: &CowGrpcMethod,
         child_ctx: &mut EstimationChild,
         _request: &mut tonic::Request<T>,
-        child_rpc: &mut ChildRpcContext,
         child_wire: &mut WireOut,
-        _ext: &mut Extensions,
+        ext: &mut Extensions,
     ) -> Result<(), Status> {
         // Each hop below ingress is one further from it; the root is passed on.
         child_wire
@@ -170,7 +167,10 @@ impl Layer for EstimationLayer {
             .unwrap_or_else(|err| panic!("{err}"));
 
         let child_tracker = self.estimation.begin_child(child_method_name);
-        let time_left = ctx.e2e_deadline().saturating_sub(masa_core::time_now());
+        let time_left = self
+            .budget
+            .e2e_deadline()
+            .saturating_sub(masa_core::time_now());
         let root = self
             .estimation
             .root_method_id
@@ -206,9 +206,11 @@ impl Layer for EstimationLayer {
         let decayed_full = (remaining.full as f64 * decay) as u64;
         let decayed_floor = (remaining.floor as f64 * decay) as u64;
 
-        let (deadline, prio_hint) = Self::child_deadline_and_prio(ctx, decayed_full, decayed_floor);
-        child_rpc.deadline = deadline;
-        child_rpc.prio_hint = prio_hint;
+        let (deadline, prio_hint) =
+            Self::child_deadline_and_prio(&self.budget, decayed_full, decayed_floor);
+        let child = ChildBudget::of(ext);
+        child.deadline = deadline;
+        child.prio_hint = prio_hint;
 
         child_ctx.child_tracker = Some(child_tracker);
 
@@ -219,7 +221,6 @@ impl Layer for EstimationLayer {
     #[inline]
     fn after_child_rpc<T>(
         &self,
-        _ctx: &Context,
         _child_method: &CowGrpcMethod,
         response: &Result<Response<T>, Status>,
         response_wire: &WireIn<'_>,
@@ -256,14 +257,13 @@ impl Layer for EstimationLayer {
     #[inline]
     fn after_poll<Ret>(
         &self,
-        ctx: &Context,
         poll: &Poll<Result<Response<Ret>, Status>>,
         _ext: &Extensions,
     ) -> Result<(), Result<Response<Ret>, Status>> {
         self.request_metadata.end_poll();
         if let Poll::Pending = poll {
             if ABORT_SLACK {
-                let local_deadline = ctx.deadline();
+                let local_deadline = self.budget.deadline();
                 if local_deadline != 0 && masa_core::time_now() > local_deadline {
                     return Err(Err(Status::new(
                         Code::DeadlineExceeded,
@@ -276,7 +276,7 @@ impl Layer for EstimationLayer {
                 }
             }
         }
-        super::signal_slack::mark_if_late(ctx, &self.request_metadata);
+        super::signal_slack::mark_if_late(&self.budget, &self.request_metadata);
         Ok(())
     }
 
@@ -295,7 +295,6 @@ impl Layer for EstimationLayer {
     #[inline]
     fn finalize<Ret>(
         &self,
-        _ctx: &mut Context,
         result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
         _ext: &Extensions,
@@ -319,7 +318,7 @@ impl EstimationLayer {
     /// `est_remaining`. When disabled, passes through the parent values.
     #[inline]
     fn child_deadline_and_prio(
-        ctx: &Context,
+        budget: &BudgetInfo,
         #[cfg_attr(not(feature = "sched_pred"), allow(unused_variables))]
         priority_est_remaining: u64,
         deadline_est_remaining: u64,
@@ -331,15 +330,15 @@ impl EstimationLayer {
             // estimate to avoid converting estimator variance into false ERs.
             let hard_deadline_estimate =
                 hard_deadline_estimate(priority_est_remaining, deadline_est_remaining);
-            let deadline = ctx.deadline().saturating_sub(hard_deadline_estimate);
-            let priority_deadline = ctx.deadline().saturating_sub(priority_est_remaining);
+            let deadline = budget.deadline().saturating_sub(hard_deadline_estimate);
+            let priority_deadline = budget.deadline().saturating_sub(priority_est_remaining);
             let priority_remaining = priority_deadline.saturating_sub(masa_core::time_now());
             (deadline, PriorityHint::new(priority_remaining))
         }
         #[cfg(not(feature = "sched_pred"))]
         {
-            let d = ctx.deadline().saturating_sub(deadline_est_remaining);
-            (d, ctx.prio_hint())
+            let d = budget.deadline().saturating_sub(deadline_est_remaining);
+            (d, budget.prio_hint())
         }
     }
 }

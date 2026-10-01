@@ -5,11 +5,12 @@ mod latency_estimator;
 mod priority;
 mod timing;
 mod typing;
+pub mod wire;
 
 pub use context::FutureSpan;
 pub use context::{
-    invalid_context_header_metadata_message, Context, ContextBuilder, RequestContext,
-    MISSING_CONTEXT_HEADER_MESSAGE, WIRE_SEPARATOR,
+    invalid_budget_section_message, invalid_context_header_metadata_message,
+    missing_budget_section_message, Context, BUDGET_SECTION, MISSING_CONTEXT_HEADER_MESSAGE,
 };
 pub use flag::{
     ABORT_SLACK, ABORT_SLO, RAJOMON, SCHED_FIFO, SCHED_ORACLE, SCHED_PRED, SCHED_SLO,

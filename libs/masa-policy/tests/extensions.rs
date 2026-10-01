@@ -3,11 +3,11 @@
 
 use std::sync::Arc;
 
-use masa_core::{time_now, Context, ContextBuilder};
+use masa_core::time_now;
+use masa_policy::ContextBuilder;
 use masa_policy::{
-    policy_stack, ChildRpcContext, Extensions, Layer, LayerServer, MasaResponseExt,
-    MissingDependency, PolicyHooks, ServerContext, ServerInit, WireIn, WireOut,
-    MASA_CONTEXT_HEADER,
+    policy_stack, Extensions, Layer, LayerServer, MasaResponseExt, MissingDependency, PolicyHooks,
+    ServerContext, ServerInit, WireIn, WireOut, MASA_CONTEXT_HEADER,
 };
 use serde::{Deserialize, Serialize};
 use tonic::masa::{ClientHooks, Hooks, ParentHooks, ServerHooks};
@@ -48,24 +48,16 @@ impl Layer for Producer {
     const NAME: &'static str = "producer";
     type Wire = ();
 
-    fn new(
-        _m: &CowGrpcMethod,
-        _s: &(),
-        _c: &mut Context,
-        _w: &WireIn<'_>,
-        ext: &mut Extensions,
-    ) -> Self {
+    fn new(_m: &CowGrpcMethod, _s: &(), _w: &WireIn<'_>, ext: &mut Extensions) -> Self {
         ext.insert(Shared { child_calls: 0 });
         Self
     }
 
     fn before_child_rpc<T>(
         &self,
-        _ctx: &Context,
         _child_method: &CowGrpcMethod,
         _child_ctx: &mut (),
         _request: &mut Request<T>,
-        _child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
         ext: &mut Extensions,
     ) -> Result<(), Status> {
@@ -97,13 +89,7 @@ impl Layer for Consumer {
     const NAME: &'static str = "consumer";
     type Wire = SeenWire;
 
-    fn new(
-        _m: &CowGrpcMethod,
-        _s: &(),
-        _c: &mut Context,
-        _w: &WireIn<'_>,
-        ext: &mut Extensions,
-    ) -> Self {
+    fn new(_m: &CowGrpcMethod, _s: &(), _w: &WireIn<'_>, ext: &mut Extensions) -> Self {
         Self {
             in_new: ext.get::<Shared>().map(|shared| shared.child_calls),
             in_before_child: Default::default(),
@@ -113,11 +99,9 @@ impl Layer for Consumer {
 
     fn before_child_rpc<T>(
         &self,
-        _ctx: &Context,
         _child_method: &CowGrpcMethod,
         _child_ctx: &mut (),
         _request: &mut Request<T>,
-        _child_rpc: &mut ChildRpcContext,
         _child_wire: &mut WireOut,
         ext: &mut Extensions,
     ) -> Result<(), Status> {
@@ -127,7 +111,6 @@ impl Layer for Consumer {
 
     fn after_child_rpc<T>(
         &self,
-        _ctx: &Context,
         _child_method: &CowGrpcMethod,
         _response: &Result<Response<T>, Status>,
         _response_wire: &WireIn<'_>,
@@ -140,7 +123,6 @@ impl Layer for Consumer {
 
     fn finalize<Ret>(
         &self,
-        _ctx: &mut Context,
         _result: &mut Result<Response<Ret>, Status>,
         wire: &mut WireOut,
         _ext: &Extensions,
@@ -246,13 +228,7 @@ macro_rules! dependency_module {
             const NAME: &'static str = $wire_name;
             type Wire = ();
 
-            fn new(
-                _m: &CowGrpcMethod,
-                _s: &$server,
-                _c: &mut Context,
-                _w: &WireIn<'_>,
-                _e: &mut Extensions,
-            ) -> Self {
+            fn new(_m: &CowGrpcMethod, _s: &$server, _w: &WireIn<'_>, _e: &mut Extensions) -> Self {
                 Self
             }
         }

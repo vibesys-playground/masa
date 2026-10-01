@@ -64,7 +64,7 @@ fn benchmark_serialization() {
     let start = Instant::now();
     for _ in 0..iterations {
         set_masa_context_in_metadata(&mut map, &ctx);
-        map.remove("x-masa-context"); // cleanup to keep map size constant
+        map.remove(masa::MASA_CONTEXT_HEADER); // cleanup to keep map size constant
     }
     let elapsed = start.elapsed();
     println!(
