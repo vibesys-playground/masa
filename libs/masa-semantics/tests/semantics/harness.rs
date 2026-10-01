@@ -22,8 +22,8 @@ use std::sync::{Arc, Once};
 use std::task::Poll;
 use std::time::Duration;
 
-use masa::{MasaRequestExt, MasaResponseExt, MasaStatusExt, RootContext, MASA_CONTEXT_HEADER};
-use masa_core::{test_clock, Context, ContextBuilder, PriorityHint};
+use masa::{ContextBuilder, MasaRequestExt, MasaResponseExt, MasaStatusExt, RootContext};
+use masa_core::{test_clock, Context, PriorityHint};
 use tonic::masa::{ClientHooks, ParentHooks, ServerHooks};
 use tonic::{Code, GrpcMethod, Request, Response, Status};
 
@@ -84,10 +84,13 @@ pub fn init<H: Hooks>(params: Params, suppress_background_workers: bool) {
 }
 
 fn inbound_http(ctx: &Context) -> http::Request<()> {
-    http::Request::builder()
-        .header(MASA_CONTEXT_HEADER, ctx.to_header_string())
-        .body(())
-        .unwrap()
+    let mut req = http::Request::new(());
+    *req.headers_mut() = RootContext::from(ctx.clone())
+        .attach(Request::new(()))
+        .metadata()
+        .clone()
+        .into_headers();
+    req
 }
 
 /// Run `f` inside a task of a current-thread runtime, with a fresh virtual
@@ -359,28 +362,10 @@ pub struct QueueView {
     pub lengths: BTreeMap<String, u64>,
 }
 
-/// Rajomon's wire data in `metadata`, if any.
-#[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
-fn rajomon_wire(metadata: &tonic::metadata::MetadataMap) -> Option<masa_policy::RajomonWire> {
-    masa::WireIn::from_metadata(metadata)
-        .expect("well-formed wire sections")
-        .get::<masa_policy::modules::RajomonLayer>()
-        .expect("decodable rajomon section")
-}
-
-/// Estimation's wire data in `metadata`, if any.
-#[cfg(feature = "estimator")]
-fn estimation_wire(metadata: &tonic::metadata::MetadataMap) -> Option<masa_policy::EstimationWire> {
-    masa::WireIn::from_metadata(metadata)
-        .expect("well-formed wire sections")
-        .get::<masa_policy::modules::EstimationLayer>()
-        .expect("decodable estimation section")
-}
-
 /// Tokens of the Rajomon wire section in `metadata`, if any.
 fn rajomon_tokens(metadata: &tonic::metadata::MetadataMap) -> Option<u64> {
     #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
-    return rajomon_wire(metadata).map(|wire| wire.tokens);
+    return masa::rajomon_from_metadata(metadata).map(|wire| wire.tokens);
     #[cfg(not(all(feature = "ac_rajomon", not(feature = "ac_pred"))))]
     {
         let _ = metadata;
@@ -391,7 +376,7 @@ fn rajomon_tokens(metadata: &tonic::metadata::MetadataMap) -> Option<u64> {
 /// The Rajomon price advertised in `metadata`, if any.
 fn rajomon_price(metadata: &tonic::metadata::MetadataMap) -> Option<u64> {
     #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
-    return rajomon_wire(metadata).and_then(|wire| wire.price);
+    return masa::rajomon_from_metadata(metadata).and_then(|wire| wire.price);
     #[cfg(not(all(feature = "ac_rajomon", not(feature = "ac_pred"))))]
     {
         let _ = metadata;
@@ -422,41 +407,36 @@ fn attach_response_wire(
     price: Option<u64>,
     meta: Option<RespMeta>,
 ) {
-    #[allow(unused_mut)]
-    let mut wire = masa::WireOut::new();
     #[cfg(feature = "estimator")]
     if let Some(m) = meta {
-        wire.put::<masa_policy::modules::EstimationLayer>(&masa_policy::EstimationWire::response(
-            masa_policy::EstimationResponseWire {
+        masa::set_estimation_in_metadata(
+            metadata,
+            &masa::EstimationWire::response(masa::EstimationResponseWire {
                 compute_time_us: m.compute_time_us,
                 accumulated_compute_us: m.accumulated_compute_us,
                 utilization: m.utilization,
                 max_downstream_util: m.max_downstream_util,
                 early_return_count: m.early_return_count,
                 deadline_signal_count: m.deadline_signal_count,
-            },
-        ))
-        .expect("encodable estimation data");
+            }),
+        );
     }
-    let _ = &meta;
     #[cfg(feature = "trace_queue_latency")]
     if let Some(q) = queue {
-        wire.put::<masa_policy::modules::QueueLatencyLayer>(&masa::QueueLatencyWire {
-            initial: q.initial,
-            resume: q.resume,
-            queue_lengths: q.lengths.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-        })
-        .expect("encodable queue telemetry");
+        masa::set_queue_latencies_in_metadata(
+            metadata,
+            &masa::QueueLatencyWire {
+                initial: q.initial,
+                resume: q.resume,
+                queue_lengths: q.lengths.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            },
+        );
     }
     #[cfg(all(feature = "ac_rajomon", not(feature = "ac_pred")))]
     if let Some(price) = price {
-        wire.put::<masa_policy::modules::RajomonLayer>(&masa_policy::RajomonWire::response(
-            0, price,
-        ))
-        .expect("encodable rajomon price");
+        masa::set_rajomon_in_metadata(metadata, &masa::RajomonWire::response(0, price));
     }
-    let _ = (&queue, &price);
-    wire.install(metadata);
+    let _ = (&metadata, &queue, &price, &meta);
 }
 
 impl CtxView {
@@ -469,7 +449,7 @@ impl CtxView {
         let tokens = rajomon_tokens(metadata);
         let queue = queue_view(metadata);
         #[cfg(feature = "estimator")]
-        let estimation = estimation_wire(metadata);
+        let estimation = masa::estimation_from_metadata(metadata);
         #[cfg(feature = "estimator")]
         let request_half = estimation.as_ref().and_then(|w| w.request.clone());
         Self {
@@ -607,12 +587,8 @@ impl Crafted {
         if let Some(n) = self.hop_count {
             let root_method = self
                 .root
-                .map(|(service, method)| masa_policy::RootMethod { service, method });
-            root.wire_mut()
-                .put::<masa_policy::modules::EstimationLayer>(
-                    &masa_policy::EstimationWire::request(n, root_method),
-                )
-                .expect("encodable estimation data");
+                .map(|(service, method)| masa::RootMethod { service, method });
+            root = root.with_estimation_request(n, root_method);
         }
         #[cfg(feature = "ac_rajomon")]
         if let Some(t) = self.tokens {
