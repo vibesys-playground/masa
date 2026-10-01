@@ -52,7 +52,7 @@ use tonic::{CowGrpcMethod, Response, Status};
 
 use crate::wire::{assert_valid_name, WireIn, WireOut};
 
-pub use extensions::{ChildState, DecisionClosed, Extensions, Proposal};
+pub use extensions::{ChildState, DecisionClosed, Extensions, Proposal, Proposals};
 
 // ── Submodules ──────────────────────────────────────────────────────────
 

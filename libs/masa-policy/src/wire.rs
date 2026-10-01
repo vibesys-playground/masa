@@ -197,7 +197,12 @@ impl WireOut {
     }
 
     pub(crate) fn header_value(&self) -> String {
-        let mut value = String::new();
+        let len = self
+            .sections
+            .iter()
+            .map(|(name, payload)| name.len() + payload.len() + 2)
+            .sum();
+        let mut value = String::with_capacity(len);
         for (name, payload) in &self.sections {
             codec::push_section(&mut value, name, payload);
         }

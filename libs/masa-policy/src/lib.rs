@@ -35,7 +35,7 @@ pub use hooks::{ChildContext, ParentContext, PolicyHooks, ServerContext};
 pub use layer::{
     root_priority, BudgetInfo, BudgetLayer, ChildDeadline, ChildOutcome, ChildPriority, ChildState,
     ContextBuilder, DecisionClosed, Early, Extensions, Layer, LayerServer, LayerStack,
-    MissingDependency, Outcome, Proposal, Rejection, Requires, ServerInit, Stack,
+    MissingDependency, Outcome, Proposal, Proposals, Rejection, Requires, ServerInit, Stack,
 };
 pub use masa_stack::MasaStack;
 pub use wire::{peek, WireError, WireIn, WireOut};

@@ -3,6 +3,8 @@
 use std::any::{Any, TypeId};
 use std::ops::{Deref, DerefMut};
 
+use smallvec::SmallVec;
+
 /// A map holding at most one value of each type, through which the modules of
 /// a stack share data without the framework having a field for it (the same
 /// idea as `http::Extensions`).
@@ -23,7 +25,7 @@ use std::ops::{Deref, DerefMut};
 /// than hashing.
 #[derive(Debug, Default)]
 pub struct Extensions {
-    values: Vec<(TypeId, Box<dyn Any + Send + Sync>)>,
+    values: SmallVec<[(TypeId, Box<dyn Any + Send + Sync>); 4]>,
     /// The module whose hook is running, set by the framework before it calls
     /// a hook that takes the map mutably; empty outside a stack.
     module: &'static str,
@@ -87,11 +89,33 @@ pub struct Proposal<T> {
     pub value: T,
 }
 
+/// The proposals made for one decision, in the order they were made. A
+/// decision usually has one or two, which are stored inline.
+#[derive(Debug)]
+pub struct Proposals<T>(SmallVec<[Proposal<T>; 2]>);
+
+impl<T> Deref for Proposals<T> {
+    type Target = [Proposal<T>];
+
+    fn deref(&self) -> &[Proposal<T>] {
+        &self.0
+    }
+}
+
+impl<T> IntoIterator for Proposals<T> {
+    type Item = Proposal<T>;
+    type IntoIter = smallvec::IntoIter<[Proposal<T>; 2]>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
 /// The proposals made so far for decision type `T`, and whether the owner has
 /// resolved them.
 #[derive(Debug)]
 struct Decision<T> {
-    proposals: Vec<Proposal<T>>,
+    proposals: Proposals<T>,
     resolved_by: Option<&'static str>,
 }
 
@@ -169,12 +193,12 @@ impl Extensions {
                 resolver,
             }),
             Some(decision) => {
-                decision.proposals.push(Proposal { by, value });
+                decision.proposals.0.push(Proposal { by, value });
                 Ok(())
             }
             None => {
                 self.insert(Decision {
-                    proposals: vec![Proposal { by, value }],
+                    proposals: Proposals(smallvec::smallvec![Proposal { by, value }]),
                     resolved_by: None,
                 });
                 Ok(())
@@ -192,17 +216,17 @@ impl Extensions {
     /// Take the proposals for `T` and close the decision: later proposals fail.
     /// Called by the owner of `T`; the proposals come back in the order they
     /// were made.
-    pub fn resolve<T: Any + Send + Sync>(&mut self) -> Vec<Proposal<T>> {
+    pub fn resolve<T: Any + Send + Sync>(&mut self) -> Proposals<T> {
         let by = self.module;
         if let Some(decision) = self.get_mut::<Decision<T>>() {
             decision.resolved_by = Some(by);
-            return std::mem::take(&mut decision.proposals);
+            return Proposals(std::mem::take(&mut decision.proposals.0));
         }
         self.insert(Decision::<T> {
-            proposals: Vec::new(),
+            proposals: Proposals(SmallVec::new()),
             resolved_by: Some(by),
         });
-        Vec::new()
+        Proposals(SmallVec::new())
     }
 
     /// Record the module whose hook the framework is about to call.
