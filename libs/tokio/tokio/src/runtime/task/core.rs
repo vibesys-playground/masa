@@ -25,7 +25,6 @@ use std::task::{Context, Poll, Waker};
 
 use super::poll_hook::PollHook;
 
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// The task cell. Contains the components of the task.
@@ -191,49 +190,36 @@ pub(crate) struct Header {
     pub(super) tracing_id: Option<tracing::Id>,
 }
 
-/// Nanoseconds since a process-wide epoch fixed at the first call.
-///
-/// This is the clock behind the times a run queue sees in its `TaskView`.
-fn clock_ns() -> u64 {
-    static EPOCH: OnceLock<Instant> = OnceLock::new();
-    let epoch = *EPOCH.get_or_init(Instant::now);
-    let since = Instant::now().duration_since(epoch);
-    since.as_secs() * 1_000_000_000 + u64::from(since.subsec_nanos())
-}
-
 /// Per-task timing facts the scheduler records for run queues.
 #[derive(Clone)]
 pub(crate) struct TraceTimer {
-    q_lat_ns: u64,
-    last_enqueue_ns: u64,
-    first_enqueue_ns: u64,
+    q_lat: Duration,
+    last_enqueue: Option<Instant>,
+    first_enqueue: Option<Instant>,
     polls: u32,
-    enqueued: bool,
 }
 
 impl TraceTimer {
     pub(crate) fn new() -> Self {
         TraceTimer {
-            q_lat_ns: 0,
-            last_enqueue_ns: 0,
-            first_enqueue_ns: 0,
+            q_lat: Duration::ZERO,
+            last_enqueue: None,
+            first_enqueue: None,
             polls: 0,
-            enqueued: false,
         }
     }
 
     pub(crate) fn set_enqueue_time(&mut self) {
-        let now = clock_ns();
-        self.last_enqueue_ns = now;
-        if !self.enqueued {
-            self.first_enqueue_ns = now;
-            self.enqueued = true;
+        let now = Instant::now();
+        self.last_enqueue = Some(now);
+        if self.first_enqueue.is_none() {
+            self.first_enqueue = Some(now);
         }
-        self.q_lat_ns = 0;
+        self.q_lat = Duration::ZERO;
     }
 
     pub(crate) fn record_queue_lat(&mut self) {
-        self.q_lat_ns = clock_ns().saturating_sub(self.last_enqueue_ns);
+        self.q_lat = Instant::now().duration_since(self.last_enqueue.unwrap());
     }
 
     /// Count a poll that is about to start.
@@ -242,15 +228,17 @@ impl TraceTimer {
     }
 
     pub(crate) fn q_lat(&self) -> Duration {
-        Duration::from_nanos(self.q_lat_ns)
+        self.q_lat
     }
 
-    pub(crate) fn last_enqueue_ns(&self) -> u64 {
-        self.last_enqueue_ns
+    /// When the task was last enqueued. A task is always enqueued before a
+    /// run queue sees it; the fallback only keeps this total.
+    pub(crate) fn last_enqueue(&self) -> Instant {
+        self.last_enqueue.unwrap_or_else(Instant::now)
     }
 
-    pub(crate) fn first_enqueue_ns(&self) -> u64 {
-        self.first_enqueue_ns
+    pub(crate) fn first_enqueue(&self) -> Instant {
+        self.first_enqueue.unwrap_or_else(Instant::now)
     }
 
     pub(crate) fn polls(&self) -> u32 {

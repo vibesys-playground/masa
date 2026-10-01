@@ -6,6 +6,7 @@
 //! that calls `block_on`.
 
 use std::cell::RefCell;
+use std::time::Instant;
 
 use crate::PollOutcome;
 
@@ -16,8 +17,8 @@ pub enum Event {
     Push {
         task_id: u64,
         polls: u32,
-        enqueued_at_ns: u64,
-        first_enqueued_at_ns: u64,
+        enqueued_at: Instant,
+        first_enqueued_at: Instant,
     },
     /// `on_poll_start`.
     PollStart { task_id: u64, polls: u32 },

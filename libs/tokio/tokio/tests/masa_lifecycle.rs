@@ -110,9 +110,9 @@ fn repush_keeps_first_enqueue_time_and_counts_polls() {
             Event::Push {
                 task_id,
                 polls,
-                enqueued_at_ns,
-                first_enqueued_at_ns,
-            } if task_id == id => Some((polls, enqueued_at_ns, first_enqueued_at_ns)),
+                enqueued_at,
+                first_enqueued_at,
+            } if task_id == id => Some((polls, enqueued_at, first_enqueued_at)),
             _ => None,
         })
         .collect();
@@ -125,7 +125,7 @@ fn repush_keeps_first_enqueue_time_and_counts_polls() {
     );
     assert_eq!(second.2, first.2, "re-push keeps the first enqueue time");
     assert!(
-        second.1 >= first.1 + 5_000_000,
+        second.1 >= first.1 + std::time::Duration::from_millis(5),
         "second enqueue is at least the 5 ms sleep later: {first:?} {second:?}"
     );
 }

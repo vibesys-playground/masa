@@ -37,8 +37,8 @@ impl<T> RunQueue<T> for Queue<T> {
         crate::trace::record(crate::trace::Event::Push {
             task_id: view.task_id,
             polls: view.polls,
-            enqueued_at_ns: view.enqueued_at_ns,
-            first_enqueued_at_ns: view.first_enqueued_at_ns,
+            enqueued_at: view.enqueued_at,
+            first_enqueued_at: view.first_enqueued_at,
         });
         if default_policy::is_infra(view.meta) {
             self.infra_q.push_back(item);

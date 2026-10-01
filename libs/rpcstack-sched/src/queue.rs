@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::Meta;
 
 /// Read-only facts about a task that a queue may use to place it.
@@ -6,10 +8,8 @@ use crate::Meta;
 /// no trait bounds: the runtime passes whatever it stores. The view carries
 /// facts only; what they mean for ordering is up to the queue.
 ///
-/// Times are nanoseconds on one runtime-wide clock whose zero point is
-/// arbitrary but fixed for the life of the process. Only differences between
-/// two times are meaningful. The runtime supplies them, so a queue needs no
-/// clock of its own and a test can construct a view with any times.
+/// The runtime supplies the times, so a queue needs no clock of its own and a
+/// test can build a view with any times (an `Instant` plus a `Duration`).
 #[derive(Debug, Clone, Copy)]
 pub struct TaskView<'a> {
     /// The runtime's identifier of the task. It stays the same every time the
@@ -19,10 +19,10 @@ pub struct TaskView<'a> {
     pub meta: &'a Meta,
     /// When the enqueue this view describes happened. During `on_poll_start`
     /// and `on_poll_end` it is the time of the enqueue that led to the poll.
-    pub enqueued_at_ns: u64,
-    /// When the task first entered any queue. Equal to `enqueued_at_ns` on
+    pub enqueued_at: Instant,
+    /// When the task first entered any queue. Equal to `enqueued_at` on
     /// the first push, and unchanged by later pushes.
-    pub first_enqueued_at_ns: u64,
+    pub first_enqueued_at: Instant,
     /// Number of polls the task has started so far, counting the poll in
     /// progress during `on_poll_start` and `on_poll_end`. It is 0 at a task's
     /// first push and 1 when it is pushed again after one poll.
@@ -34,15 +34,15 @@ impl<'a> TaskView<'a> {
     pub fn new(
         task_id: u64,
         meta: &'a Meta,
-        enqueued_at_ns: u64,
-        first_enqueued_at_ns: u64,
+        enqueued_at: Instant,
+        first_enqueued_at: Instant,
         polls: u32,
     ) -> Self {
         Self {
             task_id,
             meta,
-            enqueued_at_ns,
-            first_enqueued_at_ns,
+            enqueued_at,
+            first_enqueued_at,
             polls,
         }
     }

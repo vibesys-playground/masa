@@ -361,6 +361,7 @@ impl Core {
     /// hands, so the loop reports around the poll instead of from inside it.
     /// A task finished during the poll if it was released from the scheduler
     /// meanwhile, which is how `Handle::release` fills `exited`.
+    #[inline(always)]
     fn end_poll(&mut self, view: &TaskView<'_>) {
         let outcome = if self.exited.contains(&view.task_id) {
             PollOutcome::Ready
@@ -383,13 +384,14 @@ impl Core {
 
 /// The view of `task` that the run queue gets. `meta` must be the task's
 /// metadata, owned by the caller so the view can borrow it.
+#[inline(always)]
 fn task_view<'a>(task: &Notified, meta: &'a Meta) -> TaskView<'a> {
     let timer = task.timer();
     TaskView::new(
         task.id().as_u64(),
         meta,
-        timer.last_enqueue_ns(),
-        timer.first_enqueue_ns(),
+        timer.last_enqueue(),
+        timer.first_enqueue(),
         timer.polls(),
     )
 }

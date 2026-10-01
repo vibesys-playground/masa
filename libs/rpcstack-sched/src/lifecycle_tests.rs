@@ -6,6 +6,8 @@
 //! Times are plain numbers, so every scenario is deterministic.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use crate::builtin::fifo::FifoQueue;
 use crate::builtin::prio_heap::BinaryHeapQueue;
@@ -13,12 +15,19 @@ use crate::builtin::tailclipper::BinaryHeapRoundRobinQueue;
 use crate::custom;
 use crate::{Meta, PollOutcome, RunQueue, TaskView};
 
+/// The instant `ns` nanoseconds after a fixed origin, so scripts can use plain
+/// numbers for times.
+fn at(ns: u64) -> Instant {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    *ORIGIN.get_or_init(Instant::now) + Duration::from_nanos(ns)
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Call {
     Push {
         id: u64,
-        enqueued: u64,
-        first: u64,
+        enqueued: Instant,
+        first: Instant,
         polls: u32,
     },
     PollStart(u64, u32),
@@ -44,8 +53,8 @@ impl RunQueue<u64> for Recording {
     fn push(&mut self, item: u64, view: &TaskView<'_>) {
         self.log.push(Call::Push {
             id: view.task_id,
-            enqueued: view.enqueued_at_ns,
-            first: view.first_enqueued_at_ns,
+            enqueued: view.enqueued_at,
+            first: view.first_enqueued_at,
             polls: view.polls,
         });
         self.items.push_back(item);
@@ -108,7 +117,7 @@ impl<Q: RunQueue<u64>> Driver<Q> {
                 .entry(id)
                 .or_insert((Meta::new(prio), now, now, 0));
         *last = now;
-        let view = TaskView::new(id, meta, *last, *first, *polls);
+        let view = TaskView::new(id, meta, at(*last), at(*first), *polls);
         self.queue.push(id, &view);
     }
 
@@ -123,7 +132,7 @@ impl<Q: RunQueue<u64>> Driver<Q> {
         let facts = self.tasks.get_mut(&id).unwrap();
         facts.3 += 1;
         let (meta, first, last, polls) = *facts;
-        let view = TaskView::new(id, &meta, last, first, polls);
+        let view = TaskView::new(id, &meta, at(last), at(first), polls);
         self.queue.on_poll_start(&view);
         let ready = finishes(id);
         let outcome = if ready {
@@ -155,8 +164,8 @@ fn views_carry_enqueue_times_and_poll_counts_across_repushes() {
 
     let push = |id, enqueued, first, polls| Call::Push {
         id,
-        enqueued,
-        first,
+        enqueued: at(enqueued),
+        first: at(first),
         polls,
     };
     assert_eq!(
@@ -218,11 +227,11 @@ fn pop_order<Q: RunQueue<u64>>(call_callbacks: bool) -> Vec<u64> {
     let mut order = Vec::new();
     for (i, meta) in metas.iter().enumerate() {
         let id = i as u64 + 1;
-        q.push(id, &TaskView::new(id, meta, 0, 0, 0));
+        q.push(id, &TaskView::new(id, meta, at(0), at(0), 0));
     }
     while let Some(id) = q.pop() {
         if call_callbacks {
-            let view = TaskView::new(id, &metas[0], 5, 0, 1);
+            let view = TaskView::new(id, &metas[0], at(5), at(0), 1);
             q.on_poll_start(&view);
             q.on_poll_end(&view, PollOutcome::Pending);
             q.on_idle();
@@ -268,8 +277,8 @@ fn builtin_queues_ignore_callbacks() {
 struct AgingQueue {
     queued: Vec<(u64, u64)>,
     /// `task_id -> (base priority, first enqueue time)`.
-    state: HashMap<u64, (u64, u64)>,
-    now: u64,
+    state: HashMap<u64, (u64, Instant)>,
+    now: Option<Instant>,
 }
 
 impl AgingQueue {
@@ -277,7 +286,10 @@ impl AgingQueue {
 
     fn effective(&self, id: u64) -> u64 {
         let (base, first) = self.state[&id];
-        base.saturating_sub((self.now - first) / Self::STEP_NS)
+        let age = self
+            .now
+            .map_or(Duration::ZERO, |now| now.duration_since(first));
+        base.saturating_sub(age.as_nanos() as u64 / Self::STEP_NS)
     }
 }
 
@@ -289,10 +301,10 @@ impl RunQueue<u64> for AgingQueue {
     }
 
     fn push(&mut self, item: u64, view: &TaskView<'_>) {
-        self.now = self.now.max(view.enqueued_at_ns);
+        self.now = self.now.max(Some(view.enqueued_at));
         self.state
             .entry(view.task_id)
-            .or_insert((view.meta.value(), view.first_enqueued_at_ns));
+            .or_insert((view.meta.value(), view.first_enqueued_at));
         self.queued.push((view.task_id, item));
     }
 

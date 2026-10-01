@@ -96,7 +96,8 @@ mod tests {
 
     /// Pushes task `id` with priority value `prio`.
     fn push<const INFRA: bool>(queue: &mut Queue<INFRA>, id: u64, prio: u64) {
-        queue.push(id, &TaskView::new(id, &Meta::new(prio), 0, 0, 0));
+        let t0 = std::time::Instant::now();
+        queue.push(id, &TaskView::new(id, &Meta::new(prio), t0, t0, 0));
     }
 
     #[test]
