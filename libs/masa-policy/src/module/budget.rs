@@ -18,7 +18,7 @@ use masa_core::{Api, Context, Latency, PriorityHint, RequestId, Timestamp, BUDGE
 use tonic::{CowGrpcMethod, Response, Status};
 
 use super::{ChildState, Extensions, MissingDependency, Module, ModuleServer, Outcome, ServerInit};
-use crate::wire::{WireIn, WireOut};
+use crate::wire::{EncodedSection, WireIn, WireOut};
 
 // ── Root priority ───────────────────────────────────────────────────────
 
@@ -216,7 +216,7 @@ pub struct BudgetModule {
     /// The inbound section as the sender encoded it. The response carries the
     /// request's own facts unchanged, and so does a child whose budget no
     /// module changed, so both reuse it instead of encoding the context again.
-    encoded: String,
+    encoded: EncodedSection,
 }
 
 impl Module for BudgetModule {
@@ -231,14 +231,10 @@ impl Module for BudgetModule {
         wire: &WireIn<'_>,
         ext: &mut Extensions,
     ) -> Self {
-        let request = wire
-            .get::<Self>()
+        let (request, encoded) = wire
+            .get_with_encoded::<Self>()
             .unwrap_or_else(|err| panic!("{err}"))
             .unwrap_or_else(|| panic!("{}", masa_core::missing_budget_section_message()));
-        let encoded = wire
-            .get_encoded::<Self>()
-            .unwrap_or_else(|| panic!("{}", masa_core::missing_budget_section_message()))
-            .to_owned();
         let info = BudgetInfo::from(request);
         ext.insert(info.clone());
         Self { info, encoded }

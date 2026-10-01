@@ -274,15 +274,28 @@ responses and reports the sum) reads the child's section in `after_child_rpc`
 in `finalize`. The response is read-only there because
 `response_wire` borrows from it; the error status of a failed child carries
 wire sections the same way a successful response does.
-Each section travels in the `ctx` header as `<NAME>:<base64 JSON>`, joined by
+Each section travels in the `ctx` header as `<NAME>:<base64 bincode>`, joined by
 `.`; the header holds nothing else (`libs/rpcstack/src/wire.rs` documents
 the layout, and `libs/rpcstack-wire/src/lib.rs` holds the primitives Hyper also
 uses through `masa_core`). Sections are decoded independently, and `masa_policy::peek::<M>(&headers)`
-decodes one module's section without decoding any other. Sections that are
-built and parsed on every RPC, like estimation's, encode their fields as JSON
-arrays instead of objects (`#[serde(from = ..., into = ...)]` on a tuple
-struct), which made them about a third the size and the per-RPC hook cost
-equal to what it was with the data in `Context`. `NAME` must be
+decodes one module's section without decoding any other. A payload is the wire
+type serialized with `bincode` (little endian, variable-length integers: a
+`u64` below 251 is one byte, a larger one takes 3, 5 or 9), so a plain request
+header is `ctx: budget:<base64 of about 40 bytes>` and a section is built and
+parsed with no number or name parsing. `bincode` does not describe itself, so
+a wire type must serialize every field every time: express "may be absent" as
+an `Option` field, which is always written (an absent value is its tag byte,
+distinct from any value including zero), and use no `skip_serializing_if`,
+`default`, `flatten` or tagged enums. A type that is built and parsed on every
+RPC, like `Context` and estimation's, is a tuple struct
+(`#[serde(from = ..., into = ...)]`). The header is not readable by eye:
+`masa_policy::describe(header)` (or `Display` for `WireIn`) prints each
+section's bytes in hex, and `masa_policy::peek::<M>` or `get_wire` decode one
+as its type. A module that forwards a section it received without changing it
+keeps the `EncodedSection` from `WireIn::get_with_encoded` and gives it to
+`WireOut::put_encoded`, so the section is not encoded again (the budget module
+does this for the response and for a child whose budget it did not change).
+`NAME` must be
 unique among the modules of a stack (the empty module `()` is exempt), and a
 module with wire data must also use only ASCII letters, digits, `_` or `-`; a
 stack that violates this panics when the server is constructed, naming both

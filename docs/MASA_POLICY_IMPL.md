@@ -108,7 +108,7 @@ The `masa` crate defines the fundamental types shared across the system.
 
 `masa_policy::ContextBuilder` creates root `Context` instances. If no explicit `prio_hint` is provided, it uses `masa_policy::root_priority`, which defaults to `PriorityHint::new(deadline)` — using the per-hop deadline as the priority value. Under `sched_pred`, the default is converted to relative time-left (`deadline - time_now()`) so initial H2 stream priority uses the same scale as dynamic reprioritization; under `sched_tailclipper` it is the gateway entry time.
 
-Serialization: `to_header_string()` / `from_header_string()` produce and read a `ctx` header value holding the `budget` section (a base64 JSON array, see `libs/rpcstack-wire/src/lib.rs`).
+Serialization: `to_header_string()` / `from_header_string()` produce and read a `ctx` header value holding the `budget` section (the `Context` as a `bincode` tuple, base64-encoded; see `libs/rpcstack-wire/src/lib.rs`).
 
 ### `PriorityHint`
 

@@ -1,12 +1,11 @@
-// Timed comparison of reading a `ctx` header four ways. Ignored by default
+// Timed comparison of reading a `ctx` header three ways. Ignored by default
 // because timings are only meaningful in release mode:
 //
 //   cargo test --release -p masa-policy --test wire_bench -- --ignored --nocapture
 //
 // (a) decode the whole budget `Context`,
-// (a2) read only its priority, as hyper does per HTTP/2 stream: `old` is the
-//      general decoder skipping the first five elements (what hyper did
-//      before the scan), `new` is `read_priority_from_headers`,
+// (a2) read only its priority, as hyper does per HTTP/2 stream
+//      (`read_priority_from_headers`),
 // (b) split the wire envelope into sections without decoding any,
 // (c) `peek` one small module section.
 
@@ -16,29 +15,8 @@ use std::time::Instant;
 use masa_core::{time_now, PriorityHint};
 use masa_policy::ContextBuilder;
 use masa_policy::{peek, Extensions, MasaRequestExt, Module, WireIn, WireOut, MASA_CONTEXT_HEADER};
-use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use tonic::{CowGrpcMethod, Request};
-
-/// Hyper's per-stream priority read before the scan: find the section, then
-/// deserialize it, skipping the first five elements.
-#[derive(Deserialize)]
-struct SkipToPriority(
-    IgnoredAny,
-    IgnoredAny,
-    IgnoredAny,
-    IgnoredAny,
-    IgnoredAny,
-    u64,
-);
-
-fn old_read_priority(headers: &http::HeaderMap) -> u64 {
-    let ctx = headers.get(MASA_CONTEXT_HEADER).unwrap().to_str().unwrap();
-    let payload = rpcstack_wire::find_section(ctx, "budget").unwrap();
-    rpcstack_wire::decode_payload::<SkipToPriority>(payload)
-        .unwrap()
-        .5
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Small {
@@ -139,16 +117,10 @@ fn compare_context_decode_envelope_split_and_peek() {
     time("(a) full Context decode, header with 4 sections", n, || {
         black_box(masa_core::read_context_from_headers(black_box(&headers)));
     });
-    time("(a2) priority, old, budget section only", n, || {
-        black_box(old_read_priority(black_box(&plain)));
-    });
-    time("(a2) priority, new, budget section only", n, || {
+    time("(a2) priority, budget section only", n, || {
         black_box(masa_core::read_priority_from_headers(black_box(&plain)));
     });
-    time("(a2) priority, old, header with 4 sections", n, || {
-        black_box(old_read_priority(black_box(&headers)));
-    });
-    time("(a2) priority, new, header with 4 sections", n, || {
+    time("(a2) priority, header with 4 sections", n, || {
         black_box(masa_core::read_priority_from_headers(black_box(&headers)));
     });
     time("(b) envelope split (WireIn::from_headers)", n, || {

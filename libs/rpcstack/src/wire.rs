@@ -9,12 +9,12 @@
 //! # Layout
 //!
 //! ```text
-//! ctx: <name> : <base64 JSON> [ . <name> : <base64 JSON> ]*
+//! ctx: <name> : <base64 bincode> [ . <name> : <base64 bincode> ]*
 //! ```
 //!
-//! Each module with wire data is one section, for example
-//! `count:eyJuIjowfQ==` for `{"n":0}`. Neither `.` nor `:` is in
-//! the base64 alphabet, and module names may not contain them, so the value is
+//! Each module with wire data is one section, for example `count:AA==` for a
+//! module whose wire type is a `u64` holding 0. Neither `.` nor `:` is in the
+//! base64 alphabet, and module names may not contain them, so the value is
 //! split with plain string searches. The primitives live in [`rpcstack_wire`],
 //! which has no HTTP or gRPC dependencies, so a crate that cannot depend on
 //! this one can still read a single section.
@@ -22,10 +22,18 @@
 //! The layout was chosen so that each section is independently addressable:
 //! finding one section scans section names only and decodes nothing, and
 //! decoding section X never touches sections Y and Z. The alternative, one
-//! JSON object keyed by module name, would need a full JSON scan to find any
-//! key. The cost of this layout is that each payload is base64-encoded
+//! blob holding every module's data, would need a full decode to read any one
+//! module's. The cost of this layout is that each payload is base64-encoded
 //! separately (33% overhead on small payloads, versus one base64 pass over a
-//! combined object) and the header is not human-readable without decoding.
+//! combined blob).
+//!
+//! A payload is the module's wire type serialized with `bincode`, in which a
+//! small integer takes one byte: a few bytes where a self-describing format
+//! took tens, and no parsing of names or numbers on the way in. `bincode` does
+//! not describe itself, so a wire type serializes every field every time: use
+//! `Option` where absence must be told apart from a value, and no
+//! `skip_serializing_if` or `default`. The header is not readable by eye;
+//! [`describe`] (or `Display` for [`WireIn`]) prints its sections as hex.
 //!
 //! There is nothing besides sections: every message carries exactly the
 //! sections its sender's modules `put`.
@@ -38,13 +46,14 @@
 //! turn into a panic, as for a malformed header. Sections for modules not
 //! in the stack are ignored.
 
-use std::borrow::Cow;
 use std::fmt;
+use std::ops::Deref;
 
 use rpcstack_wire as codec;
-pub use rpcstack_wire::HEADER_NAME;
+pub use rpcstack_wire::{describe, HEADER_NAME};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use smallvec::SmallVec;
 use tonic::metadata::{Ascii, MetadataMap, MetadataValue};
 
 use crate::module::Module;
@@ -130,11 +139,17 @@ impl<'a> WireIn<'a> {
         self.decode_present(M::NAME)
     }
 
-    /// Module `M`'s section exactly as the sender encoded it, or `None` if the
-    /// sender attached none. Together with [`WireOut::put_encoded`] it
-    /// forwards a section without decoding and re-encoding it.
-    pub fn get_encoded<M: Module>(&self) -> Option<&'a str> {
-        codec::find_section(self.sections, M::NAME)
+    /// Module `M`'s wire data together with its section exactly as the sender
+    /// encoded it, found with one scan of the header.
+    pub fn get_with_encoded<M: Module>(
+        &self,
+    ) -> Result<Option<(M::Wire, EncodedSection)>, WireError> {
+        let Some(payload) = codec::find_section(self.sections, M::NAME) else {
+            return Ok(None);
+        };
+        let wire = codec::decode_payload(payload)
+            .map_err(|err| WireError::new(format_args!("{}: {err}", M::NAME)))?;
+        Ok(Some((wire, EncodedSection::new(payload))))
     }
 
     fn decode_present<W: DeserializeOwned>(&self, name: &str) -> Result<Option<W>, WireError> {
@@ -147,10 +162,50 @@ impl<'a> WireIn<'a> {
     }
 }
 
+impl fmt::Display for WireIn<'_> {
+    /// The sections as [`describe`] prints them.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&describe(self.sections))
+    }
+}
+
+/// One section's payload, owned, exactly as a sender encoded it. A module that
+/// sends a received section on unchanged keeps the one from
+/// [`WireIn::get_with_encoded`] and gives it to [`WireOut::put_encoded`], so
+/// the section is not encoded again. Short payloads are stored inline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedSection(SmallVec<[u8; 64]>);
+
+impl EncodedSection {
+    fn new(payload: &str) -> Self {
+        Self(SmallVec::from_slice(payload.as_bytes()))
+    }
+}
+
+impl Deref for EncodedSection {
+    type Target = [u8];
+
+    /// The payload's bytes, which are ASCII.
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 /// The outbound module wire sections of one message, encoded.
-#[derive(Debug, Clone, Default)]
+///
+/// The `ctx` header value is built in place, one `name:payload` after another,
+/// and a value of up to 128 bytes never touches the heap.
+#[derive(Clone, Default)]
 pub struct WireOut {
-    sections: Vec<(Cow<'static, str>, String)>,
+    header: SmallVec<[u8; 128]>,
+}
+
+impl fmt::Debug for WireOut {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("WireOut")
+            .field(&String::from_utf8_lossy(&self.header))
+            .finish()
+    }
 }
 
 impl WireOut {
@@ -164,9 +219,7 @@ impl WireOut {
     fn from_metadata(metadata: &MetadataMap) -> Result<Self, WireError> {
         let input = WireIn::from_metadata(metadata)?;
         Ok(Self {
-            sections: codec::sections(input.sections)
-                .map(|(name, payload)| (Cow::Owned(name.to_owned()), payload.to_owned()))
-                .collect(),
+            header: SmallVec::from_slice(input.sections.as_bytes()),
         })
     }
 
@@ -176,58 +229,67 @@ impl WireOut {
     }
 
     /// Set module `M`'s section to `payload`, an encoded payload obtained
-    /// from [`WireIn::get_encoded`] for a section of the same type. Nothing
-    /// is validated: a payload that is not `M::Wire` is a [`WireError`] for
-    /// whoever reads it.
-    pub fn put_encoded<M: Module>(&mut self, payload: &str) {
-        self.set(Cow::Borrowed(M::NAME), payload.to_owned());
+    /// from [`WireIn::get_with_encoded`] for a section of the same type.
+    /// Nothing is validated: a payload that is not `M::Wire` is a
+    /// [`WireError`] for whoever reads it.
+    pub fn put_encoded<M: Module>(&mut self, payload: &EncodedSection) {
+        self.set(M::NAME, payload);
     }
 
     fn put_named<W: Serialize>(&mut self, name: &'static str, wire: &W) -> Result<(), WireError> {
-        let payload = codec::encode_payload(wire)
-            .map_err(|err| WireError::new(format_args!("{name}: {err}")))?;
-        self.set(Cow::Borrowed(name), payload);
-        Ok(())
+        codec::encode_payload_with(wire, |payload| self.set(name, payload))
+            .map_err(|err| WireError::new(format_args!("{name}: {err}")))
     }
 
-    #[inline]
-    fn set(&mut self, name: Cow<'static, str>, payload: String) {
-        match self
-            .sections
-            .iter_mut()
-            .find(|(existing, _)| *existing == name)
-        {
-            Some(section) => section.1 = payload,
-            None => self.sections.push((name, payload)),
+    /// The byte range of the section called `name`, name and payload.
+    fn find(&self, name: &str) -> Option<std::ops::Range<usize>> {
+        let mut start = 0;
+        for section in self.header.split(|&byte| byte == b'.') {
+            let end = start + section.len();
+            if section.split(|&byte| byte == b':').next() == Some(name.as_bytes()) {
+                return Some(start..end);
+            }
+            start = end + 1;
         }
+        None
+    }
+
+    /// Write `name:payload`: in place of the section of that name if there is
+    /// one, else after the last section.
+    fn set(&mut self, name: &str, payload: &[u8]) {
+        if let Some(range) = self.find(name) {
+            let mut section: SmallVec<[u8; 128]> = SmallVec::new();
+            section.extend_from_slice(name.as_bytes());
+            section.push(b':');
+            section.extend_from_slice(payload);
+            let at = range.start;
+            self.header.drain(range);
+            self.header.insert_many(at, section);
+            return;
+        }
+        self.header.reserve(name.len() + payload.len() + 2);
+        if !self.header.is_empty() {
+            self.header.push(codec::SECTION_SEPARATOR as u8);
+        }
+        self.header.extend_from_slice(name.as_bytes());
+        self.header.push(codec::NAME_SEPARATOR as u8);
+        self.header.extend_from_slice(payload);
     }
 
     /// The `ctx` header value these sections make.
-    #[inline]
     pub fn header_value(&self) -> String {
-        let len = self
-            .sections
-            .iter()
-            .map(|(name, payload)| name.len() + payload.len() + 2)
-            .sum();
-        let mut value = String::with_capacity(len);
-        for (name, payload) in &self.sections {
-            codec::push_section(&mut value, name, payload);
-        }
-        value
+        String::from_utf8(self.header.to_vec()).expect("base64, `.`, `:` and names are ASCII")
     }
 
     /// Make these sections the `ctx` header of `metadata`, replacing whatever
     /// it carried; with no sections the header is removed.
     #[inline]
     pub fn install(&self, metadata: &mut MetadataMap) {
-        if self.sections.is_empty() {
+        if self.header.is_empty() {
             metadata.remove(HEADER_NAME);
             return;
         }
-        let value: MetadataValue<Ascii> = self
-            .header_value()
-            .parse()
+        let value = MetadataValue::<Ascii>::try_from(&self.header[..])
             .expect("base64, `.`, `:` and names are ASCII");
         metadata.insert(HEADER_NAME, value);
     }
@@ -304,6 +366,37 @@ mod tests {
     }
 
     #[test]
+    fn replacing_a_section_keeps_its_place_and_its_neighbours() {
+        let mut out = WireOut::new();
+        // A name that starts another's must not be mistaken for it.
+        for name in ["ab", "a", "abc"] {
+            out.put_named(name, &1u8).unwrap();
+        }
+        let before = out.header_value();
+        out.put_named("a", &(1u64 << 40)).unwrap();
+        let after = out.header_value();
+        assert_ne!(before, after);
+        assert!(after.starts_with("ab:AQ==.a:"), "{after}");
+        assert!(after.ends_with(".abc:AQ=="), "{after}");
+        assert_eq!(after.matches('.').count(), 2);
+    }
+
+    #[test]
+    fn long_values_spill_past_the_inline_buffer() {
+        let mut out = WireOut::new();
+        out.put_named("big", &vec![7u8; 400]).unwrap();
+        out.put_named("small", &1u8).unwrap();
+        let value = out.header_value();
+        let input = WireIn { sections: &value };
+        assert_eq!(
+            input.decode_present::<Vec<u8>>("big").unwrap(),
+            Some(vec![7u8; 400])
+        );
+        assert_eq!(input.decode_present::<u8>("small").unwrap(), Some(1));
+        assert_eq!(input.to_string().lines().count(), 2, "one line per section");
+    }
+
+    #[test]
     fn install_replaces_the_previous_header() {
         let mut metadata = MetadataMap::new();
         metadata.insert(HEADER_NAME, "old:NQ==".parse().unwrap());
@@ -323,7 +416,7 @@ mod tests {
 
     #[test]
     fn selective_decode_ignores_other_sections() {
-        let headers = map_with(&[("good", "NDI="), ("bad", "!!not base64!!")]);
+        let headers = map_with(&[("good", "Kg=="), ("bad", "!!not base64!!")]);
         let input = WireIn::from_headers(&headers).unwrap();
         assert_eq!(input.decode_present::<u32>("good").unwrap(), Some(42));
         assert!(input.decode_present::<u32>("bad").is_err());

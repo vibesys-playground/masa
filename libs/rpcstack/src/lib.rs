@@ -26,4 +26,4 @@ pub use module::{
     build_server, ChildOutcome, Early, MissingDependency, Module, ModuleDecl, ModuleServer,
     ModuleStack, Outcome, Rejection, Requires, ServerInit, Stack,
 };
-pub use wire::{peek, WireError, WireIn, WireOut, HEADER_NAME};
+pub use wire::{describe, peek, EncodedSection, WireError, WireIn, WireOut, HEADER_NAME};
