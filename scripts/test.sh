@@ -6,6 +6,7 @@ PYTHON_BIN="${PYTHON:-python3}"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/validate_policy_matrix.py"
 "$PYTHON_BIN" "$REPO_ROOT/scripts/validate_tonic_masa_boundary.py"
+"$PYTHON_BIN" "$REPO_ROOT/scripts/validate_rpcstack_boundary.py"
 
 # Parse arguments
 PARALLEL_JOBS=1
@@ -198,6 +199,9 @@ fi
 # because not all tests build right now, we only test the modules we know to build successfully.
 
 packages=(
+    "rpcstack-wire"
+    "rpcstack"
+    "rpcstack-tonic"
     "masa-core"
     "masa-integration-tests"
     "tonic"
