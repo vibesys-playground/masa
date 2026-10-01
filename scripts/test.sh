@@ -243,6 +243,7 @@ if [ -z "$SEMANTICS_FEATURE" ] && { [ "$IS_MATRIX" = false ] || [ -z "$FEATURE_F
 
     execute_test "tokio (masa priority suite)" cargo test -p tokio --features full --test masa_priority
     execute_test "tokio (masa priority suite, sched_custom)" cargo test -p tokio --features full,sched_custom --test masa_priority
+    execute_test "tokio (run-queue lifecycle callbacks)" cargo test -p tokio --features full,sched_custom,lifecycle_trace --test masa_lifecycle
 
     # Queue replay tests, once per queue-selecting feature.
     for sched_feat in "" sched_prio tailclipper sched_custom; do

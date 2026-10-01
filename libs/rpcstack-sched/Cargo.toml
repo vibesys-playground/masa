@@ -17,3 +17,6 @@ tailclipper = ["sched_prio"]
 # Select `custom::Queue`, the slot for a new queue. Takes precedence over the
 # other selecting features.
 sched_custom = []
+# Record the calls `custom::Queue` receives in `trace`. For tests of the
+# runtime only; has no effect on any queue's behavior.
+lifecycle_trace = []

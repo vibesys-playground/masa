@@ -190,10 +190,13 @@ pub(crate) struct Header {
     pub(super) tracing_id: Option<tracing::Id>,
 }
 
+/// Per-task timing facts the scheduler records for run queues.
 #[derive(Clone)]
 pub(crate) struct TraceTimer {
     q_lat: Duration,
     last_enqueue: Option<Instant>,
+    first_enqueue: Option<Instant>,
+    polls: u32,
 }
 
 impl TraceTimer {
@@ -201,11 +204,17 @@ impl TraceTimer {
         TraceTimer {
             q_lat: Duration::ZERO,
             last_enqueue: None,
+            first_enqueue: None,
+            polls: 0,
         }
     }
 
     pub(crate) fn set_enqueue_time(&mut self) {
-        self.last_enqueue = Some(Instant::now());
+        let now = Instant::now();
+        self.last_enqueue = Some(now);
+        if self.first_enqueue.is_none() {
+            self.first_enqueue = Some(now);
+        }
         self.q_lat = Duration::ZERO;
     }
 
@@ -213,8 +222,27 @@ impl TraceTimer {
         self.q_lat = Instant::now().duration_since(self.last_enqueue.unwrap());
     }
 
+    /// Count a poll that is about to start.
+    pub(crate) fn begin_poll(&mut self) {
+        self.polls = self.polls.wrapping_add(1);
+    }
+
     pub(crate) fn q_lat(&self) -> Duration {
         self.q_lat
+    }
+
+    /// When the task was last enqueued. A task is always enqueued before a
+    /// run queue sees it; the fallback only keeps this total.
+    pub(crate) fn last_enqueue(&self) -> Instant {
+        self.last_enqueue.unwrap_or_else(Instant::now)
+    }
+
+    pub(crate) fn first_enqueue(&self) -> Instant {
+        self.first_enqueue.unwrap_or_else(Instant::now)
+    }
+
+    pub(crate) fn polls(&self) -> u32 {
+        self.polls
     }
 }
 

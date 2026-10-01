@@ -21,7 +21,7 @@ use std::task::Waker;
 use std::time::Duration;
 
 mod queue;
-use rpcstack_sched::{RunQueue, TaskView};
+use rpcstack_sched::{PollOutcome, RunQueue, TaskView};
 
 pub use queue::get_sched_flavor;
 pub use queue::SchedFlavor;
@@ -75,6 +75,11 @@ struct Core {
     /// True if a task panicked without being handled and the runtime is
     /// configured to shutdown on unhandled panic.
     unhandled_panic: bool,
+
+    /// Ids of tasks that finished since the run queue was last told. The run
+    /// loop drains it after each poll, so the run queue hears about a task's
+    /// exit after the `on_poll_end` of the poll it ended in.
+    exited: Vec<u64>,
 }
 
 /// Scheduler state shared between threads.
@@ -165,6 +170,7 @@ impl CurrentThread {
             metrics: MetricsBatch::new(&handle.shared.worker_metrics),
             global_queue_interval,
             unhandled_panic: false,
+            exited: Vec::new(),
         })));
 
         let scheduler = CurrentThread {
@@ -242,8 +248,8 @@ impl CurrentThread {
         let tls_available = context::with_current(|_| ()).is_ok();
 
         if tls_available {
-            core.enter(|core, _context| {
-                let core = shutdown2(core, handle);
+            core.enter(|core, context| {
+                let core = shutdown2(core, handle, context);
                 (core, ())
             });
         } else {
@@ -253,17 +259,19 @@ impl CurrentThread {
             let context = core.context.expect_current_thread();
             let core = context.core.borrow_mut().take().unwrap();
 
-            let core = shutdown2(core, handle);
+            let core = shutdown2(core, handle, context);
             *context.core.borrow_mut() = Some(core);
         }
     }
 }
 
-fn shutdown2(mut core: Box<Core>, handle: &Handle) -> Box<Core> {
+fn shutdown2(core: Box<Core>, handle: &Handle, context: &Context) -> Box<Core> {
     // Drain the OwnedTasks collection. This call also closes the
     // collection, ensuring that no tasks are ever pushed after this
-    // call returns.
-    handle.shared.owned.close_and_shutdown_all(0);
+    // call returns. The core goes into the context meanwhile so that
+    // `Handle::release` can record the tasks that exit.
+    let (mut core, ()) = context.enter(core, || handle.shared.owned.close_and_shutdown_all(0));
+    core.flush_exits();
 
     // Drain local queue
     // We already shut down every task, so we just need to drop the task.
@@ -332,7 +340,7 @@ impl Core {
     fn push_task(&mut self, handle: &Handle, task: Notified) {
         task.timer().set_enqueue_time();
         let meta = task.priority();
-        let view = TaskView::new(task.id().as_u64(), &meta);
+        let view = task_view(&task, &meta);
         self.tasks.push(task, &view);
         self.metrics.inc_local_schedule_count();
         handle
@@ -344,6 +352,48 @@ impl Core {
     fn submit_metrics(&mut self, handle: &Handle) {
         self.metrics.submit(&handle.shared.worker_metrics, 0);
     }
+
+    /// Tell the run queue that the poll described by `view` ended, then that
+    /// every task that finished meanwhile is gone.
+    ///
+    /// The run queue is borrowed here, not while the task runs: during a poll
+    /// the `Core` sits in the thread-local context, out of the run loop's
+    /// hands, so the loop reports around the poll instead of from inside it.
+    /// A task finished during the poll if it was released from the scheduler
+    /// meanwhile, which is how `Handle::release` fills `exited`.
+    #[inline(always)]
+    fn end_poll(&mut self, view: &TaskView<'_>) {
+        let outcome = if self.exited.contains(&view.task_id) {
+            PollOutcome::Ready
+        } else {
+            PollOutcome::Pending
+        };
+        self.tasks.on_poll_end(view, outcome);
+        self.flush_exits();
+    }
+
+    /// Tell the run queue about tasks that finished since the last call.
+    fn flush_exits(&mut self) {
+        for i in 0..self.exited.len() {
+            let task_id = self.exited[i];
+            self.tasks.on_task_exit(task_id);
+        }
+        self.exited.clear();
+    }
+}
+
+/// The view of `task` that the run queue gets. `meta` must be the task's
+/// metadata, owned by the caller so the view can borrow it.
+#[inline(always)]
+fn task_view<'a>(task: &Notified, meta: &'a Meta) -> TaskView<'a> {
+    let timer = task.timer();
+    TaskView::new(
+        task.id().as_u64(),
+        meta,
+        timer.last_enqueue(),
+        timer.first_enqueue(),
+        timer.polls(),
+    )
 }
 
 #[cfg(tokio_taskdump)]
@@ -581,6 +631,20 @@ impl fmt::Debug for Handle {
 
 impl Schedule for Arc<Handle> {
     fn release(&self, task: &Task<Self>) -> Option<Task<Self>> {
+        use scheduler::Context::CurrentThread;
+
+        // The core is in the context while a task is polled and while the
+        // runtime shuts down. Outside those (no TLS, or a foreign thread) the
+        // exit cannot be reported.
+        context::with_scheduler(|maybe_cx| {
+            if let Some(CurrentThread(cx)) = maybe_cx {
+                if Arc::ptr_eq(self, &cx.handle) {
+                    if let Some(core) = cx.core.borrow_mut().as_mut() {
+                        core.exited.push(task.id().as_u64());
+                    }
+                }
+            }
+        });
         self.shared.owned.remove(task)
     }
 
@@ -600,6 +664,7 @@ impl Schedule for Arc<Handle> {
             _ => {
                 // Track that a task was scheduled from **outside** of the runtime.
                 self.shared.scheduler_metrics.inc_remote_schedule_count();
+                task.timer().set_enqueue_time();
 
                 // Schedule the task
                 self.shared.inject.push(task);
@@ -704,6 +769,8 @@ impl CoreGuard<'_> {
                             core.metrics.end_processing_scheduled_tasks();
                             crate::task::utilization::set_utilization(core.metrics.utilization());
 
+                            core.tasks.on_idle();
+
                             core = if !context.defer.is_empty() {
                                 context.park_yield(core, handle)
                             } else {
@@ -717,6 +784,11 @@ impl CoreGuard<'_> {
                         }
                     };
 
+                    task.timer().begin_poll();
+                    let meta = task.priority();
+                    let view = task_view(&task, &meta);
+                    core.tasks.on_poll_start(&view);
+
                     let task = context.handle.shared.owned.assert_owner(task);
 
                     let (c, ()) = context.run_task(core, || {
@@ -724,6 +796,7 @@ impl CoreGuard<'_> {
                     });
 
                     core = c;
+                    core.end_poll(&view);
                 }
 
                 core.metrics.end_processing_scheduled_tasks();

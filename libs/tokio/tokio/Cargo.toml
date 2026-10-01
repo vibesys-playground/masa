@@ -33,6 +33,7 @@ sched_mt = ["sched_prio"]
 sched_mt_multiqueue = ["sched_mt", "dep:multiqueue-prio-queue"]
 sched_fifo = []
 sched_custom = ["rpcstack-sched/sched_custom"]
+lifecycle_trace = ["rpcstack-sched/lifecycle_trace"]
 # enable everything
 full = [
   "fs",
