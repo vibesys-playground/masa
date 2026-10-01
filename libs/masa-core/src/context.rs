@@ -229,10 +229,14 @@ impl Context {
 
     /// A `ctx` header value carrying this context as its budget section.
     pub fn to_header_string(&self) -> String {
-        let payload = wire::encode_payload(self).expect("a context always encodes");
-        let mut header = String::new();
-        wire::push_section(&mut header, BUDGET_SECTION, &payload);
-        header
+        wire::encode_payload_with(self, |payload| {
+            let mut header = Vec::with_capacity(BUDGET_SECTION.len() + 1 + payload.len());
+            header.extend_from_slice(BUDGET_SECTION.as_bytes());
+            header.push(wire::NAME_SEPARATOR as u8);
+            header.extend_from_slice(payload);
+            String::from_utf8(header).expect("a section name and base64 are ASCII")
+        })
+        .expect("a context always encodes")
     }
 }
 

@@ -48,15 +48,22 @@
 
 use std::fmt;
 use std::ops::Deref;
+use std::sync::LazyLock;
 
 use rpcstack_wire as codec;
 pub use rpcstack_wire::{describe, HEADER_NAME};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use smallvec::SmallVec;
-use tonic::metadata::{Ascii, MetadataMap, MetadataValue};
+use tonic::metadata::{Ascii, MetadataKey, MetadataMap, MetadataValue};
 
 use crate::module::Module;
+
+/// The header's name, parsed once: looking a header up by a `&str` parses and
+/// validates the name every time.
+const HEADER_KEY: http::HeaderName = http::HeaderName::from_static(HEADER_NAME);
+static METADATA_KEY: LazyLock<MetadataKey<Ascii>> =
+    LazyLock::new(|| MetadataKey::from_static(HEADER_NAME));
 
 /// A wire section could not be read or written.
 #[derive(Debug)]
@@ -108,7 +115,7 @@ impl<'a> WireIn<'a> {
     /// missing header yields no sections.
     #[inline]
     pub fn from_headers(headers: &'a http::HeaderMap) -> Result<Self, WireError> {
-        match headers.get(HEADER_NAME) {
+        match headers.get(&HEADER_KEY) {
             None => Ok(Self::default()),
             Some(value) => Self::from_header_bytes(value.as_bytes()),
         }
@@ -118,7 +125,7 @@ impl<'a> WireIn<'a> {
     /// missing header yields no sections.
     #[inline]
     pub fn from_metadata(metadata: &'a MetadataMap) -> Result<Self, WireError> {
-        match metadata.get(HEADER_NAME) {
+        match metadata.get(&*METADATA_KEY) {
             None => Ok(Self::default()),
             Some(value) => Self::from_header_bytes(value.as_encoded_bytes()),
         }
@@ -286,12 +293,12 @@ impl WireOut {
     #[inline]
     pub fn install(&self, metadata: &mut MetadataMap) {
         if self.header.is_empty() {
-            metadata.remove(HEADER_NAME);
+            metadata.remove(&*METADATA_KEY);
             return;
         }
         let value = MetadataValue::<Ascii>::try_from(&self.header[..])
             .expect("base64, `.`, `:` and names are ASCII");
-        metadata.insert(HEADER_NAME, value);
+        metadata.insert(&*METADATA_KEY, value);
     }
 }
 

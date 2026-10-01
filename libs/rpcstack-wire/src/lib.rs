@@ -60,9 +60,28 @@ pub fn sections(header: &str) -> impl Iterator<Item = (&str, &str)> {
 }
 
 /// The undecoded payload of the section called `name`.
+///
+/// Compares each section's start with `name` and skips the payloads without
+/// looking into them, so the header is scanned once, for separators only.
 #[inline]
 pub fn find_section<'a>(header: &'a str, name: &str) -> Option<&'a str> {
-    sections(header).find_map(|(section, payload)| (section == name).then_some(payload))
+    let mut rest = header;
+    loop {
+        let end = rest
+            .bytes()
+            .position(|byte| byte == SECTION_SEPARATOR as u8)
+            .unwrap_or(rest.len());
+        if let Some(after_name) = rest[..end].strip_prefix(name) {
+            if let Some(payload) = after_name.strip_prefix(NAME_SEPARATOR) {
+                return Some(payload);
+            }
+            // A section without a payload.
+            if after_name.is_empty() && !name.is_empty() {
+                return Some("");
+            }
+        }
+        rest = rest.get(end + 1..)?;
+    }
 }
 
 /// Decode a section payload into `W`. The error says which step failed.
@@ -247,6 +266,30 @@ mod tests {
             Ok("x".to_owned())
         );
         assert_eq!(find_section(&header, "c"), None);
+    }
+
+    /// `find_section` against what splitting the header into sections finds,
+    /// on headers made of names, empty sections and stray separators.
+    #[test]
+    fn find_section_agrees_with_splitting_the_header() {
+        const PIECES: [&str; 7] = ["a", "ab", "b", ".", ":", "x", ""];
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..50_000 {
+            let header: String = (0..next() % 10)
+                .map(|_| PIECES[(next() % 7) as usize])
+                .collect();
+            for name in ["a", "ab", "b", "x", "abx"] {
+                let split = sections(&header)
+                    .find_map(|(section, payload)| (section == name).then_some(payload));
+                assert_eq!(find_section(&header, name), split, "{header:?} {name:?}");
+            }
+        }
     }
 
     #[test]

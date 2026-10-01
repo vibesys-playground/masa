@@ -1,9 +1,13 @@
 use crate::context::{peek_priority, BUDGET_SECTION};
 use crate::{wire, Context, PriorityHint, MASA_CONTEXT_HEADER};
 
+/// The header's name, parsed once: looking a header up by a `&str` parses and
+/// validates the name every time.
+const CONTEXT_HEADER: http::HeaderName = http::HeaderName::from_static(MASA_CONTEXT_HEADER);
+
 fn header_value(headers: &http::HeaderMap) -> &str {
     let ctx = headers
-        .get(MASA_CONTEXT_HEADER)
+        .get(&CONTEXT_HEADER)
         .unwrap_or_else(|| panic!("{}", crate::MISSING_CONTEXT_HEADER_MESSAGE));
     // `HeaderValue::to_str` checks each byte for visible ASCII, which costs more
     // than everything else this does with the header. A header value holds no

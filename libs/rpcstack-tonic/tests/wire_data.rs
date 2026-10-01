@@ -264,10 +264,7 @@ fn peek_decodes_one_section_without_the_context() {
 
     // A corrupt section of another module is irrelevant to `peek`.
     let mut corrupt = http::HeaderMap::new();
-    corrupt.insert(
-        HEADER_NAME,
-        "!!.alpha:eyJuIjo0fQ==.beta:!!".parse().unwrap(),
-    );
+    corrupt.insert(HEADER_NAME, "!!.alpha:BA==.beta:!!".parse().unwrap());
     assert_eq!(peek::<Alpha>(&corrupt).unwrap(), Some(AlphaWire { n: 4 }));
     assert!(peek::<Beta>(&corrupt).is_err());
 }
