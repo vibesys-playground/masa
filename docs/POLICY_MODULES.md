@@ -354,11 +354,11 @@ To try a queue:
 ### What a queue is told
 
 The runtime gives a queue facts and events and attaches no meaning to them.
-`TaskView` carries `task_id`, `meta`, `enqueued_at_ns` (when this enqueue
-happened), `first_enqueued_at_ns` (when the task first entered any queue) and
-`polls` (polls started so far). Times are nanoseconds on one process-wide
-clock with an arbitrary zero, so only differences matter and tests can pass any
-values. A re-pushed task keeps its id, first enqueue time and poll count.
+`TaskView` carries `task_id`, `meta`, `enqueued_at` (when this enqueue
+happened, an `Instant`), `first_enqueued_at` (when the task first entered any
+queue) and `polls` (polls started so far). The runtime supplies the times, so a
+queue needs no clock and tests can pass any values. A re-pushed task keeps its
+id, first enqueue time and poll count.
 
 Besides `push` and `pop`, `RunQueue` has callbacks that default to doing
 nothing and that the current-thread run loop calls:
