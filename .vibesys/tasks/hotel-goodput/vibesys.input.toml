@@ -1,0 +1,27 @@
+version = 1
+
+[agent]
+domain = "microservices"
+
+# Both gates run Masa's experiment runner through the task-owned shim
+# benchmark/masa_hotel.py; see README.md. The shim needs Docker, a Rust
+# toolchain (rustup honors rust-toolchain.toml), protoc and uv on the host.
+
+# Scope check, `cargo check` and the slot tests with the task features, then a
+# light-load Hotel run in which every request must succeed within its SLO.
+[accuracy]
+command = [
+  "python3", "${PROJECT_ROOT}/.vibesys/tasks/hotel-goodput/benchmark/masa_hotel.py",
+  "accuracy", "--project-root", "${PROJECT_ROOT}",
+]
+timeout_seconds = 3600
+
+# Poisson load sweep past saturation; goodput is reported through the evaluator
+# result protocol (VibeSys appends `--vs-output <path>`).
+[benchmark]
+command = [
+  "python3", "${PROJECT_ROOT}/.vibesys/tasks/hotel-goodput/benchmark/masa_hotel.py",
+  "benchmark", "--project-root", "${PROJECT_ROOT}",
+]
+timeout_seconds = 3600
+result_protocol = 2

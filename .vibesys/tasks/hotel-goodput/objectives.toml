@@ -1,0 +1,9 @@
+# Each name must match a required metric that benchmark/masa_hotel.py declares
+# in its result protocol `hello` record (METRICS).
+
+# Goodput: requests per second that succeed within their end-to-end SLO,
+# averaged over the load points of the benchmark sweep (most of them past
+# saturation).
+[[objective]]
+name = "mean_goodput_rps"
+direction = "max"

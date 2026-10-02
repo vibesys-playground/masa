@@ -1,0 +1,11 @@
+{
+  "Repeats": 1,
+  "Apis": ["Search", "Reservation"],
+  "Slos": [200000, 100000],
+  "Rps": [600, 1200, 1600, 2000, 2400],
+  "Gap": "exp",
+  "WarmupSecs": 10,
+  "DurationSecs": 20,
+  "Addr": "http://hotel_frontend:8660",
+  "Timeouts_ms": [5000, 5000]
+}
