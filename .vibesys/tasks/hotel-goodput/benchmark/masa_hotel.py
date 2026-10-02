@@ -23,6 +23,7 @@ import argparse
 import contextlib
 import csv
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -42,9 +43,15 @@ EXPERIMENTS_DIR = TASK_DIR / "benchmark" / "experiments"
 #: policy stack and the run queue through the two agent-owned slots.
 FEATURES = "sched_slo,stack_custom,sched_custom"
 
-#: The Masa commit the task was authored against. The scope check compares the
-#: candidate with it.
+#: The Masa commit the task was authored against. VibeSys materializes a run
+#: as a fresh repository without upstream history, so the scope check compares
+#: the candidate with ``PROTECTED_MANIFEST``, generated from this commit by
+#: ``masa_hotel.py manifest``.
 BASELINE_COMMIT = "f88d533c3b1242181814ac68b5a4736d1c552901"
+
+#: ``<git blob id> <path>`` for every protected file at ``BASELINE_COMMIT``, and
+#: ``submodule <path>`` for every submodule, whose contents are not checked.
+PROTECTED_MANIFEST = TASK_DIR / "benchmark" / "protected_files.txt"
 
 #: Files a candidate may change. Everything else that exists at the baseline
 #: commit is evaluator, framework or application code and must stay unchanged.
@@ -57,6 +64,10 @@ ALLOWED_FILES = (
 #: Integration tests that pin the slot wiring: `DefaultHooks` is the agent
 #: stack, responses carry a context, and the runtime uses the custom queue.
 SLOT_TESTS = ("custom_stack_serve", "custom_sched_serve")
+
+#: Coding-agent configuration directories. VibeSys installs its own skills
+#: there for a run, and nothing in them reaches a build or an evaluation.
+AGENT_CONFIG_DIRS = (".agents/", ".claude/", ".codex/", ".cursor/", ".gemini/", ".opencode/")
 
 #: Serializes runs: exp_runner uses fixed container names and image tags, so
 #: two candidates must not deploy Hotel at the same time on one Docker host.
@@ -169,27 +180,61 @@ def allowed(path: str) -> bool:
     return path.startswith(ALLOWED_PREFIXES) or path in ALLOWED_FILES
 
 
+def blob_id(path: Path) -> str:
+    """Git's object id for a file or symlink, computed without a repository."""
+    data = os.readlink(path).encode() if path.is_symlink() else path.read_bytes()
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def write_manifest(root: Path) -> None:
+    """Record the protected files of ``BASELINE_COMMIT`` in ``PROTECTED_MANIFEST``."""
+    lines = []
+    for entry in git(root, "ls-tree", "-r", "-z", BASELINE_COMMIT).split("\0"):
+        if not entry:
+            continue
+        meta, path = entry.split("\t", 1)
+        _mode, kind, object_id = meta.split()
+        if path.startswith((".vibesys/", *AGENT_CONFIG_DIRS)) or allowed(path):
+            continue
+        lines.append(f"submodule {path}" if kind == "commit" else f"{object_id} {path}")
+    PROTECTED_MANIFEST.write_text("\n".join(sorted(lines)) + "\n")
+
+
 def check_scope(root: Path) -> None:
     """Fail when the candidate changed a file outside the agent-owned slots.
 
-    Only paths under top-level entries that exist at the baseline commit are
-    checked, so files VibeSys itself adds at the repository root are ignored.
+    Every protected baseline file must be unchanged, and no new non-ignored file
+    may appear beside them. Only top-level entries that exist at the baseline
+    are checked, so files VibeSys itself adds at the repository root are fine.
     """
-    try:
-        git(root, "cat-file", "-e", f"{BASELINE_COMMIT}^{{commit}}")
-    except subprocess.CalledProcessError as error:
-        raise EvaluationError(
-            f"baseline commit {BASELINE_COMMIT} is not in this repository's history"
-        ) from error
-    top_level = set(git(root, "ls-tree", "--name-only", BASELINE_COMMIT).split())
-    top_level.discard(".vibesys")
-    changed = set(git(root, "diff", "--name-only", BASELINE_COMMIT).split())
-    changed |= set(git(root, "ls-files", "--others", "--exclude-standard").split())
-    violations = sorted(
-        path for path in changed if path.split("/", 1)[0] in top_level and not allowed(path)
-    )
+    expected: dict[str, str] = {}
+    submodules: list[str] = []
+    for line in PROTECTED_MANIFEST.read_text().splitlines():
+        object_id, path = line.split(" ", 1)
+        if object_id == "submodule":
+            submodules.append(path)
+        else:
+            expected[path] = object_id
+    violations = []
+    for path, object_id in expected.items():
+        candidate = root / path
+        if not (candidate.is_file() or candidate.is_symlink()):
+            violations.append(f"{path} (deleted)")
+        elif blob_id(candidate) != object_id:
+            violations.append(f"{path} (modified)")
+    top_level = {path.split("/", 1)[0] for path in expected}
+    present = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+    for path in present.split("\0"):
+        if (
+            path
+            and path.split("/", 1)[0] in top_level
+            and path not in expected
+            and not allowed(path)
+            and not any(path == sub or path.startswith(sub + "/") for sub in submodules)
+        ):
+            violations.append(f"{path} (added)")
     if violations:
-        listed = "\n".join(f"  {path}" for path in violations)
+        listed = "\n".join(f"  {path}" for path in sorted(violations)[:50])
         raise EvaluationError(
             "changes outside the agent-owned slots (libs/masa-policy/src/agent/, "
             "libs/rpcstack-sched/src/custom.rs, libs/rpcstack-sched/src/replay_tests.rs):\n"
@@ -355,11 +400,14 @@ def benchmark(root: Path, report: ProtocolReport) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("mode", choices=("accuracy", "benchmark"))
+    parser.add_argument("mode", choices=("accuracy", "benchmark", "manifest"))
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
     parser.add_argument(OUTPUT_FLAG, dest="vs_output", type=Path, default=None)
     args = parser.parse_args()
     root = args.project_root.resolve()
+    if args.mode == "manifest":
+        write_manifest(root)
+        return 0
     if args.mode == "accuracy":
         try:
             accuracy(root)
