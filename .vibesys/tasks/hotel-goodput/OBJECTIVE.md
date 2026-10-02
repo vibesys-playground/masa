@@ -59,13 +59,34 @@ fine).
 - Hard-coding knowledge of Hotel's services and methods (by service or method
   name) is allowed when it measurably helps.
 
+## Baseline
+
+Measured on this host with the unmodified slots (`mean_goodput_rps` 480):
+
+| Offered rps | 600 | 1200 | 1600 | 2000 | 2400 |
+| --- | --- | --- | --- | --- | --- |
+| Goodput (req/s) | 590 | 1206 | 161 | 203 | 242 |
+| Fraction of offered | 1.00 | 1.00 | 0.10 | 0.10 | 0.10 |
+
+Past saturation (about 1200-1600 rps) every Search request times out and only
+about 20% of Reservations succeed. For reference, Masa's own full policy
+(`sched_pred,ac_pred,abort_slack,est_mean_var`, not available under the task
+features) reaches about 1000 on the same sweep. Do not spend time re-measuring
+the baseline.
+
 ## Measuring
 
 - The framework runs both gates itself; see `.vibesys/tasks/hotel-goodput/README.md`.
 - Check a change quickly with
   `RUSTFLAGS="-D warnings" cargo check --features sched_slo,stack_custom,sched_custom`
-  and `cargo test -p rpcstack-sched --features sched_custom`.
-- A full benchmark takes several minutes and needs the Docker host to itself.
-  To measure locally, run
+  and `cargo test -p rpcstack-sched --features sched_custom`. If `protoc` is not
+  on `PATH`, set `PROTOC` to the vendored binary under
+  `~/.cargo/registry/src/*/protoc-bin-vendored-linux-x86_64-*/bin/protoc`.
+- To measure a candidate, run
   `python3 .vibesys/tasks/hotel-goodput/benchmark/masa_hotel.py benchmark`
-  from the repository root. It prints goodput per load point.
+  from the repository root. It takes about 4 minutes and prints goodput per
+  load point. **Run it in the foreground** (a 10-minute command timeout is
+  enough). Background commands are killed when your turn ends, so a benchmark
+  started in the background never reports.
+- `.git` is read-only to you; use `git show <commit>:<path>` to recover a file
+  instead of `git checkout` or `git stash`.
